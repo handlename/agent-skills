@@ -573,7 +573,175 @@ pre {
   .card { border: 1px solid #999; }
   .badge { border: 1px solid currentColor; }
   a { color: inherit; text-decoration: none; }
-  .doc-footer { border-top: 1px solid #000; }
+
+/* ── Review Mode UI ── */
+.review-toggle-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+.review-mode-btn {
+  background: var(--color-purple);
+  color: #fff;
+  border: none;
+  border-radius: 30px;
+  padding: 10px 20px;
+  font-weight: bold;
+  font-size: 0.875rem;
+  box-shadow: 0 4px 12px rgba(112, 72, 198, 0.4);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: transform 0.2s, background 0.2s;
+}
+.review-mode-btn:hover {
+  background: #5b37ab;
+  transform: translateY(-2px);
+}
+.review-mode-btn.active {
+  background: var(--color-danger);
+  box-shadow: 0 4px 12px rgba(224, 49, 49, 0.4);
+}
+.review-drawer {
+  position: fixed;
+  bottom: 80px;
+  right: 20px;
+  width: 320px;
+  max-height: 400px;
+  background: #fff;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  z-index: 10000;
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+}
+.review-drawer-header {
+  background: var(--color-surface);
+  padding: 12px 16px;
+  font-weight: 600;
+  font-size: 0.875rem;
+  border-bottom: 1px solid var(--color-border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.review-drawer-body {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.review-comment-card {
+  background: #fff9db;
+  border: 1px solid #ffe3e3;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  position: relative;
+}
+.review-comment-card-delete {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  font-size: 0.875rem;
+  cursor: pointer;
+  color: var(--color-text-muted);
+}
+.review-comment-card-delete:hover {
+  color: var(--color-danger);
+}
+.review-drawer-footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+.review-submit-btn {
+  width: 100%;
+  background: var(--color-primary);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.review-submit-btn:hover {
+  background: var(--color-primary-dark);
+}
+
+/* Hover annotation styles */
+body.review-mode-enabled .doc-main *:not(pre):not(code):not(ol):not(ul):not(span):not(a):not(figcaption):not(figure):hover {
+  outline: 2px dashed var(--color-purple);
+  outline-offset: 4px;
+  cursor: pointer;
+}
+.comment-bubble-trigger {
+  position: absolute;
+  right: -30px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--color-purple);
+  color: #fff;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+}
+
+.review-input-panel {
+  background: var(--color-purple-light);
+  border-left: 3px solid var(--color-purple);
+  padding: 12px;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  margin: 10px 0;
+  font-size: 0.8125rem;
+}
+.review-input-panel textarea {
+  width: 100%;
+  height: 60px;
+  padding: 8px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-xs);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  margin-bottom: 8px;
+  resize: vertical;
+}
+.review-input-panel-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.review-btn {
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: 1px solid var(--color-border-strong);
+  background: #fff;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+.review-btn-save {
+  background: var(--color-purple);
+  color: #fff;
+  border-color: var(--color-purple);
 }
 </style>
 </head>
@@ -1120,6 +1288,198 @@ graph LR
     }
     window.addEventListener('scroll', onScroll, { passive: true });
     onScroll();
+  })();
+</script>
+
+<!-- ============================
+     REVIEW MODE SCRIPT
+     ============================ -->
+<script>
+  (function() {
+    // Inject review drawer elements to body
+    const toggleContainer = document.createElement('div');
+    toggleContainer.className = 'review-toggle-container';
+    toggleContainer.innerHTML = `
+      <div class="review-drawer" id="reviewDrawer">
+        <div class="review-drawer-header">
+          <span>📝 指摘バッファ (0)</span>
+          <span style="cursor:pointer;font-size:1.125rem;" onclick="document.getElementById('reviewDrawer').style.display='none'">&times;</span>
+        </div>
+        <div class="review-drawer-body" id="reviewDrawerBody">
+          <p style="color:var(--color-text-muted);font-size:0.75rem;text-align:center;margin-top:20px;">仕様書をクリックして指摘を追加してください。</p>
+        </div>
+        <div class="review-drawer-footer">
+          <button class="review-submit-btn" id="submitFeedbackBtn" disabled>エージェントにフィードバックを直接送信</button>
+        </div>
+      </div>
+      <button class="review-mode-btn" id="reviewModeToggle">
+        <span id="reviewModeIcon">💬</span> <span id="reviewModeText">レビューモードを開始</span>
+      </button>
+    `;
+    document.body.appendChild(toggleContainer);
+
+    const toggleBtn = document.getElementById('reviewModeToggle');
+    const drawer = document.getElementById('reviewDrawer');
+    const drawerBody = document.getElementById('reviewDrawerBody');
+    const submitBtn = document.getElementById('submitFeedbackBtn');
+    let reviewMode = false;
+    let comments = [];
+
+    // Toggle Review Mode
+    toggleBtn.addEventListener('click', function() {
+      reviewMode = !reviewMode;
+      document.body.classList.toggle('review-mode-enabled', reviewMode);
+      toggleBtn.classList.toggle('active', reviewMode);
+      
+      if (reviewMode) {
+        document.getElementById('reviewModeIcon').textContent = '⏹️';
+        document.getElementById('reviewModeText').textContent = 'レビューを終了';
+        drawer.style.display = 'flex';
+      } else {
+        document.getElementById('reviewModeIcon').textContent = '💬';
+        document.getElementById('reviewModeText').textContent = 'レビューモードを開始';
+        drawer.style.display = 'none';
+        
+        // Remove any open input panels
+        document.querySelectorAll('.review-input-panel').forEach(p => p.remove());
+      }
+    });
+
+    // Handle clicking elements inside document to add review comments
+    const mainContent = document.querySelector('.doc-main');
+    mainContent.addEventListener('click', function(e) {
+      if (!reviewMode) return;
+      
+      // Avoid triggering on already created review elements or buttons
+      if (e.target.closest('.review-input-panel') || e.target.closest('.comment-bubble-trigger') || e.target.closest('button') || e.target.closest('a')) return;
+
+      // Find the closest hoverable semantic target
+      const target = e.target.closest('p, h2, h3, tr, li, pre, figure');
+      if (!target || !mainContent.contains(target)) return;
+
+      // Check if this target already has an input panel open
+      if (target.nextElementSibling && target.nextElementSibling.classList.contains('review-input-panel')) {
+        return;
+      }
+
+      // Create inline comment input panel
+      const inputPanel = document.createElement('div');
+      inputPanel.className = 'review-input-panel';
+      
+      // Try to determine a friendly identifier / label for context
+      let contextLabel = target.tagName;
+      if (target.tagName.startsWith('H')) {
+        contextLabel = '見出し: "' + target.textContent.trim() + '"';
+      } else if (target.tagName === 'TR') {
+        const firstCell = target.querySelector('td, th');
+        contextLabel = 'テーブル行: ' + (firstCell ? firstCell.textContent.trim() : '');
+      } else {
+        contextLabel = target.tagName + ': "' + target.textContent.trim().substring(0, 30) + '..."';
+      }
+
+      inputPanel.innerHTML = `
+        <div style="font-weight:600;margin-bottom:6px;color:var(--color-purple)">指摘対象: ${contextLabel}</div>
+        <textarea placeholder="エージェントへの具体的な修正指示や要望を入力してください..."></textarea>
+        <div class="review-input-panel-actions">
+          <button class="review-btn" onclick="this.closest('.review-input-panel').remove()">キャンセル</button>
+          <button class="review-btn review-btn-save">保存</button>
+        </div>
+      `;
+
+      // Insert immediately after target
+      target.parentNode.insertBefore(inputPanel, target.nextSibling);
+
+      // Handle Save click
+      const saveBtn = inputPanel.querySelector('.review-btn-save');
+      const textarea = inputPanel.querySelector('textarea');
+      textarea.focus();
+
+      saveBtn.addEventListener('click', function() {
+        const text = textarea.value.trim();
+        if (text) {
+          addComment(contextLabel, text);
+        }
+        inputPanel.remove();
+      });
+    });
+
+    function addComment(context, text) {
+      const id = Date.now().toString();
+      comments.push({ id, context, text });
+      renderComments();
+    }
+
+    window.deleteComment = function(id) {
+      comments = comments.filter(c => c.id !== id);
+      renderComments();
+    };
+
+    function renderComments() {
+      document.querySelector('#reviewDrawer .review-drawer-header span').textContent = `📝 指摘バッファ (${comments.length})`;
+      
+      if (comments.length === 0) {
+        drawerBody.innerHTML = `
+          <p style="color:var(--color-text-muted);font-size:0.75rem;text-align:center;margin-top:20px;">仕様書をクリックして指摘を追加してください。</p>
+        `;
+        submitBtn.disabled = true;
+        return;
+      }
+
+      drawerBody.innerHTML = comments.map(c => `
+        <div class="review-comment-card">
+          <span class="review-comment-card-delete" onclick="deleteComment('${c.id}')">&times;</span>
+          <div style="font-weight:bold;color:var(--color-purple);margin-bottom:2px;">[${c.context}]</div>
+          <div>${c.text}</div>
+        </div>
+      `).join('');
+      submitBtn.disabled = false;
+    }
+
+    // Submit Feedback to local server API
+    submitBtn.addEventListener('click', function() {
+      submitBtn.disabled = true;
+      submitBtn.textContent = '送信中...';
+
+      fetch('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ comments: comments })
+      })
+      .then(res => {
+        if (!res.ok) throw new Error('API failure');
+        return res.json();
+      })
+      .then(data => {
+        if (data.status === 'ok') {
+          // Success Modal Overlay
+          const modal = document.createElement('div');
+          modal.setAttribute('style', 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:99999;display:flex;align-items:center;justify-content:center;color:#fff;font-family:sans-serif;text-align:center;padding:20px;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);');
+          modal.innerHTML = `
+            <div style="background:#fff;color:#111;padding:40px;border-radius:12px;max-width:480px;box-shadow:0 10px 30px rgba(0,0,0,0.25);">
+              <div style="font-size:3rem;margin-bottom:15px;">🚀</div>
+              <h3 style="font-size:1.5rem;font-weight:bold;margin-bottom:10px;color:var(--color-success)">エージェントへ送信完了！</h3>
+              <p style="font-size:0.9rem;color:var(--color-text-secondary);line-height:1.6;margin-bottom:25px;">
+                入力されたすべてのレビュー指摘が、直接エージェント（AI）へ送信されました。<br>
+                <strong>このブラウザタブを閉じ、ターミナルに戻ってください。</strong><br>
+                エージェントが自動で仕様書を書き換えます。
+              </p>
+              <button onclick="window.close()" style="background:var(--color-primary);color:#fff;border:none;padding:10px 24px;font-size:0.875rem;font-weight:bold;border-radius:6px;cursor:pointer;">タブを閉じる</button>
+            </div>
+          `;
+          document.body.appendChild(modal);
+        } else {
+          alert('エラーが発生しました。エージェントとの接続を確認してください。');
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'エージェントにフィードバックを直接送信';
+        }
+      })
+      .catch(err => {
+        console.error(err);
+        alert('接続エラー: ローカルのレビュー用フィードバックサーバーと通信できませんでした。ターミナルでサーバーが稼働しているかご確認ください。');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'エージェントにフィードバックを直接送信';
+      });
+    });
   })();
 </script>
 </body>

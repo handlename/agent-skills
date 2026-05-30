@@ -55,14 +55,24 @@ Using the exact CSS and basic HTML structure from `skills/spec-to-readable-html/
 - Write the fully rendered, self-contained HTML buffer in a single write operation to avoid file corruption.
 - Save the file in the same directory as the input spec file, with the `.html` extension (e.g., if the input is `docs/prd.md`, write `docs/prd.html`).
 
-### 5. Display Graphically (Open in Browser)
-- Immediately open the generated HTML file in the user's default web browser so they can view it graphically.
-- On macOS, execute:
+### 5. Start Review Server & Open Browser
+- Launch the background feedback server `spec-server.py` on a random free port (e.g., 5500) using a command:
   ```bash
-  open path/to/generated.html
+  python3 skills/spec-to-readable-html/scripts/spec-server.py path/to/generated.html 5500
   ```
-- If running on another platform, use the appropriate command (`xdg-open` on Linux, `start` on Windows) or instruct the user to open the file.
-- Provide a clickable absolute path to the file in your response.
+- Make sure to launch it as a background task.
+- Immediately open the server URL in the user's default browser so they can view and review it graphically:
+  - On macOS, execute:
+    ```bash
+    open http://localhost:5500
+    ```
+- Stop calling tools and wait for the user to submit feedback. The system will automatically notify you with a message when the background server exits (indicating feedback has been received).
+
+### 6. Process Feedback & Auto-Modify
+- Once the background process terminates, locate and read the JSON feedback file saved at `path/to/generated-feedback.json`.
+- Parse the comments array.
+- Automatically modify the source spec Markdown file to address all the listed review comments.
+- Re-generate the HTML spec file, restart the server, and notify the user of the updates! This creates a seamless, self-contained spec-review loop.
 
 ---
 
@@ -75,9 +85,7 @@ Verify the output before completing the task:
    - [ ] Ensure that every Mermaid block has a descriptive `<figcaption>`.
    - [ ] Confirm all assumptions or inferred specifications are explicitly marked with `Inferred` or `Assumption` badges.
 
-2. **Standalone Operations**:
-   - [ ] Verify that the generated HTML file is fully self-contained (all CSS is embedded, no local asset dependencies unless absolute).
-   - [ ] Double-check that all links in the Sidebar table of contents navigate correctly to their corresponding sections.
-
-3. **Graphic Launch Status**:
-   - [ ] Confirm the browser launched successfully and displays the spec visually.
+2. **Server and Feedback Integration**:
+   - [ ] Confirm the background server runs on a free port and serves the document.
+   - [ ] Verify the HTML contains the review toggle button and the floating panel at the bottom right.
+   - [ ] Ensure feedback is parsed and applied back to the spec file automatically.
