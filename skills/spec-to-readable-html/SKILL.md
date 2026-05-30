@@ -25,67 +25,49 @@ Trigger this skill whenever the user:
 
 Follow these instructions systematically to process a target specification file.
 
-### 1. Resolve Target and Assets
-- Locate the input file specified by the user.
-- Locate the base template and component guide within the skill folder:
-  - **Template HTML**: `skills/spec-to-readable-html/references/template.html`
-  - **Component Guide**: `skills/spec-to-readable-html/references/html-output-template.md`
-- Read both support files to understand the design tokens, visual rules, and available CSS classes.
+### 1. Optimize Context Using Sub-agents (Highly Recommended)
+Because the HTML template and rendering assets contain significant styling overhead (~50KB+), offload the rendering and HTTP server lifecycle tasks to a specialized sub-agent (e.g. `self` or a custom sub-agent) using `invoke_subagent`. This prevents the parent agent's context window from being cluttered:
+- Launch a sub-agent with a clear prompt: *"Compile this Markdown specification file to HTML, launch the review server on a free port, and open it in the browser."*
+- Wait for the sub-agent to finish and return the structured JSON feedback array (`{comments: [...]}`) back to your main session.
 
-### 2. Analyze the Specification
-Determine the following metadata and structure from the source document:
-- **Language**: Dynamically match the language of the conversation context or target user query. For example, if the user interacts with you in English, generate the HTML in English (`<html lang="en">`). If the user interacts in Japanese, generate it in Japanese (`<html lang="ja">`). If the conversation language is unclear, align the HTML language with the predominant language used in the input specification file itself. Keep code parameters, API endpoints, and technical terms in their original form regardless.
-- **Document Type**: Is it a PRD, API Spec, ER Design, System Architecture, or QA Checklist?
-- **Audience**: Mixed business and engineering (standard default).
-- **Core Entities and Workflows**: Identify what diagrams are needed (Flowcharts, ERDs, Sequence Diagrams, State Diagrams). Refer to the decision guide inside the template/guide.
+### 2. Compile Markdown to Interactive HTML
+To compile any raw Markdown specification, execute the included high-performance, automated render utility. Do NOT attempt to manually rewrite the HTML body or load the template directly into your context:
+```bash
+python3 skills/spec-to-readable-html/scripts/render.py <path_to_markdown_spec>
+```
+This script automatically performs the following actions:
+- Parses title and YAML frontmatter metadata dynamically.
+- Resolves the output folder based on `.gitignore` dynamically (FR-010). It automatically searches for Git-ignored folders (e.g., `dist/`, `build/`, `tmp/`) to place the HTML. If none are found, it falls back to creating and using a `tmp/` folder.
+- Injects CSS styles, responsive sidebars, interactive Mermaid diagram containers, styled callouts, data grid tables, and badging.
+- Embeds the premium **Google Docs / Notion style Gutter review UI** featuring auto-resizing textareas (FR-012) and `Cmd + Enter` quick keyboard submission shortcuts (FR-013).
 
-### 3. Generate HTML
-Using the exact CSS and basic HTML structure from `skills/spec-to-readable-html/references/template.html`, build the output by replacing placeholder tokens like `{{TITLE}}`, `{{EXECUTIVE_SUMMARY}}`, etc., with analyzed contents:
-- **Header**: Write a clear title, subtitle, document version, generation date, and target audience.
-- **Table of Contents Sidebar**: Build anchor links corresponding to all sections (`<h2>` and `<h3>` tags) to enable fast scrolling.
-- **Executive Summary**: Write a 2-paragraph overview and build the **Summary Cards grid** for quantitative facts (e.g., number of requirements, workflows, unresolved issues).
-- **Glossary Grid**: Transform domain terms, abbreviations, and acronyms into card items.
-- **Workflows**: Insert **Mermaid diagrams** within `<figure class="diagram-container">` blocks with zoom capability. Use flowcharts for user journeys, sequences for API flows, ERDs for databases, and state diagrams for lifecycles.
-- **Requirements & Tables**: Group requirements using `.spec-table` classes. Always use priority badges (`.badge-must`, `.badge-should`, `.badge-could`) and status badges (`.badge-confirmed`, `.badge-inferred`, `.badge-assumption`).
-- **Risks & Open Questions**: Display critical risks in colored cards (`.risk-card--high`, etc.) and list unanswered questions clearly using `.question-list`.
-- **Directory Tree**: If the spec defines code structure, format it with `.tree-view` styling (do not wrap in `<pre>` tags).
-- **Source Traceability**: Include the traceability grid in the Appendix, mapping each output section back to the source document and treatment type (Preserved, Summarized, Inferred).
+### 3. Launch Local Review Server
+Once the HTML is successfully rendered, start the local feedback server in the background:
+```bash
+python3 skills/spec-to-readable-html/scripts/spec-server.py <path_to_resolved_html> <port_number>
+```
+- Ensure the server runs on a loopback address (`127.0.0.1`) and binds to a clean, unoccupied port (e.g., `5555`).
+- Immediately launch the page in the browser (e.g., `open http://localhost:5555` on macOS).
+- Transition to an idle state (stop calling tools) and wait for the user to review the document and submit feedback. The server will write `{filename}-feedback.json` and cleanly terminate.
 
-### 4. Write the Output File
-- Write the fully rendered, self-contained HTML buffer in a single write operation to avoid file corruption.
-- Save the file in the same directory as the input spec file, with the `.html` extension (e.g., if the input is `docs/prd.md`, write `docs/prd.html`).
-
-### 5. Start Review Server & Open Browser
-- Launch the background feedback server `spec-server.py` on a random free port (e.g., 5500) using a command:
-  ```bash
-  python3 skills/spec-to-readable-html/scripts/spec-server.py path/to/generated.html 5500
-  ```
-- Make sure to launch it as a background task.
-- Immediately open the server URL in the user's default browser so they can view and review it graphically:
-  - On macOS, execute:
-    ```bash
-    open http://localhost:5500
-    ```
-- Stop calling tools and wait for the user to submit feedback. The system will automatically notify you with a message when the background server exits (indicating feedback has been received).
-
-### 6. Process Feedback & Auto-Modify
-- Once the background process terminates, locate and read the JSON feedback file saved at `path/to/generated-feedback.json`.
-- Parse the comments array.
-- Automatically modify the source spec Markdown file to address all the listed review comments.
-- Re-generate the HTML spec file, restart the server, and notify the user of the updates! This creates a seamless, self-contained spec-review loop.
+### 4. Process Feedback & Auto-Modify Spec
+- When the background task notifies you of a successful exit, read and parse the generated JSON feedback file.
+- Automatically modify the source spec Markdown file to incorporate all received block-level and global feedback remarks.
+- Re-compile the HTML using `render.py` and restart the server so the user can verify the resolved updates instantly.
 
 ---
 
 ## Verification
 
-Verify the output before completing the task:
+Before claiming completeness, verify these checkpoints:
 
-1. **Accessibility and Quality Checklist**:
-   - [ ] Verify that all text contrast is readable and uses semantic tags.
-   - [ ] Ensure that every Mermaid block has a descriptive `<figcaption>`.
-   - [ ] Confirm all assumptions or inferred specifications are explicitly marked with `Inferred` or `Assumption` badges.
+1. **Output Location**:
+   - [ ] Confirm the HTML file was written to a Git-ignored directory (e.g., `docs/superpowers/`, `tmp/`) and NOT the repository root.
 
-2. **Server and Feedback Integration**:
-   - [ ] Confirm the background server runs on a free port and serves the document.
-   - [ ] Verify the HTML contains the review toggle button and the floating panel at the bottom right.
-   - [ ] Ensure feedback is parsed and applied back to the spec file automatically.
+2. **Interactive Gutter Review features**:
+   - [ ] Confirm the sidebar includes the "✍️ 全体へのコメント / 提言" global feedback section.
+   - [ ] Verify both inline and global textareas auto-resize in height dynamically.
+   - [ ] Verify keyboard submission (`Cmd + Enter` / `Ctrl + Enter`) is fully operational.
+
+3. **Sub-agent Execution**:
+   - [ ] Verify that no huge HTML template content was loaded directly into your primary conversation history.

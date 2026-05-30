@@ -1,2 +1,3 @@
 # Ignore local agent specs and logs
 docs/superpowers/
+.superpowers/

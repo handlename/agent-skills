@@ -575,7 +575,8 @@ pre {
   a { color: inherit; text-decoration: none; }
 }
 
-/* ── Review Mode UI ── */
+
+/* ── Review Mode UI (Google Docs / Notion Style) ── */
 .review-toggle-container {
   position: fixed;
   bottom: 20px;
@@ -609,63 +610,71 @@ pre {
   background: var(--color-danger);
   box-shadow: 0 4px 12px rgba(224, 49, 49, 0.4);
 }
-.review-drawer {
-  position: fixed;
-  bottom: 80px;
-  right: 20px;
-  width: 320px;
-  max-height: 400px;
-  background: #fff;
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-md);
-  z-index: 10000;
-  display: none;
-  flex-direction: column;
-  overflow: hidden;
+
+.doc-layout.review-active {
+  grid-template-columns: var(--toc-width) 1fr 300px;
+  max-width: calc(var(--content-width) + var(--toc-width) + 300px + 6rem);
 }
-.review-drawer-header {
-  background: var(--color-surface);
-  padding: 12px 16px;
-  font-weight: 600;
-  font-size: 0.875rem;
-  border-bottom: 1px solid var(--color-border);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.review-drawer-body {
-  padding: 16px;
-  overflow-y: auto;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.review-comment-card {
-  background: #fff9db;
-  border: 1px solid #ffe3e3;
-  padding: 10px;
-  border-radius: var(--radius-sm);
-  font-size: 0.75rem;
+.review-gutter {
   position: relative;
+  width: 300px;
+  border-left: 1px solid var(--color-border);
+  padding-left: 1rem;
+  display: none;
 }
-.review-comment-card-delete {
+.doc-layout.review-active .review-gutter {
+  display: block;
+}
+
+/* Review cards in the right gutter */
+.review-card-gutter {
   position: absolute;
-  top: 4px;
-  right: 8px;
-  font-size: 0.875rem;
+  width: 280px;
+  background: var(--color-purple-light);
+  border: 1px solid var(--color-border-strong);
+  border-left: 4px solid var(--color-purple);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  font-size: 0.8125rem;
+  box-shadow: var(--shadow-sm);
+  transition: all 0.2s ease;
+  box-sizing: border-box;
+}
+.review-card-gutter.input-active {
+  background: #fff;
+  border-color: var(--color-primary);
+  border-left-color: var(--color-primary);
+  box-shadow: var(--shadow-md);
+}
+.review-card-gutter textarea {
+  width: 100%;
+  height: 70px;
+  padding: 6px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-xs);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  margin-top: 6px;
+  margin-bottom: 6px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.review-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.review-btn {
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: 1px solid var(--color-border-strong);
+  background: #fff;
+  border-radius: var(--radius-xs);
   cursor: pointer;
-  color: var(--color-text-muted);
 }
-.review-comment-card-delete:hover {
-  color: var(--color-danger);
-}
-.review-drawer-footer {
-  padding: 12px 16px;
-  border-top: 1px solid var(--color-border);
-  background: var(--color-surface);
-}
+
+/* Floating drawer buttons and comments list */
 .review-submit-btn {
   width: 100%;
   background: var(--color-primary);
@@ -678,71 +687,56 @@ pre {
   cursor: pointer;
   transition: background 0.15s;
 }
-.review-submit-btn:hover {
+.review-submit-btn:hover:not(:disabled) {
   background: var(--color-primary-dark);
 }
+.review-submit-btn:disabled {
+  background: var(--color-text-muted);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
 
-/* Hover annotation styles */
+/* Hover annotation outlines in Main doc */
 body.review-mode-enabled .doc-main *:not(pre):not(code):not(ol):not(ul):not(span):not(a):not(figcaption):not(figure):hover {
   outline: 2px dashed var(--color-purple);
   outline-offset: 4px;
   cursor: pointer;
 }
-.comment-bubble-trigger {
-  position: absolute;
-  right: -30px;
-  top: 50%;
-  transform: translateY(-50%);
-  background: var(--color-purple);
-  color: #fff;
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.75rem;
-  cursor: pointer;
-  box-shadow: var(--shadow-sm);
+.review-target-active {
+  outline: 3px solid var(--color-primary) !important;
+  outline-offset: 4px;
+  background: var(--color-primary-light) !important;
 }
 
-.review-input-panel {
-  background: var(--color-purple-light);
-  border-left: 3px solid var(--color-purple);
-  padding: 12px;
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  margin: 10px 0;
-  font-size: 0.8125rem;
+/* Responsive adjustment for review gutter */
+@media (max-width: 1200px) {
+  .doc-layout.review-active {
+    grid-template-columns: var(--toc-width) 1fr;
+  }
+  .review-gutter {
+    position: fixed;
+    bottom: 80px;
+    right: 20px;
+    width: 320px;
+    height: 400px;
+    background: #fff;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-md);
+    padding: 15px;
+    overflow: hidden;
+    z-index: 10000;
+  }
+  .review-card-gutter {
+    position: static !important;
+    width: 100%;
+    margin-bottom: 10px;
+  }
 }
-.review-input-panel textarea {
-  width: 100%;
-  height: 60px;
-  padding: 8px;
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-xs);
-  font-family: inherit;
-  font-size: 0.8125rem;
-  margin-bottom: 8px;
-  resize: vertical;
-}
-.review-input-panel-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-.review-btn {
-  padding: 4px 10px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  border: 1px solid var(--color-border-strong);
-  background: #fff;
-  border-radius: var(--radius-xs);
-  cursor: pointer;
-}
-.review-btn-save {
-  background: var(--color-purple);
-  color: #fff;
-  border-color: var(--color-purple);
+@media (max-width: 900px) {
+  .doc-layout.review-active {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
 </head>
@@ -1104,6 +1098,10 @@ graph LR
     </section>
 
   </main>
+  <!-- ============================
+       REVIEW GUTTER (Google Docs Style)
+       ============================ -->
+  <aside class="review-gutter" id="reviewGutter"></aside>
 </div>
 
 <!-- ============================
@@ -1293,81 +1291,121 @@ graph LR
 </script>
 
 <!-- ============================
-     REVIEW MODE SCRIPT
+     REVIEW MODE SCRIPT (Google Docs Style)
      ============================ -->
 <script>
   (function() {
-    // Inject review drawer elements to body
+    // Inject review mode toggle button
     const toggleContainer = document.createElement('div');
     toggleContainer.className = 'review-toggle-container';
     toggleContainer.innerHTML = `
-      <div class="review-drawer" id="reviewDrawer">
-        <div class="review-drawer-header">
-          <span>📝 指摘バッファ (0)</span>
-          <span style="cursor:pointer;font-size:1.125rem;" onclick="document.getElementById('reviewDrawer').style.display='none'">&times;</span>
-        </div>
-        <div class="review-drawer-body" id="reviewDrawerBody">
-          <p style="color:var(--color-text-muted);font-size:0.75rem;text-align:center;margin-top:20px;">仕様書をクリックして指摘を追加してください。</p>
-        </div>
-        <div class="review-drawer-footer">
-          <button class="review-submit-btn" id="submitFeedbackBtn" disabled>エージェントにフィードバックを直接送信</button>
-        </div>
-      </div>
       <button class="review-mode-btn" id="reviewModeToggle">
         <span id="reviewModeIcon">💬</span> <span id="reviewModeText">レビューモードを開始</span>
       </button>
     `;
     document.body.appendChild(toggleContainer);
 
+    const gutter = document.getElementById('reviewGutter');
+    // Set up Gutter Header, Global Feedback Input, and list container (FR-011)
+    gutter.innerHTML = `
+      <div style="position: sticky; top: 1.5rem; display: flex; flex-direction: column; gap: 10px; height: calc(100vh - 3rem); overflow: hidden;">
+        <div style="font-weight: 700; font-size: 0.8125rem; border-bottom: 2px solid var(--color-purple); padding-bottom: 8px; color: var(--color-text); text-transform: uppercase; letter-spacing: 0.06em; display:flex; justify-content:space-between; align-items:center;">
+          <span>📝 レビュー指摘 (<span id="gutterCount">0</span>)</span>
+        </div>
+        
+        <!-- 全体へのコメント入力欄 (FR-011) -->
+        <div style="background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: 10px; display: flex; flex-direction: column; gap: 6px; box-sizing: border-box;">
+          <div style="font-weight: 700; font-size: 0.75rem; color: var(--color-text);">✍️ 全体へのコメント / 提言</div>
+          <textarea id="globalCommentInput" placeholder="ドキュメント全体の方向性や、一般的な指摘を入力..." style="width: 100%; height: 55px; padding: 6px; border: 1px solid var(--color-border-strong); border-radius: var(--radius-xs); font-family: inherit; font-size: 0.75rem; resize: none; box-sizing: border-box;"></textarea>
+          <button id="addGlobalCommentBtn" style="align-self: flex-end; padding: 4px 10px; font-size: 0.75rem; font-weight: 600; border: none; background: var(--color-purple); color: #fff; border-radius: var(--radius-xs); cursor: pointer; transition: background 0.15s;">追加</button>
+        </div>
+
+        <button class="review-submit-btn" id="submitFeedbackBtn" disabled style="background: var(--color-purple); font-weight: bold; border-radius: 6px; padding: 10px;">エージェントに送信</button>
+        <div id="gutterCommentsList" style="flex: 1; overflow-y: auto; display:flex; flex-direction:column; gap: 10px; padding-right: 5px; padding-top: 5px;">
+          <p style="color:var(--color-text-muted);font-size:0.75rem;text-align:center;margin-top:20px;">文章をクリックして指摘を追加してください。</p>
+        </div>
+      </div>
+    `;
+
     const toggleBtn = document.getElementById('reviewModeToggle');
-    const drawer = document.getElementById('reviewDrawer');
-    const drawerBody = document.getElementById('reviewDrawerBody');
+    const gutterList = document.getElementById('gutterCommentsList');
+    const gutterCount = document.getElementById('gutterCount');
     const submitBtn = document.getElementById('submitFeedbackBtn');
+    const globalInput = document.getElementById('globalCommentInput');
+    const addGlobalBtn = document.getElementById('addGlobalCommentBtn');
     let reviewMode = false;
     let comments = [];
+
+    // Auto-resize for global input (FR-012)
+    globalInput.addEventListener('input', function() {
+      this.style.height = 'auto';
+      this.style.height = this.scrollHeight + 'px';
+    });
+
+    // Cmd+Enter shortcut for global input (FR-013)
+    globalInput.addEventListener('keydown', function(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        addGlobalBtn.click();
+      }
+    });
+
+    // Add Global Comment Event (FR-011)
+    addGlobalBtn.addEventListener('click', function() {
+      const text = globalInput.value.trim();
+      if (text) {
+        addComment(null, '全体への指摘', text);
+        globalInput.value = '';
+        globalInput.style.height = '55px'; // Reset height
+      }
+    });
 
     // Toggle Review Mode
     toggleBtn.addEventListener('click', function() {
       reviewMode = !reviewMode;
       document.body.classList.toggle('review-mode-enabled', reviewMode);
+      document.querySelector('.doc-layout').classList.toggle('review-active', reviewMode);
       toggleBtn.classList.toggle('active', reviewMode);
       
       if (reviewMode) {
         document.getElementById('reviewModeIcon').textContent = '⏹️';
         document.getElementById('reviewModeText').textContent = 'レビューを終了';
-        drawer.style.display = 'flex';
       } else {
         document.getElementById('reviewModeIcon').textContent = '💬';
         document.getElementById('reviewModeText').textContent = 'レビューモードを開始';
-        drawer.style.display = 'none';
-        
-        // Remove any open input panels
-        document.querySelectorAll('.review-input-panel').forEach(p => p.remove());
+        // Remove any open floating inputs
+        document.querySelectorAll('.review-card-gutter.input-active').forEach(p => p.remove());
       }
     });
 
-    // Handle clicking elements inside document to add review comments
+    // Handle clicking elements inside main document
     const mainContent = document.querySelector('.doc-main');
     mainContent.addEventListener('click', function(e) {
       if (!reviewMode) return;
       
-      // Avoid triggering on already created review elements or buttons
-      if (e.target.closest('.review-input-panel') || e.target.closest('.comment-bubble-trigger') || e.target.closest('button') || e.target.closest('a')) return;
+      // Avoid triggering on already active elements, links, buttons
+      if (e.target.closest('.review-card-gutter') || e.target.closest('button') || e.target.closest('a')) return;
 
-      // Find the closest hoverable semantic target
       const target = e.target.closest('p, h2, h3, tr, li, pre, figure');
       if (!target || !mainContent.contains(target)) return;
 
-      // Check if this target already has an input panel open
-      if (target.nextElementSibling && target.nextElementSibling.classList.contains('review-input-panel')) {
-        return;
+      // Highlight target temporarily
+      document.querySelectorAll('.review-target-active').forEach(el => el.classList.remove('review-target-active'));
+      target.classList.add('review-target-active');
+
+      // Calculate vertical offsetTop relative to .doc-layout
+      let offsetTop = 0;
+      let curr = target;
+      const layout = document.querySelector('.doc-layout');
+      while (curr && curr !== layout) {
+        offsetTop += curr.offsetTop || 0;
+        curr = curr.offsetParent;
       }
 
-      // Create inline comment input panel
-      const inputPanel = document.createElement('div');
-      inputPanel.className = 'review-input-panel';
-      
-      // Try to determine a friendly identifier / label for context
+      // Remove any previously open input forms
+      document.querySelectorAll('.review-card-gutter.input-active').forEach(p => p.remove());
+
+      // Try to determine friendly label
       let contextLabel = target.tagName;
       if (target.tagName.startsWith('H')) {
         contextLabel = '見出し: "' + target.textContent.trim() + '"';
@@ -1375,66 +1413,122 @@ graph LR
         const firstCell = target.querySelector('td, th');
         contextLabel = 'テーブル行: ' + (firstCell ? firstCell.textContent.trim() : '');
       } else {
-        contextLabel = target.tagName + ': "' + target.textContent.trim().substring(0, 30) + '..."';
+        contextLabel = target.tagName + ': "' + target.textContent.trim().substring(0, 20) + '..."';
       }
 
-      inputPanel.innerHTML = `
-        <div style="font-weight:600;margin-bottom:6px;color:var(--color-purple)">指摘対象: ${contextLabel}</div>
-        <textarea placeholder="エージェントへの具体的な修正指示や要望を入力してください..."></textarea>
-        <div class="review-input-panel-actions">
-          <button class="review-btn" onclick="this.closest('.review-input-panel').remove()">キャンセル</button>
-          <button class="review-btn review-btn-save">保存</button>
+      // Create floating input card in gutter positioned at offsetTop
+      const inputCard = document.createElement('div');
+      inputCard.className = 'review-card-gutter input-active';
+      inputCard.style.position = 'absolute';
+      inputCard.style.top = offsetTop + 'px';
+      inputCard.style.zIndex = '9999';
+
+      inputCard.innerHTML = `
+        <div style="font-weight:700;color:var(--color-primary);font-size:0.75rem;">指摘の入力: ${contextLabel}</div>
+        <textarea placeholder="修正指示を入力してください..." style="overflow-y:hidden;"></textarea>
+        <div class="review-card-actions">
+          <button class="review-btn" id="cancelReviewBtn" style="padding: 2px 6px;">キャンセル</button>
+          <button class="review-btn review-btn-save" id="saveReviewBtn" style="padding: 2px 8px; background:var(--color-primary); color:#fff; border-color:var(--color-primary);">保存</button>
         </div>
       `;
 
-      // Insert immediately after target
-      target.parentNode.insertBefore(inputPanel, target.nextSibling);
+      gutter.appendChild(inputCard);
 
-      // Handle Save click
-      const saveBtn = inputPanel.querySelector('.review-btn-save');
-      const textarea = inputPanel.querySelector('textarea');
+      const textarea = inputCard.querySelector('textarea');
       textarea.focus();
+
+      // Auto-resize for inline input (FR-012)
+      textarea.addEventListener('input', function() {
+        this.style.height = 'auto';
+        this.style.height = this.scrollHeight + 'px';
+      });
+
+      const saveBtn = inputCard.querySelector('#saveReviewBtn');
+
+      // Cmd+Enter shortcut for inline input (FR-013)
+      textarea.addEventListener('keydown', function(e) {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+          e.preventDefault();
+          saveBtn.click();
+        }
+      });
+
+      inputCard.querySelector('#cancelReviewBtn').addEventListener('click', function() {
+        inputCard.remove();
+        target.classList.remove('review-target-active');
+      });
 
       saveBtn.addEventListener('click', function() {
         const text = textarea.value.trim();
         if (text) {
-          addComment(contextLabel, text);
+          addComment(target, contextLabel, text);
         }
-        inputPanel.remove();
+        inputCard.remove();
+        target.classList.remove('review-target-active');
       });
     });
 
-    function addComment(context, text) {
-      const id = Date.now().toString();
-      comments.push({ id, context, text });
+    // Reference targets to map back
+    let targetIndex = 0;
+    function addComment(targetElement, context, text) {
+      const id = 'comment-' + targetIndex++;
+      
+      // Add reference class to the target element so we can link them if it exists
+      if (targetElement) {
+        targetElement.classList.add(id);
+      }
+      
+      comments.push({
+        id: id,
+        context: context,
+        text: text
+      });
       renderComments();
     }
 
     window.deleteComment = function(id) {
+      // Remove class from target element if it exists
+      const targetElement = document.querySelector('.' + id);
+      if (targetElement) targetElement.classList.remove(id);
+
       comments = comments.filter(c => c.id !== id);
       renderComments();
     };
 
     function renderComments() {
-      document.querySelector('#reviewDrawer .review-drawer-header span').textContent = `📝 指摘バッファ (${comments.length})`;
-      
+      gutterCount.textContent = comments.length;
+
       if (comments.length === 0) {
-        drawerBody.innerHTML = `
-          <p style="color:var(--color-text-muted);font-size:0.75rem;text-align:center;margin-top:20px;">仕様書をクリックして指摘を追加してください。</p>
+        gutterList.innerHTML = `
+          <p style="color:var(--color-text-muted);font-size:0.75rem;text-align:center;margin-top:20px;">文章をクリックして指摘を追加してください。</p>
         `;
         submitBtn.disabled = true;
         return;
       }
 
-      drawerBody.innerHTML = comments.map(c => `
-        <div class="review-comment-card">
-          <span class="review-comment-card-delete" onclick="deleteComment('${c.id}')">&times;</span>
-          <div style="font-weight:bold;color:var(--color-purple);margin-bottom:2px;">[${c.context}]</div>
-          <div>${c.text}</div>
+      gutterList.innerHTML = comments.map(c => `
+        <div class="review-comment-card" id="card-${c.id}" onmouseenter="highlightTarget('${c.id}', true)" onmouseleave="highlightTarget('${c.id}', false)" style="background:#fff9db;border:1px solid #ffe8cc;box-shadow:var(--shadow-sm);transition:all 0.15s;padding:10px;margin-bottom:8px;position:relative;">
+          <span class="review-comment-card-delete" onclick="deleteComment('${c.id}')" style="position:absolute;top:4px;right:8px;cursor:pointer;">&times;</span>
+          <div style="font-weight:700;color:var(--color-purple);margin-bottom:3px;font-size:0.75rem;">[${c.context}]</div>
+          <div style="font-size:0.8rem;line-height:1.4;">${c.text}</div>
         </div>
       `).join('');
       submitBtn.disabled = false;
     }
+
+    window.highlightTarget = function(classId, isHighlight) {
+      const target = document.querySelector('.' + classId);
+      if (target) {
+        if (isHighlight) {
+          target.style.outline = '3px dashed var(--color-purple)';
+          target.style.outlineOffset = '4px';
+          target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } else {
+          target.style.outline = '';
+          target.style.outlineOffset = '';
+        }
+      }
+    };
 
     // Submit Feedback to local server API
     submitBtn.addEventListener('click', function() {
@@ -1471,12 +1565,12 @@ graph LR
         } else {
           alert('エラーが発生しました。エージェントとの接続を確認してください。');
           submitBtn.disabled = false;
-          submitBtn.textContent = 'エージェントにフィードバックを直接送信';
+          submitBtn.textContent = 'エージェントに送信';
         }
       })
       .catch(err => {
         console.error(err);
-        alert('接続エラー: ローカルのレビュー用フィードバックサーバーと通信できませんでした。ターミナルでサーバーが稼働しているかご確認ください。');
+        alert('接続エラー: ローカルのレビュー用フィードバックサーバーと通信できませんでした。');
         submitBtn.disabled = false;
         submitBtn.textContent = 'エージェントにフィードバックを直接送信';
       });
