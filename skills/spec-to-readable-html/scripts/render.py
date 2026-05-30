@@ -69,7 +69,7 @@ def md_to_html_components(content):
         html_table += '</tbody>\n</table>'
         return html_table
         
-    table_pattern = r'(?:^\|[^\n]+\|\s*\n)(?:^\|[ :---|-]+\|\s*\n)(?:^\|[^\n]+\|\s*\n?)+'
+    table_pattern = r'(?:^\|[^\n]+\|\s*\n)(?:^\|[-:| ]+\|\s*\n)(?:^\|[^\n]+\|\s*\n?)+'
     content = re.sub(table_pattern, repl_table, content, flags=re.MULTILINE)
     
     # Convert simple callouts
