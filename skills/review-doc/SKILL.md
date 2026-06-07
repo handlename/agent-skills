@@ -1,9 +1,9 @@
 ---
-name: spec-to-readable-html
+name: review-doc
 description: Convert specification documents or Markdown notes into highly structured, graphical HTML reports and open them in the default browser.
 ---
 
-# Spec to Readable HTML
+# Review Doc
 
 Convert specification documents, requirements, API specs, PRDs, technical designs, or Markdown notes into beautiful, highly structured, and interactive graphical HTML documents, and open them instantly in the browser.
 
@@ -15,7 +15,7 @@ Markdown specifications are highly functional for AI development but can be dens
 
 Trigger this skill whenever the user:
 - Asks to "convert a spec to HTML", "make a spec readable", or "display a spec graphically".
-- Mentions a Zenn article or refers to the "spec-to-readable-html" skill.
+- Mentions a Zenn article or refers to the "review-doc" skill.
 - Wants a visual way to review product specs, PRDs, API schemas, database ER designs, or system flows.
 - Requests a "web-based spec sheet" or "interactive design document".
 
