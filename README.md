@@ -6,8 +6,11 @@ A personal collection of custom AI Agent Skills compatible with `gh skill instal
 
 | Skill Name | Description | Installation Command | Compatible Agents |
 | :--- | :--- | :--- | :--- |
+| `commit-it` | Commit changes following the Conventional Commits specification, verifying test passage first. | `gh skill install handlename/agent-skills commit-it` | Claude Code, Copilot, Gemini CLI, Cursor |
+| `create-pr` | Create a Pull Request from the current branch to a base branch, using GitHub CLI to generate a suitable title and description from the commit history. | `gh skill install handlename/agent-skills create-pr` | Claude Code, Copilot, Gemini CLI, Cursor |
 | `hello-world` | A simple verification skill to test GitHub CLI skill installation and agent integration. | `gh skill install handlename/agent-skills hello-world` | Claude Code, Copilot, Gemini CLI, Cursor |
 | `spec-to-readable-html` | Convert specification documents or Markdown notes into highly structured, graphical HTML reports and open them in the default browser. | `gh skill install handlename/agent-skills spec-to-readable-html` | Claude Code, Copilot, Gemini CLI, Cursor |
+
 
 ## Installation
 
