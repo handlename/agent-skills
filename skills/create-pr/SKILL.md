@@ -8,6 +8,8 @@ metadata:
 
 # Create Pull Request Skill
 
+## Overview
+
 Create a Pull Request from the current branch to a specified base branch. Use the GitHub CLI (`gh`) to automatically generate a suitable title and description from the commit history.
 
 ## Instructions
@@ -39,7 +41,7 @@ Parse `$ARGUMENTS` as follows:
 
 ---
 
-## Completion Criteria
+## Verification
 
 - The PR is successfully created and its URL is retrieved.
 - The PR details (title, description summary, URL) are reported to the user.
@@ -59,7 +61,7 @@ Match the language used in the PR title and description to the language used in 
 CURRENT_BRANCH=$(git branch --show-current)
 
 # Determine the base branch
-BASE_BRANCH=${specified_value:-$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')}
+BASE_BRANCH=${BASE_BRANCH_OPTION:-$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')}
 
 # Check for same branch
 [ "$CURRENT_BRANCH" = "$BASE_BRANCH" ] && echo "ERROR: Same branch"
