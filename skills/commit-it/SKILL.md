@@ -28,7 +28,7 @@ Execute the following tasks. If you determine that multiple tasks can proceed in
 
 ## Verification
 
-Continue working until the completion criteria or the interruption conditions described below are met:
+Continue working until the completion criteria described below are met:
 - The commit is successfully completed with an appropriate commit message.
 - All related tests passed (if tests exist).
 
