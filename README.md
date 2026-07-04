@@ -13,6 +13,14 @@ A personal collection of custom AI Agent Skills compatible with `gh skill instal
 | `review-doc` | Convert specification documents or Markdown notes into highly structured, graphical HTML reports and open them in the default browser. | `gh skill install handlename/agent-skills review-doc` | Claude Code, Copilot, Gemini CLI, Cursor |
 
 
+## Plugins
+
+This repository is also a [Claude Code plugin marketplace](https://code.claude.com/docs/en/plugin-marketplaces).
+
+| Plugin Name | Description | Installation Command |
+| :--- | :--- | :--- |
+| `worktree-setup` | Copies untracked files declared in `.worktreeinclude` / `.worktreeinclude.local` from the main git worktree into linked worktrees at session start (SessionStart hook). See [plugins/worktree-setup](plugins/worktree-setup/README.md). | `claude plugin marketplace add handlename/agent-skills && claude plugin install worktree-setup@handlename` |
+
 ## Installation
 
 To install a skill from this repository, run the following command using the GitHub CLI:

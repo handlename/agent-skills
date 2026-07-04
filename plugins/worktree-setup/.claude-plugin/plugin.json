@@ -1,0 +1,12 @@
+{
+  "name": "worktree-setup",
+  "displayName": "Worktree Setup",
+  "version": "0.1.0",
+  "description": "Copies untracked files declared in .worktreeinclude / .worktreeinclude.local from the main git worktree into linked worktrees at session start",
+  "author": {
+    "name": "NAGATA Hiroaki"
+  },
+  "repository": "https://github.com/handlename/agent-skills",
+  "license": "MIT",
+  "keywords": ["git", "worktree", "hooks", "dotenv"]
+}

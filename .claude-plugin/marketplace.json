@@ -1,0 +1,15 @@
+{
+  "name": "handlename",
+  "owner": {
+    "name": "NAGATA Hiroaki"
+  },
+  "description": "handlename's personal Claude Code plugins",
+  "plugins": [
+    {
+      "name": "worktree-setup",
+      "source": "./plugins/worktree-setup",
+      "description": "Copies untracked files declared in .worktreeinclude / .worktreeinclude.local from the main git worktree into linked worktrees at session start",
+      "version": "0.1.0"
+    }
+  ]
+}
