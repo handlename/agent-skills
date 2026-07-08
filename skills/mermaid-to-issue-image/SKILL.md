@@ -59,11 +59,11 @@ All SVGs produced by this skill follow these rules so diagrams look consistent a
 ## Process
 
 1. **Validate input** — both `mermaid` and `repository` present; the mermaid parses conceptually (nodes/edges/labels extractable). If not: `FAILED: invalid input <detail>`.
-2. **Preflight playwright-cli** — run `playwright-cli --version`. If the command is missing: `FAILED: playwright-cli is not installed (npm install -g @playwright/cli)`.
+2. **Invocation convention** — run every playwright-cli command as `npx -y @playwright/cli <command>`. npx auto-installs the package on first use, so no preinstall check is needed (`-y` skips the interactive install prompt, which would hang an agent). Do NOT use `npx playwright-cli` — that resolves a different npm package. The steps below write `playwright-cli` for brevity. If npx itself cannot fetch the package (offline, registry error): `FAILED: could not run @playwright/cli via npx (<error>)`.
 3. **Draw the SVG** — extract the structure (nodes, relationships, labels, groupings) from the mermaid source and hand-write an SVG following the Style Rules. Write it to a temp file (e.g. `<scratchpad>/big-picture.svg`). Sanity-check: well-formed XML (`python3 -c "import xml.dom.minidom,sys;xml.dom.minidom.parse(sys.argv[1])" <file>` or equivalent), every mermaid node/edge represented, no text outside the canvas.
 4. **Upload via the issue editor** — the goal is to make GitHub's web editor perform the attachment upload, then leave WITHOUT creating anything:
    1. `playwright-cli open --persistent https://github.com/<owner>/<repo>/issues/new`
-   2. Take a `snapshot`. If a login form appears instead of the issue editor: close and return `FAILED: GitHub session not logged in — run 'playwright-cli open --persistent https://github.com/login' once and sign in, then retry`.
+   2. Take a `snapshot`. If a login form appears instead of the issue editor: close and return `FAILED: GitHub session not logged in — run 'npx -y @playwright/cli open --persistent --headed https://github.com/login' once and sign in, then retry` (`--headed` is required: the default headless browser shows no window to sign in with).
    3. Focus the issue body textarea and `upload <path/to/svg>` against the editor's file input (the same mechanism as drag & drop).
    4. Wait until the editor finishes uploading: the body textarea content changes from an "Uploading..." placeholder to text containing `https://github.com/user-attachments/assets/<uuid>`. Read it from a fresh `snapshot`.
    5. Extract the URL. Then **abandon the draft** — do NOT submit the issue. The uploaded attachment remains valid even though no issue was created.
