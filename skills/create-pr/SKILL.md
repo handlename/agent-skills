@@ -26,10 +26,12 @@ Execute the following tasks. Run tasks in parallel where possible.
 1. Verify the push status to remote, and push if necessary.
 2. Analyze the commit history to understand the intent of the changes.
 3. If a design document exists, gather information from it.
-4. Check if a PR template exists and generate the description.
-5. Generate the PR title.
-6. Present the PR creation details to the user and obtain approval.
-7. Create the PR and report the result.
+4. Assess whether the change is structural enough to warrant a big-picture diagram (see "Big-picture Diagram" guideline). If so, author a mermaid diagram of the target system and how this PR's change fits within it.
+5. Check if a PR template exists and generate the description (embed the mermaid source as a draft when a diagram was authored).
+6. Generate the PR title.
+7. Present the PR creation details — including the drafted diagram (shown as mermaid source at this point) — to the user and obtain approval. This approval also authorizes the diagram attachment upload.
+8. If a diagram was authored: spawn a subagent invoking the `mermaid-to-issue-image` skill, then embed the returned image (or fall back to inline mermaid on failure).
+9. Create the PR and report the result.
 
 ---
 
@@ -45,6 +47,7 @@ Parse `$ARGUMENTS` as follows:
 
 - The PR is successfully created and its URL is retrieved.
 - The PR details (title, description summary, URL) are reported to the user.
+- When a big-picture diagram was warranted, it is embedded as an image (or, on upload failure, as an inline mermaid block with the fallback reported), and no paragraph or list item in the body contains an internal line break.
 
 ---
 
@@ -105,6 +108,7 @@ Check if there are design documents related to the changes. Search the following
 ### PR Description Generation Principles
 - **Important: Write the PR title and body in the language determined in the "Language Determination" step.**
 - **Important: Do not describe implementation details that can be understood by reading the diff. Explain the intent and background of the change.**
+- **Important: Never insert a line break inside a paragraph or a list item.** Write each paragraph and each list item as a single unbroken line, and let the browser handle wrapping at render time. Line breaks belong only *between* blocks (between paragraphs, between list items, before/after headings or code blocks) — never *within* one. This keeps the source diff-friendly and avoids hard wraps that render awkwardly at different viewport widths.
 
 *Good Examples:*
 - "To improve search result display speed based on user feedback."
@@ -122,6 +126,7 @@ Check for the existence of `.github/PULL_REQUEST_TEMPLATE.md`.
 - Keep checklist items in `[ ]` format.
 - If there are checklist items regarding test passage, mark them as checked `[x]`.
 - If a design document exists, describe it in the appropriate place (e.g., Related Documents section, or at the end) according to the "How to Describe Design Documents" section below.
+- If a big-picture diagram was authored, place it in a suitable spot near the top of the body (e.g. right after the change-overview section) following the "Big-picture Diagram" guideline.
 
 **If template does not exist:**
 Generate the description with the following structure:
@@ -131,6 +136,9 @@ Generate the description with the following structure:
 
 ## Approach
 [Selected solution and reasons. If there were alternatives, why this approach was chosen]
+
+## Big picture
+[Include this section only for structural changes. An SVG image uploaded via mermaid-to-issue-image, with the mermaid source preserved below in a collapsed <details> block. See the "Big-picture Diagram" guideline]
 
 ## Design Documents
 [Include this section only if design documents exist. See below for details]
@@ -164,6 +172,38 @@ If a design document exists, describe it according to its type as follows. If no
 **About testing status:**
 Passing relevant tests is a prerequisite for creating a PR and does not need to be explicitly mentioned in the description. Only mark test-related checklists as checked if they exist in the template.
 
+### Big-picture Diagram (structural changes only)
+When the change is **structural**, attach a diagram that lets a reviewer grasp the target system's big picture and where this PR's change fits within it. This is judged from the commit history and changed files, not requested from the user.
+
+**When to attach (structural change):** the change alters relationships between multiple components, a data flow, or a state machine — anything where a picture of the whole makes the change easier to understand than prose alone.
+
+**When NOT to attach:** trivial or self-contained changes — a single-function bugfix, a typo/wording fix, a dependency bump, config-only edits, or anything a reviewer can fully grasp from the diff. When in doubt, prefer no diagram; an unhelpful image is worse than none.
+
+**What the diagram depicts:** the target system's overall structure **and** how this PR's change relates to it — situate the changed/added/removed parts within the surrounding system (e.g. affected components highlighted in context, or the current→changed data flow shown against the system it lives in). Keep it high-level for human comprehension, not an implementation transcript.
+
+**How to produce and embed it** (mirrors the `plan-to-issue` skill):
+1. Author the diagram as **mermaid** — the mermaid source is the canonical record of the diagram's structure. Pick the type that best conveys it (`flowchart`, `sequenceDiagram`, `stateDiagram-v2`, `erDiagram`, …).
+2. The mermaid appears as a visible source block in the draft shown at the confirmation gate. Uploading is a GitHub write, so it happens **only after** the user approves PR creation (that approval covers the upload).
+3. After approval, spawn a **subagent invoking the `mermaid-to-issue-image` skill** (input: the mermaid source + the target `owner/repo`; output: an attachment URL, or `FAILED: <reason>`).
+4. On success, embed the image, immediately followed by the mermaid source in a collapsed `<details>` block so the canonical structure stays one click away:
+   ~~~markdown
+   ![big picture](<user-attachments URL>)
+
+   <details>
+   <summary>図のソース / Diagram source (mermaid)</summary>
+
+   ```mermaid
+   flowchart LR
+       ...
+   ```
+
+   </details>
+   ~~~
+   **Never wrap the mermaid in an HTML comment** (`<!-- -->`): mermaid arrows (`-->`) contain `--`, which terminates the comment early and leaks the source as visible text.
+5. **Fallback:** if the subagent returns `FAILED` (e.g. GitHub session not logged in, npx cannot fetch `@playwright/cli`), keep a visible ` ```mermaid ` code block instead and report the fallback and its reason to the user. Never let the image step block PR creation.
+
+**To update the diagram later:** edit the mermaid, re-invoke `mermaid-to-issue-image`, and replace the image URL. The SVG layout is throwaway; only the mermaid persists.
+
 ### PR Title Generation
 - Single commit: Use the first line of the commit message.
 - Multiple commits: Generate from the most significant Conventional Commits type (`feat > fix > refactor > docs > ...`) and the intent of the change.
@@ -178,6 +218,7 @@ Title: [Title]
 Base Branch: [Branch Name]
 Draft PR: [Yes/No]
 Design Document: [Yes (Type: Online/Local) / No]
+Big-picture Diagram: [Yes (attaches image after approval) / No]
 
 Description:
 ---
@@ -186,6 +227,7 @@ Description:
 
 Do you want to create this PR?
 ```
+When a big-picture diagram was authored, show its mermaid source inline in the description here, and note that approving also authorizes uploading it as an image attachment.
 
 ### Executing PR Creation
 ```bash
@@ -229,6 +271,8 @@ Stop the process and report the situation and remaining tasks if any of the foll
 - Ignoring the structure of the PR template when it exists.
 - Modifying files unrelated to the task.
 - Describing test passage as an independent section or item in the PR description (except when it exists in the template).
+- Inserting a line break inside a paragraph or a list item in the PR description (write each as a single line; line breaks belong only between blocks).
+- Uploading the diagram attachment before the user has approved PR creation.
 
 ---
 
