@@ -52,6 +52,12 @@
       "source": "./plugins/review-doc",
       "description": "Convert specification documents or Markdown notes into highly structured, graphical HTML reports and open them in the default browser.",
       "version": "0.1.0"
+    },
+    {
+      "name": "setup-tagpr",
+      "source": "./plugins/setup-tagpr",
+      "description": "Set up tagpr for automated release management: creates and updates release pull requests for unreleased items, tags them on merge, and creates GitHub Releases. Supports goreleaser (Go) and TypeScript/Node.js projects.",
+      "version": "0.1.0"
     }
   ]
 }

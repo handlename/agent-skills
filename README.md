@@ -12,6 +12,7 @@ A personal collection of custom AI Agent Skills compatible with `gh skill instal
 | `mermaid-to-issue-image` | Turn a mermaid diagram into a hand-drawn free-layout SVG, upload it as a GitHub issue attachment via playwright-cli, and return the image URL. Designed to be called from other skills (e.g. `plan-to-issue`) through a subagent. Runs `@playwright/cli` via npx (no preinstall needed); requires a one-time GitHub sign-in in its persistent browser profile. | `gh skill install handlename/agent-skills mermaid-to-issue-image` | Claude Code, Copilot, Gemini CLI, Cursor |
 | `plan-to-issue` | Turn a finalized implementation plan or design into a GitHub tracking issue, with a big-picture diagram posted as an SVG image (drawn and uploaded via `mermaid-to-issue-image`, mermaid source kept in a collapsed details block, falling back to an inline mermaid block), a PR-granularity checklist (TASK- IDs), plus a self-contained comment that lets a context-less person or agent start implementing. | `gh skill install handlename/agent-skills plan-to-issue` | Claude Code, Copilot, Gemini CLI, Cursor |
 | `review-doc` | Convert specification documents or Markdown notes into highly structured, graphical HTML reports and open them in the default browser. | `gh skill install handlename/agent-skills review-doc` | Claude Code, Copilot, Gemini CLI, Cursor |
+| `setup-tagpr` | Set up [tagpr](https://github.com/Songmu/tagpr) for automated release management: creates and updates release pull requests for unreleased items, tags them on merge, and creates GitHub Releases. Covers goreleaser (Go) and TypeScript/Node.js projects. | `gh skill install handlename/agent-skills setup-tagpr` | Claude Code, Copilot, Gemini CLI, Cursor |
 
 
 ## Plugins
@@ -37,6 +38,7 @@ Every skill listed under [Available Skills](#available-skills) is also published
 | `persona-mimic-trainer` | Train and iteratively refine a custom sub-agent that mimics a specific person's decision-making criteria, cognitive biases, and communication style for mock wall-hitting (pre-communication verification). |
 | `plan-to-issue` | Turn a finalized implementation plan or design into a GitHub tracking issue (overview + PR-granularity checklist plus a self-contained detailed comment), or post it as a comment on an existing related issue. |
 | `review-doc` | Convert specification documents or Markdown notes into highly structured, graphical HTML reports and open them in the default browser. |
+| `setup-tagpr` | Set up tagpr for automated release management: creates and updates release pull requests for unreleased items, tags them on merge, and creates GitHub Releases. Supports goreleaser (Go) and TypeScript/Node.js projects. |
 
 ## Installation
 

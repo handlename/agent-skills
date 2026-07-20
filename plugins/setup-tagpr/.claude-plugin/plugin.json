@@ -1,0 +1,12 @@
+{
+  "name": "setup-tagpr",
+  "displayName": "Setup Tagpr",
+  "version": "0.1.0",
+  "description": "Set up tagpr for automated release management: creates and updates release pull requests for unreleased items, tags them on merge, and creates GitHub Releases. Supports goreleaser (Go) and TypeScript/Node.js projects.",
+  "author": {
+    "name": "NAGATA Hiroaki"
+  },
+  "repository": "https://github.com/handlename/agent-skills",
+  "license": "MIT",
+  "keywords": ["tagpr", "release", "github-actions", "goreleaser", "ci-cd"]
+}
