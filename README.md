@@ -18,9 +18,25 @@ A personal collection of custom AI Agent Skills compatible with `gh skill instal
 
 This repository is also a [Claude Code plugin marketplace](https://code.claude.com/docs/en/plugin-marketplaces).
 
-| Plugin Name | Description | Installation Command |
-| :--- | :--- | :--- |
-| `worktree-setup` | At session start (SessionStart hook), copies untracked files declared in `.worktreeinclude` from the main git worktree into linked worktrees, and runs setup scripts declared in `.worktreesetup` (e.g. `mise trust`, `aqua policy allow`) for repositories on a trust allowlist. See [plugins/worktree-setup](plugins/worktree-setup/README.md). | `claude plugin marketplace add handlename/agent-skills && claude plugin install worktree-setup@handlename` |
+Add the marketplace once, then install any plugin below:
+
+```bash
+claude plugin marketplace add handlename/agent-skills
+claude plugin install <plugin-name>@handlename
+```
+
+Every skill listed under [Available Skills](#available-skills) is also published as its own plugin. Each plugin bundles the skill from `skills/<name>/` (via a symlink that Claude Code dereferences on install), so the `gh skill install` path and the plugin path stay in sync from a single source.
+
+| Plugin Name | Description |
+| :--- | :--- |
+| `worktree-setup` | At session start (SessionStart hook), copies untracked files declared in `.worktreeinclude` from the main git worktree into linked worktrees, and runs setup scripts declared in `.worktreesetup` (e.g. `mise trust`, `aqua policy allow`) for repositories on a trust allowlist. See [plugins/worktree-setup](plugins/worktree-setup/README.md). |
+| `commit-it` | Commit changes following the Conventional Commits specification, verifying test passage first. Supports both git and Jujutsu (jj) repositories. |
+| `create-pr` | Create a Pull Request from the current branch to a base branch, using GitHub CLI to generate a suitable title and description from the commit history. |
+| `hello-world` | Verify skill and plugin installation and agent integration with a lightweight greeting and system report. |
+| `mermaid-to-issue-image` | Turn a mermaid diagram into a hand-drawn free-layout SVG image and upload it as a GitHub issue attachment via playwright-cli, returning the image URL. Designed to be called from other skills through a subagent. |
+| `persona-mimic-trainer` | Train and iteratively refine a custom sub-agent that mimics a specific person's decision-making criteria, cognitive biases, and communication style for mock wall-hitting (pre-communication verification). |
+| `plan-to-issue` | Turn a finalized implementation plan or design into a GitHub tracking issue (overview + PR-granularity checklist plus a self-contained detailed comment), or post it as a comment on an existing related issue. |
+| `review-doc` | Convert specification documents or Markdown notes into highly structured, graphical HTML reports and open them in the default browser. |
 
 ## Installation
 

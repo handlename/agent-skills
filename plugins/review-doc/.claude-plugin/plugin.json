@@ -1,0 +1,12 @@
+{
+  "name": "review-doc",
+  "displayName": "Review Doc",
+  "version": "0.1.0",
+  "description": "Convert specification documents or Markdown notes into highly structured, graphical HTML reports and open them in the default browser.",
+  "author": {
+    "name": "NAGATA Hiroaki"
+  },
+  "repository": "https://github.com/handlename/agent-skills",
+  "license": "MIT",
+  "keywords": ["documentation", "html", "review"]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "hello-world",
+  "displayName": "Hello World",
+  "version": "0.1.0",
+  "description": "Verify skill and plugin installation and agent integration with a lightweight greeting and system report.",
+  "author": {
+    "name": "NAGATA Hiroaki"
+  },
+  "repository": "https://github.com/handlename/agent-skills",
+  "license": "MIT",
+  "keywords": ["hello-world", "verification", "test"]
+}

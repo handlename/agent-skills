@@ -1,0 +1,12 @@
+{
+  "name": "commit-it",
+  "displayName": "Commit It",
+  "version": "0.1.0",
+  "description": "Commit changes following the Conventional Commits specification, verifying test passage first. Supports both git and Jujutsu (jj) repositories.",
+  "author": {
+    "name": "NAGATA Hiroaki"
+  },
+  "repository": "https://github.com/handlename/agent-skills",
+  "license": "MIT",
+  "keywords": ["commit", "git", "jujutsu", "conventional-commits"]
+}
