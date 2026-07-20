@@ -1,8 +1,8 @@
 {
   "name": "worktree-setup",
   "displayName": "Worktree Setup",
-  "version": "0.1.0",
-  "description": "Copies untracked files declared in .worktreeinclude / .worktreeinclude.local from the main git worktree into linked worktrees at session start",
+  "version": "0.2.0",
+  "description": "At session start, copies untracked files declared in .worktreeinclude into linked worktrees and runs setup scripts declared in .worktreesetup for trusted repositories",
   "author": {
     "name": "NAGATA Hiroaki"
   },

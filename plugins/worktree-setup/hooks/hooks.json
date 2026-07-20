@@ -1,5 +1,5 @@
 {
-  "description": "Set up linked git worktrees at session start",
+  "description": "Set up linked git worktrees at session start (copy declared files, run setup scripts for trusted repos)",
   "hooks": {
     "SessionStart": [
       {
