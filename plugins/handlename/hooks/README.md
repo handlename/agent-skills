@@ -106,15 +106,15 @@ seconds; it only runs in linked worktrees of projects that opted in via
 
 ### Installation
 
-Install as a plugin (recommended):
+This hook ships as part of the bundled `handlename` plugin (recommended):
 
 ```bash
 claude plugin marketplace add handlename/agent-skills
-claude plugin install worktree-setup@handlename --scope user
+claude plugin install handlename@handlename --scope user
 ```
 
 Or interactively: `/plugin marketplace add handlename/agent-skills` then
-`/plugin install worktree-setup@handlename`.
+`/plugin install handlename@handlename`.
 
 Alternatively, register the script manually in the `SessionStart` hooks of
 your Claude Code settings (`~/.claude/settings.json`), using an absolute
@@ -123,7 +123,7 @@ path (do not combine with the plugin install — the hook would run twice):
 ```json
 {
   "type": "command",
-  "command": "/path/to/agent-skills/plugins/worktree-setup/hooks/setup-worktree.sh"
+  "command": "/path/to/agent-skills/plugins/handlename/hooks/setup-worktree.sh"
 }
 ```
 

@@ -6,57 +6,9 @@
   "description": "handlename's personal Claude Code plugins",
   "plugins": [
     {
-      "name": "worktree-setup",
-      "source": "./plugins/worktree-setup",
-      "description": "Copies untracked files declared in .worktreeinclude / .worktreeinclude.local from the main git worktree into linked worktrees at session start",
-      "version": "0.2.0"
-    },
-    {
-      "name": "commit-it",
-      "source": "./plugins/commit-it",
-      "description": "Commit changes following the Conventional Commits specification, verifying test passage first. Supports both git and Jujutsu (jj) repositories.",
-      "version": "0.1.0"
-    },
-    {
-      "name": "create-pr",
-      "source": "./plugins/create-pr",
-      "description": "Create a Pull Request from the current branch to a base branch, using GitHub CLI to generate a suitable title and description from the commit history.",
-      "version": "0.1.0"
-    },
-    {
-      "name": "hello-world",
-      "source": "./plugins/hello-world",
-      "description": "Verify skill and plugin installation and agent integration with a lightweight greeting and system report.",
-      "version": "0.1.0"
-    },
-    {
-      "name": "mermaid-to-issue-image",
-      "source": "./plugins/mermaid-to-issue-image",
-      "description": "Turn a mermaid diagram into a hand-drawn free-layout SVG image and upload it as a GitHub issue attachment via playwright-cli, returning the image URL. Designed to be called from other skills through a subagent.",
-      "version": "0.1.0"
-    },
-    {
-      "name": "persona-mimic-trainer",
-      "source": "./plugins/persona-mimic-trainer",
-      "description": "Train and iteratively refine a custom sub-agent that mimics a specific person's decision-making criteria, cognitive biases, and communication style for mock wall-hitting (pre-communication verification).",
-      "version": "0.1.0"
-    },
-    {
-      "name": "plan-to-issue",
-      "source": "./plugins/plan-to-issue",
-      "description": "Turn a finalized implementation plan or design into a GitHub tracking issue (overview + PR-granularity checklist plus a self-contained detailed comment), or post it as a comment on an existing related issue.",
-      "version": "0.1.0"
-    },
-    {
-      "name": "review-doc",
-      "source": "./plugins/review-doc",
-      "description": "Convert specification documents or Markdown notes into highly structured, graphical HTML reports and open them in the default browser.",
-      "version": "0.1.0"
-    },
-    {
-      "name": "setup-tagpr",
-      "source": "./plugins/setup-tagpr",
-      "description": "Set up tagpr for automated release management: creates and updates release pull requests for unreleased items, tags them on merge, and creates GitHub Releases. Supports goreleaser (Go) and TypeScript/Node.js projects.",
+      "name": "handlename",
+      "source": "./plugins/handlename",
+      "description": "handlename's personal Claude Code plugin bundle: commit-it, create-pr, hello-world, mermaid-to-issue-image, persona-mimic-trainer, plan-to-issue, review-doc and setup-tagpr skills, plus the worktree-setup SessionStart hook.",
       "version": "0.1.0"
     }
   ]
