@@ -8,8 +8,8 @@
     {
       "name": "handlename",
       "source": ".",
-      "description": "handlename's personal Claude Code plugin bundle: commit-it, create-pr, hello-world, mermaid-to-issue-image, persona-mimic-trainer, plan-to-issue, review-doc and setup-tagpr skills, plus the worktree-setup SessionStart hook.",
-      "version": "0.1.1"
+      "description": "handlename's personal Claude Code plugin bundle: commit-it, create-pr, hello-world, mermaid-to-issue-image, persona-mimic-trainer, plan-to-issue and setup-tagpr skills, plus the worktree-setup SessionStart hook.",
+      "version": "0.2.0"
     }
   ]
 }
