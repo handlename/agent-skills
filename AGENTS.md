@@ -25,9 +25,17 @@ description: <clear-1-sentence-actionable-description-starting-with-action-verb>
 - No placeholders, TBD, or TODOs.
 - Structure instructions logically, using headings like `## Overview`, `## Instructions`, and `## Verification`.
 
-## 3. Validation Checklist
+## 3. Versioning
+Whenever you change anything in this repository (skills, hooks, docs, or configuration), you MUST bump the plugin manifest version following [Semantic Versioning](https://semver.org/):
+- The version lives in `.claude-plugin/plugin.json` (`version`) and is mirrored in `.claude-plugin/marketplace.json`. Keep both values identical.
+- MAJOR: incompatible changes to a skill's interface or the plugin structure.
+- MINOR: backward-compatible additions, such as a new skill or hook.
+- PATCH: backward-compatible fixes or documentation-only changes.
+
+## 4. Validation Checklist
 Before completing any task that adds or modifies a skill, you MUST run this validation checklist:
 - [ ] The skill is stored at `skills/<skill-name>/SKILL.md`.
 - [ ] Frontmatter contains both `name` and `description`.
 - [ ] There are no placeholder blocks or "TODO" items inside any markdown file.
 - [ ] All code block examples have syntax highlighting specified (e.g., `python`, `bash`, `yaml`).
+- [ ] The manifest version is bumped per Semantic Versioning in both `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`.
