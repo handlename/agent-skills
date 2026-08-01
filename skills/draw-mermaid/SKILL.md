@@ -11,16 +11,16 @@ Take a **natural-language intent** for a diagram, author it as **mermaid**, and 
 
 The syntax check is not a heuristic: the mermaid is parsed by a real, **version-pinned mermaid.js (11.16.0)** vendored into this skill (`vendor/mermaid.min.js`), loaded in a real browser via **playwright-cli**, and run through `mermaid.parse()`. Validation is fully **offline and deterministic** — no CDN, no external service, no `mmdc`, no `package.json`.
 
-This skill does NOT decide *what* the diagram means (the caller passes the intent), does NOT render an image or upload anything (that is `mermaid-to-issue-image`), and does NOT embed the result anywhere.
+This skill does NOT decide *what* the diagram means (the caller passes the intent), does NOT render an image (that is `mermaid-to-svg`) or upload anything (that is `github-attachment-upload`), and does NOT embed the result anywhere.
 
 ## When to Use
 
-- Another skill (e.g. `plan-to-issue`, `create-pr`) needs to author a mermaid diagram and wants a guarantee that the mermaid parses before it is shown, embedded, or handed to `mermaid-to-issue-image`.
+- Another skill (e.g. `plan-to-issue`, `create-pr`) needs to author a mermaid diagram and wants a guarantee that the mermaid parses before it is shown, embedded, or handed to `mermaid-to-svg`.
 - An agent is about to write mermaid and wants it verified against a real parser rather than trusting the model's output.
 
 ## Do Not Use When
 
-- The caller already has a mermaid source they only want *imaged* — that is `mermaid-to-issue-image`.
+- The caller already has a mermaid source they only want *imaged* — that is `mermaid-to-svg` (then `github-attachment-upload` to publish it).
 - No mermaid is needed at all (plain prose is enough).
 - The environment has neither `npx`/`node` (for playwright-cli) nor `python3`/`npx` (for the local static server) — see the failure contract below.
 
@@ -61,7 +61,7 @@ Never return an unvalidated diagram as if it were validated; if it does not pars
 
    If no server can be started (no `python3` and `npx` cannot fetch `http-server`): `FAILED: could not start a local static server for the mermaid validator (<error>)`.
 
-4. **Open the validator in playwright-cli** — run every playwright-cli command as `npx -y @playwright/cli <command>` (the same convention as `mermaid-to-issue-image`; `-y` skips the install prompt that would otherwise hang an agent; do NOT use `npx playwright-cli`, which is a different package). Use a dedicated session so it does not collide with other browsers.
+4. **Open the validator in playwright-cli** — run every playwright-cli command as `npx -y @playwright/cli <command>` (the same convention as `github-attachment-upload`; `-y` skips the install prompt that would otherwise hang an agent; do NOT use `npx playwright-cli`, which is a different package). Use a dedicated session so it does not collide with other browsers.
 
    ```bash
    npx -y @playwright/cli -s=draw-mermaid open "http://127.0.0.1:$PORT/validate.html"
@@ -90,7 +90,7 @@ Never return an unvalidated diagram as if it were validated; if it does not pars
 ## Notes for Callers
 
 - Invoke through a subagent and treat its final message as the return value: a validated mermaid source, or `FAILED: ...`.
-- The returned mermaid is the **canonical structure record** — preserve it (e.g. in a collapsed `<details>` block) and pass it to `mermaid-to-issue-image` when an image is wanted. `draw-mermaid` produces the diagram; `mermaid-to-issue-image` turns a diagram into an uploaded image. They compose: `draw-mermaid` → validated mermaid → `mermaid-to-issue-image` → attachment URL.
+- The returned mermaid is the **canonical structure record** — preserve it (e.g. in a collapsed `<details>` block) and pass it to `mermaid-to-svg` when an image is wanted. `draw-mermaid` produces the diagram; `mermaid-to-svg` hand-draws it as an SVG file; `github-attachment-upload` publishes that file. They compose: `draw-mermaid` → validated mermaid → `mermaid-to-svg` → SVG path → `github-attachment-upload` → attachment URL.
 - Validation is pinned to mermaid **11.16.0**. A diagram that parses here is guaranteed against that grammar; features newer than 11.16.0 are not recognized.
 - To bump the vendored mermaid version, replace `vendor/mermaid.min.js` with a newer pinned build and update the version noted here and in the frontmatter.
 

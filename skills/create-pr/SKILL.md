@@ -32,7 +32,7 @@ Execute the following tasks. Run tasks in parallel where possible.
 6. Generate the PR title.
 7. If the repository adopts tagpr, ask the user which version-bump label to apply to this PR (see "tagpr Version-Bump Label" guideline). Skip this step otherwise.
 8. Present the PR creation details — including the drafted diagram (shown as mermaid source at this point) — to the user and obtain approval. This approval also authorizes the diagram attachment upload.
-9. If a diagram was authored: spawn a subagent invoking the `mermaid-to-issue-image` skill, then embed the returned image (or fall back to inline mermaid on failure).
+9. If a diagram was authored: spawn a subagent invoking `mermaid-to-svg` to draw the SVG, then a subagent invoking `github-attachment-upload` to publish it, then embed the returned image (or fall back to inline mermaid on failure).
 10. Create the PR (applying the chosen tagpr label, if any) and report the result.
 
 ---
@@ -140,7 +140,7 @@ Generate the description with the following structure:
 [Selected solution and reasons. If there were alternatives, why this approach was chosen]
 
 ## Big picture
-[Include this section only for structural changes. An SVG image uploaded via mermaid-to-issue-image, with the mermaid source preserved below in a collapsed <details> block. See the "Big-picture Diagram" guideline]
+[Include this section only for structural changes. An SVG image drawn by mermaid-to-svg and uploaded via github-attachment-upload, with the mermaid source preserved below in a collapsed <details> block. See the "Big-picture Diagram" guideline]
 
 ## Design Documents
 [Include this section only if design documents exist. See below for details]
@@ -186,7 +186,7 @@ When the change is **structural**, attach a diagram that lets a reviewer grasp t
 **How to produce and embed it** (mirrors the `plan-to-issue` skill):
 1. Author the diagram as **mermaid** via a **subagent invoking the `draw-mermaid` skill** (input: the diagram intent; output: a syntax-validated mermaid source, or `FAILED: <reason>`) — the returned mermaid is the canonical record of the diagram's structure and is guaranteed to parse. Pick the type that best conveys it (`flowchart`, `sequenceDiagram`, `stateDiagram-v2`, `erDiagram`, …).
 2. The mermaid appears as a visible source block in the draft shown at the confirmation gate. Uploading is a GitHub write, so it happens **only after** the user approves PR creation (that approval covers the upload).
-3. After approval, spawn a **subagent invoking the `mermaid-to-issue-image` skill** (input: the mermaid source + the target `owner/repo`; output: an attachment URL, or `FAILED: <reason>`).
+3. After approval, produce the image in two subagent steps: first **`mermaid-to-svg`** (input: the mermaid source; output: an SVG file path, or `FAILED: <reason>`), then **`github-attachment-upload`** (input: that SVG path + the target `owner/repo`; output: an attachment URL, or `FAILED: <reason>`).
 4. On success, embed the image, immediately followed by the mermaid source in a collapsed `<details>` block so the canonical structure stays one click away:
    ~~~markdown
    ![big picture](<user-attachments URL>)
@@ -202,9 +202,9 @@ When the change is **structural**, attach a diagram that lets a reviewer grasp t
    </details>
    ~~~
    **Never wrap the mermaid in an HTML comment** (`<!-- -->`): mermaid arrows (`-->`) contain `--`, which terminates the comment early and leaks the source as visible text.
-5. **Fallback:** if the subagent returns `FAILED` (e.g. GitHub session not logged in, npx cannot fetch `@playwright/cli`), keep a visible ` ```mermaid ` code block instead and report the fallback and its reason to the user. Never let the image step block PR creation.
+5. **Fallback:** if either subagent returns `FAILED` (`mermaid-to-svg` could not draw the SVG, or `github-attachment-upload` hit e.g. GitHub session not logged in / npx cannot fetch `@playwright/cli`), keep a visible ` ```mermaid ` code block instead and report the fallback and its reason to the user. Never let the image step block PR creation.
 
-**To update the diagram later:** edit the mermaid, re-invoke `mermaid-to-issue-image`, and replace the image URL. The SVG layout is throwaway; only the mermaid persists.
+**To update the diagram later:** edit the mermaid, re-run `mermaid-to-svg`, re-invoke `github-attachment-upload`, and replace the image URL. The SVG layout is throwaway; only the mermaid persists.
 
 ### PR Title Generation
 - Single commit: Use the first line of the commit message.
