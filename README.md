@@ -26,7 +26,7 @@ claude plugin marketplace add handlename/agent-skills
 claude plugin install handlename@handlename
 ```
 
-All skills listed under [Available Skills](#available-skills) are bundled into a single `handlename` plugin, together with the `worktree-setup` SessionStart hook. Each skill is included via a symlink to `skills/<name>/` (which Claude Code dereferences on install), so the `gh skill install` path and the plugin path stay in sync from a single source.
+All skills listed under [Available Skills](#available-skills) are bundled into a single `handlename` plugin, together with the `worktree-setup` SessionStart hook. The repository root itself is the plugin (`.claude-plugin/marketplace.json` points at `source: "."`), so the plugin reads the same `skills/<name>/` directories that `gh skill install` fetches. Both paths share one physical source with no symlinks and no duplicated files.
 
 | Component | Type | Description |
 | :--- | :--- | :--- |

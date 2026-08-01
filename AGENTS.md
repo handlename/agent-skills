@@ -7,7 +7,8 @@ To ensure compatibility with `gh skill install`, you MUST follow this structure:
 - All skill files must reside in the `skills/` directory.
 - Each skill must have its own subdirectory: `skills/<skill-name>/`.
 - Every skill directory must contain a `SKILL.md` file as its entrypoint.
-- Do NOT create any folders or files at the repository root except for those explicitly requested. Supporting scripts, resources, or references for a skill must be placed inside `skills/<skill-name>/`.
+- Supporting scripts, resources, or references for a skill must be placed inside `skills/<skill-name>/`, never at the repository root.
+- The repository root is also the Claude Code plugin itself (`source: "."` in `.claude-plugin/marketplace.json`). The plugin reads the same `skills/` directories — no symlinks, no duplicated files. Only the following root-level entries support that plugin and may exist alongside `skills/`: `.claude-plugin/` (`marketplace.json` + `plugin.json`) and `hooks/` (the `worktree-setup` SessionStart hook). Do NOT create any other folders or files at the repository root except for those explicitly requested.
 
 ## 2. SKILL.md Standards
 Every `SKILL.md` file MUST start with a syntactically valid YAML frontmatter:
