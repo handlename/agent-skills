@@ -21,6 +21,7 @@ Execute the following tasks. Run tasks in parallel where possible.
 - Read `README.md` to determine the language to use for the Pull Request.
 - Determine the base branch and check if an existing PR already exists.
 - Check for the existence of design documents.
+- Detect whether the repository adopts tagpr for releases (see "tagpr Version-Bump Label" guideline).
 
 ### Phase 2 (Sequential)
 1. Verify the push status to remote, and push if necessary.
@@ -29,9 +30,10 @@ Execute the following tasks. Run tasks in parallel where possible.
 4. Assess whether the change is structural enough to warrant a big-picture diagram (see "Big-picture Diagram" guideline). If so, author a mermaid diagram of the target system and how this PR's change fits within it.
 5. Check if a PR template exists and generate the description (embed the mermaid source as a draft when a diagram was authored).
 6. Generate the PR title.
-7. Present the PR creation details — including the drafted diagram (shown as mermaid source at this point) — to the user and obtain approval. This approval also authorizes the diagram attachment upload.
-8. If a diagram was authored: spawn a subagent invoking the `mermaid-to-issue-image` skill, then embed the returned image (or fall back to inline mermaid on failure).
-9. Create the PR and report the result.
+7. If the repository adopts tagpr, ask the user which version-bump label to apply to this PR (see "tagpr Version-Bump Label" guideline). Skip this step otherwise.
+8. Present the PR creation details — including the drafted diagram (shown as mermaid source at this point) — to the user and obtain approval. This approval also authorizes the diagram attachment upload.
+9. If a diagram was authored: spawn a subagent invoking the `mermaid-to-issue-image` skill, then embed the returned image (or fall back to inline mermaid on failure).
+10. Create the PR (applying the chosen tagpr label, if any) and report the result.
 
 ---
 
@@ -210,6 +212,30 @@ When the change is **structural**, attach a diagram that lets a reviewer grasp t
 - Within 50 characters, no period at the end.
 - Written in the language determined in the "Language Determination" step.
 
+### tagpr Version-Bump Label (release-workflow repositories only)
+This applies **only** when the repository adopts [tagpr](https://github.com/Songmu/tagpr) for releases. tagpr derives the next version from the labels on merged PRs, so a version-bump label must be applied to *this* PR at creation time.
+
+**Detection:** the repository adopts tagpr when a `.tagpr` file exists at the repository root. If it is absent, skip this guideline entirely — do not ask about labels.
+
+**Resolve the label names from `.tagpr`** (they are configurable via tagpr settings, so never hard-code them):
+```bash
+# .tagpr is gitconfig-format. Fall back to tagpr defaults when unset.
+MAJOR_LABEL=$(git config -f .tagpr tagpr.majorLabels 2>/dev/null | cut -d, -f1)
+MINOR_LABEL=$(git config -f .tagpr tagpr.minorLabels 2>/dev/null | cut -d, -f1)
+MAJOR_LABEL=${MAJOR_LABEL:-tagpr:major}
+MINOR_LABEL=${MINOR_LABEL:-tagpr:minor}
+```
+`majorLabels` / `minorLabels` may hold several comma-separated values; use the **first** as the label to apply.
+
+**Ask the user** which version bump this PR represents, presenting the resolved names (three choices, default **None**):
+- `$MINOR_LABEL` — minor bump
+- `$MAJOR_LABEL` — major bump
+- None — patch (default; apply no label, since patch is tagpr's default when no bump label is present)
+
+**If the chosen label does not yet exist in the repository** (`gh label list` does not contain it), `gh pr create --label` would fail. Do **not** create it silently: warn the user that the label is missing and ask whether to (a) create it now with `gh label create "<name>"` and apply it, or (b) proceed without the label. Respect the choice.
+
+Carry the resulting label (if any) into the confirmation gate display and the `gh pr create` command.
+
 ### Confirmation of Creation Content
 Before creating the PR, present the following to the user and obtain approval:
 ```text
@@ -219,6 +245,7 @@ Base Branch: [Branch Name]
 Draft PR: [Yes/No]
 Design Document: [Yes (Type: Online/Local) / No]
 Big-picture Diagram: [Yes (attaches image after approval) / No]
+Version bump (tagpr): [minor / major (resolved label name) / None / N/A (not a tagpr repo)]
 
 Description:
 ---
@@ -231,11 +258,14 @@ When a big-picture diagram was authored, show its mermaid source inline in the d
 
 ### Executing PR Creation
 ```bash
+# LABEL_FLAG is set (e.g. --label "$MINOR_LABEL") only when a tagpr version-bump
+# label was chosen and confirmed to exist; empty otherwise.
 gh pr create \
   --title "$TITLE" \
   --body "$BODY" \
   --base "$BASE_BRANCH" \
-  $DRAFT_FLAG
+  $DRAFT_FLAG \
+  $LABEL_FLAG
 ```
 
 ### Reporting Creation Result
