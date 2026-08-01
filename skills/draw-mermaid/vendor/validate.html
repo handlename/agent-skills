@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>mermaid syntax validator</title>
+<script src="./mermaid.min.js"></script>
+<script>
+  // Offline mermaid syntax validator. Loaded via file:// and driven by playwright-cli `eval`.
+  // window.mermaid is exposed by the vendored bundle (globalThis["mermaid"] = ...default).
+  window.mermaid.initialize({ startOnLoad: false });
+
+  // Parse a base64-encoded mermaid source and report syntax validity.
+  // base64 avoids all CLI quoting / newline escaping problems.
+  window.__validateMermaid = async (b64) => {
+    let src;
+    try {
+      src = decodeURIComponent(escape(atob(b64)));
+    } catch (e) {
+      return { ok: false, error: "could not decode base64 input" };
+    }
+    try {
+      await window.mermaid.parse(src);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  };
+</script>
+<body></body>

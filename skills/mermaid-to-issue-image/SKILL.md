@@ -76,6 +76,7 @@ Uploading an attachment writes data to GitHub even though no issue is created. C
 
 ## Notes for Callers
 
+- Prefer a mermaid source produced by the `draw-mermaid` skill: it returns a **syntax-validated** mermaid (`mermaid.parse()`-checked), so the diagram this skill hand-draws is based on a source that actually parses. This skill only validates the mermaid *conceptually* (extractable nodes/edges) — it does not run a parser.
 - Invoke through a subagent and treat its final message as the return value: a URL, or `FAILED: ...`.
 - Keep the mermaid source you passed in — you will want to preserve it next to the embedded image (e.g. in a collapsed `<details>` block; NOT an HTML comment — mermaid arrows `-->` contain `--`, which terminates comments and leaks the source) since it is the canonical record for future updates.
 - To update a diagram: edit the mermaid, call this skill again, replace the old URL. Attachment URLs are immutable.

@@ -27,7 +27,7 @@ Execute the following tasks. Run tasks in parallel where possible.
 1. Verify the push status to remote, and push if necessary.
 2. Analyze the commit history to understand the intent of the changes.
 3. If a design document exists, gather information from it.
-4. Assess whether the change is structural enough to warrant a big-picture diagram (see "Big-picture Diagram" guideline). If so, author a mermaid diagram of the target system and how this PR's change fits within it.
+4. Assess whether the change is structural enough to warrant a big-picture diagram (see "Big-picture Diagram" guideline). If so, author a mermaid diagram of the target system and how this PR's change fits within it via a subagent invoking the `draw-mermaid` skill (returns a syntax-validated mermaid source).
 5. Check if a PR template exists and generate the description (embed the mermaid source as a draft when a diagram was authored).
 6. Generate the PR title.
 7. If the repository adopts tagpr, ask the user which version-bump label to apply to this PR (see "tagpr Version-Bump Label" guideline). Skip this step otherwise.
@@ -184,7 +184,7 @@ When the change is **structural**, attach a diagram that lets a reviewer grasp t
 **What the diagram depicts:** the target system's overall structure **and** how this PR's change relates to it — situate the changed/added/removed parts within the surrounding system (e.g. affected components highlighted in context, or the current→changed data flow shown against the system it lives in). Keep it high-level for human comprehension, not an implementation transcript.
 
 **How to produce and embed it** (mirrors the `plan-to-issue` skill):
-1. Author the diagram as **mermaid** — the mermaid source is the canonical record of the diagram's structure. Pick the type that best conveys it (`flowchart`, `sequenceDiagram`, `stateDiagram-v2`, `erDiagram`, …).
+1. Author the diagram as **mermaid** via a **subagent invoking the `draw-mermaid` skill** (input: the diagram intent; output: a syntax-validated mermaid source, or `FAILED: <reason>`) — the returned mermaid is the canonical record of the diagram's structure and is guaranteed to parse. Pick the type that best conveys it (`flowchart`, `sequenceDiagram`, `stateDiagram-v2`, `erDiagram`, …).
 2. The mermaid appears as a visible source block in the draft shown at the confirmation gate. Uploading is a GitHub write, so it happens **only after** the user approves PR creation (that approval covers the upload).
 3. After approval, spawn a **subagent invoking the `mermaid-to-issue-image` skill** (input: the mermaid source + the target `owner/repo`; output: an attachment URL, or `FAILED: <reason>`).
 4. On success, embed the image, immediately followed by the mermaid source in a collapsed `<details>` block so the canonical structure stays one click away:

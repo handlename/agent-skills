@@ -1,8 +1,8 @@
 {
   "name": "handlename",
   "displayName": "handlename",
-  "version": "0.3.0",
-  "description": "handlename's personal Claude Code plugin bundle: commit-it, create-pr, mermaid-to-issue-image, persona-mimic-trainer, plan-to-issue and setup-tagpr skills, plus the worktree-setup SessionStart hook.",
+  "version": "0.4.0",
+  "description": "handlename's personal Claude Code plugin bundle: commit-it, create-pr, draw-mermaid, mermaid-to-issue-image, persona-mimic-trainer, plan-to-issue and setup-tagpr skills, plus the worktree-setup SessionStart hook.",
   "author": {
     "name": "NAGATA Hiroaki"
   },
