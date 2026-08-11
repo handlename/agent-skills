@@ -85,8 +85,8 @@ Create `.tagpr` file at the repository root.
 | `release` | GitHub Release creation: `true`, `draft`, or `false`. Use `draft` for immutable releases | `true` |
 | `changelog` | Enable/disable changelog updates | `true` |
 | `command` | Command to run before release (for build/file modifications) | - |
-| `majorLabels` | Custom labels for major version increment | `tagpr:major` |
-| `minorLabels` | Custom labels for minor version increment | `tagpr:minor` |
+| `majorLabels` | Custom labels for major version increment | `major` |
+| `minorLabels` | Custom labels for minor version increment | `minor` |
 | `commitPrefix` | Customize commit message prefix | `[tagpr]` |
 
 ### GitHub Actions Workflow
@@ -102,8 +102,8 @@ For Go projects using goreleaser, see [references/goreleaser-integration.md](ref
 tagpr determines the next version using:
 
 1. **Label-based**: If merged PRs have labels:
-   - `tagpr:major` or `major` → Major version bump
-   - `tagpr:minor` or `minor` → Minor version bump
+   - `major` → Major version bump
+   - `minor` → Minor version bump
    - No label → Patch version bump
 
 2. **Manual override**: Edit the version file or apply labels to the tagpr PR
