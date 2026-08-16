@@ -8,8 +8,8 @@
     {
       "name": "handlename",
       "source": ".",
-      "description": "handlename's personal Claude Code plugin bundle: commit-it, create-pr, draw-mermaid, github-attachment-upload, github-resource-access, maint-glossary, mermaid-to-svg, persona-mimic-trainer, plan-to-issue and setup-tagpr skills, plus the worktree-setup SessionStart hook.",
-      "version": "0.5.1"
+      "description": "handlename's personal Claude Code plugin bundle: commit-it, create-pr, draw-mermaid, github-attachment-upload, github-resource-access, maint-glossary, mermaid-to-svg, multirepo, persona-mimic-trainer, plan-to-issue and setup-tagpr skills, plus the worktree-setup SessionStart hook.",
+      "version": "0.6.0"
     }
   ]
 }
