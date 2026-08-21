@@ -108,6 +108,24 @@ tagpr determines the next version using:
 
 2. **Manual override**: Edit the version file or apply labels to the tagpr PR
 
+### Release Labels (authoritative)
+
+When suggesting or applying labels, use tagpr's built-in default label names
+**exactly as written below**. Do not invent prefixed variants.
+
+| Version bump | Label to apply |
+|--------------|----------------|
+| Major        | `major`        |
+| Minor        | `minor`        |
+| Patch / fix  | *(no label)*   |
+
+> ⚠️ Do **not** suggest or create `tagpr:major` / `tagpr:minor`. These are not
+> tagpr's defaults (`defaultMajorLabels = "major"`, `defaultMinorLabels =
+> "minor"` in tagpr's `config.go`), so a PR labeled that way is ignored and
+> falls back to a patch bump. Only diverge from `major` / `minor` if you have
+> explicitly set `majorLabels` / `minorLabels` in `.tagpr`; then apply the
+> exact names you configured there.
+
 ## Verification Steps
 
 After setup, verify by:
