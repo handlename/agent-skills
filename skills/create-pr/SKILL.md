@@ -31,9 +31,9 @@ Execute the following tasks. Run tasks in parallel where possible.
 5. Check if a PR template exists and generate the description (embed the mermaid source as a draft when a diagram was authored).
 6. Generate the PR title.
 7. If the repository adopts tagpr, ask the user which version-bump label to apply to this PR (see "tagpr Version-Bump Label" guideline). Skip this step otherwise.
-8. Present the PR creation details — including the drafted diagram (shown as mermaid source at this point) — to the user and obtain approval. This approval also authorizes the diagram attachment upload.
-9. If a diagram was authored: spawn a subagent invoking `mermaid-to-svg` to draw the SVG, then a subagent invoking `github-attachment-upload` to publish it, then embed the returned image (or fall back to inline mermaid on failure).
-10. Create the PR (applying the chosen tagpr label, if any) and report the result.
+8. Present the PR creation details — including the drafted diagram (shown as mermaid source at this point) — to the user and obtain approval. This approval also authorizes the diagram attach in step 10.
+9. Create the PR (applying the chosen tagpr label, if any); its body carries the diagram in its mermaid fallback form for now.
+10. If a diagram was authored: spawn a subagent invoking `mermaid-to-svg` to draw the SVG, then a subagent invoking `github-attachment-upload` (`target_type=pr`, `mode=edit`) against the created PR to attach it, then `gh pr edit --body` to embed the returned image above the collapsed mermaid (or leave the visible mermaid on failure). Report the result.
 
 ---
 
@@ -185,8 +185,8 @@ When the change is **structural**, attach a diagram that lets a reviewer grasp t
 
 **How to produce and embed it** (mirrors the `plan-to-issue` skill):
 1. Author the diagram as **mermaid** via a **subagent invoking the `draw-mermaid` skill** (input: the diagram intent; output: a syntax-validated mermaid source, or `FAILED: <reason>`) — the returned mermaid is the canonical record of the diagram's structure and is guaranteed to parse. Pick the type that best conveys it (`flowchart`, `sequenceDiagram`, `stateDiagram-v2`, `erDiagram`, …).
-2. The mermaid appears as a visible source block in the draft shown at the confirmation gate. Uploading is a GitHub write, so it happens **only after** the user approves PR creation (that approval covers the upload).
-3. After approval, produce the image in two subagent steps: first **`mermaid-to-svg`** (input: the mermaid source; output: an SVG file path, or `FAILED: <reason>`), then **`github-attachment-upload`** (input: that SVG path + the target `owner/repo`; output: an attachment URL, or `FAILED: <reason>`).
+2. The mermaid appears as a visible source block in the draft shown at the confirmation gate. Attaching is a GitHub write, so it happens **only after** the user approves PR creation (that approval covers the attach). Because `github-attachment-upload` attaches to an **existing** PR, the PR is created first (with the mermaid fallback body), then the image is embedded into it.
+3. After the PR exists, produce and embed the image in subagent steps: first **`mermaid-to-svg`** (input: the mermaid source; output: an SVG file path, or `FAILED: <reason>`), then **`github-attachment-upload`** (input: that SVG path + the PR's `owner/repo`, PR number, `target_type=pr`, `mode=edit`; output: two lines `url:` / `location:`, or `FAILED: <reason>`), then set the PR body via `gh pr edit --body`.
 4. On success, embed the image, immediately followed by the mermaid source in a collapsed `<details>` block so the canonical structure stays one click away:
    ~~~markdown
    ![big picture](<user-attachments URL>)
@@ -202,9 +202,9 @@ When the change is **structural**, attach a diagram that lets a reviewer grasp t
    </details>
    ~~~
    **Never wrap the mermaid in an HTML comment** (`<!-- -->`): mermaid arrows (`-->`) contain `--`, which terminates the comment early and leaks the source as visible text.
-5. **Fallback:** if either subagent returns `FAILED` (`mermaid-to-svg` could not draw the SVG, or `github-attachment-upload` hit e.g. GitHub session not logged in / npx cannot fetch `@playwright/cli`), keep a visible ` ```mermaid ` code block instead and report the fallback and its reason to the user. Never let the image step block PR creation.
+5. **Fallback:** if either subagent returns `FAILED` (`mermaid-to-svg` could not draw the SVG, or `github-attachment-upload` hit e.g. `gh` older than 2.99.0 or the attach did not complete), keep a visible ` ```mermaid ` code block instead and report the fallback and its reason to the user. Never let the image step block PR creation.
 
-**To update the diagram later:** edit the mermaid, re-run `mermaid-to-svg`, re-invoke `github-attachment-upload`, and replace the image URL. The SVG layout is throwaway; only the mermaid persists.
+**To update the diagram later:** edit the mermaid, re-run `mermaid-to-svg`, re-invoke `github-attachment-upload` against the PR with the new file, and replace the image URL. The SVG layout is throwaway; only the mermaid persists.
 
 ### PR Title Generation
 - Single commit: Use the first line of the commit message.

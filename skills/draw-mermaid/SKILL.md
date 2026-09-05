@@ -90,7 +90,7 @@ Never return an unvalidated diagram as if it were validated; if it does not pars
 ## Notes for Callers
 
 - Invoke through a subagent and treat its final message as the return value: a validated mermaid source, or `FAILED: ...`.
-- The returned mermaid is the **canonical structure record** — preserve it (e.g. in a collapsed `<details>` block) and pass it to `mermaid-to-svg` when an image is wanted. `draw-mermaid` produces the diagram; `mermaid-to-svg` hand-draws it as an SVG file; `github-attachment-upload` publishes that file. They compose: `draw-mermaid` → validated mermaid → `mermaid-to-svg` → SVG path → `github-attachment-upload` → attachment URL.
+- The returned mermaid is the **canonical structure record** — preserve it (e.g. in a collapsed `<details>` block) and pass it to `mermaid-to-svg` when an image is wanted. `draw-mermaid` produces the diagram; `mermaid-to-svg` hand-draws it as an SVG file; `github-attachment-upload` publishes that file. They compose: `draw-mermaid` → validated mermaid → `mermaid-to-svg` → SVG path → `github-attachment-upload` (into an existing issue/PR) → attachment URL.
 - Validation is pinned to mermaid **11.16.0**. A diagram that parses here is guaranteed against that grammar; features newer than 11.16.0 are not recognized.
 - To bump the vendored mermaid version, replace `vendor/mermaid.min.js` with a newer pinned build and update the version noted here and in the frontmatter.
 

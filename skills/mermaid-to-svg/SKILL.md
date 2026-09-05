@@ -134,7 +134,7 @@ Run this before returning the path — it is the discipline that keeps output fr
 - Prefer a mermaid source produced by the `draw-mermaid` skill: it returns a **syntax-validated** mermaid (`mermaid.parse()`-checked), so the diagram this skill hand-draws is based on a source that actually parses. This skill only validates the mermaid *conceptually* (extractable nodes/edges) — it does not run a parser.
 - Pass a `focus` node when you know what the diagram is about (e.g. the component a PR changes) — it makes the accent land where it matters instead of being guessed.
 - Invoke through a subagent and treat its final message as the return value: an SVG file path, or `FAILED: ...`.
-- To publish the SVG as a GitHub issue attachment, pass the returned path to `github-attachment-upload`. The composition is: `draw-mermaid` → validated mermaid → `mermaid-to-svg` → SVG path → `github-attachment-upload` → attachment URL.
+- To publish the SVG as a GitHub attachment, pass the returned path to `github-attachment-upload` **together with an existing target issue/PR** (it attaches there and returns the `user-attachments` URL). The composition is: `draw-mermaid` → validated mermaid → `mermaid-to-svg` → SVG path → `github-attachment-upload` (into a target issue/PR) → attachment URL.
 - Keep the mermaid source you passed in — it is the canonical record for future updates. To update a diagram: edit the mermaid, re-run this skill to redraw the SVG, and re-upload. The SVG layout is throwaway; only the mermaid persists.
 - If the source is large, this skill renders all of it but may note it is over the comfortable budget — that is a hint to consider splitting the mermaid into overview + detail at authoring time.
 
