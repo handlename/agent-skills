@@ -31,7 +31,7 @@ claude plugin marketplace add handlename/agent-skills
 claude plugin install handlename@handlename
 ```
 
-All skills listed under [Available Skills](#available-skills) are bundled into a single `handlename` plugin, together with the `worktree-setup` SessionStart hook. The repository root itself is the plugin (`.claude-plugin/marketplace.json` points at `source: "."`), so the plugin reads the same `skills/<name>/` directories that `gh skill install` fetches. Both paths share one physical source with no symlinks and no duplicated files.
+All skills listed under [Available Skills](#available-skills) are bundled into a single `handlename` plugin. The repository root itself is the plugin (`.claude-plugin/marketplace.json` points at `source: "."`), so the plugin reads the same `skills/<name>/` directories that `gh skill install` fetches. Both paths share one physical source with no symlinks and no duplicated files.
 
 | Component | Type | Description |
 | :--- | :--- | :--- |
@@ -48,7 +48,6 @@ All skills listed under [Available Skills](#available-skills) are bundled into a
 | `persona-mimic-trainer` | skill | Train and iteratively refine a custom sub-agent that mimics a specific person's decision-making criteria, cognitive biases, and communication style for mock wall-hitting (pre-communication verification). |
 | `plan-to-issue` | skill | Turn a finalized implementation plan or design into a GitHub tracking issue (overview + PR-granularity checklist plus a self-contained detailed comment), or post it as a comment on an existing related issue. |
 | `setup-tagpr` | skill | Set up tagpr for automated release management: creates and updates release pull requests for unreleased items, tags them on merge, and creates GitHub Releases. Supports goreleaser (Go) and TypeScript/Node.js projects. |
-| `worktree-setup` | hook | At session start (SessionStart hook), copies untracked files declared in `.worktreeinclude` from the main git worktree into linked worktrees, and runs setup scripts declared in `.worktreesetup` (e.g. `mise trust`, `aqua policy allow`) for repositories on a trust allowlist. |
 
 ## Installation
 
