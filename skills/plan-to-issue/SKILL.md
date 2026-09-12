@@ -39,8 +39,8 @@ This skill does NOT gather requirements or design the solution — that is the j
   3. If the current content **diverges** from what the session expects (i.e. it changed since the session's knowledge), **present the diff** — session's assumption vs. current issue content — and **ask the user how to reconcile**, section by section. **Never silently overwrite concurrent human edits.**
   4. Merging any content requires **explicit user confirmation**. Apply only the session-originated change (e.g. one PR URL, one checkbox) on top of the current content; leave everything else as-is.
 - **The issue description is non-destructive**: never rewrite the issue's description by default, in any mode. The progress checklist and the plan live in **comments**, not the description. Update the description only with separate, explicit approval.
-- **Self-contained comment test**: the detailed plan comment must let a context-less agent implement each task from the comment alone. Always include: domain/background, current→changed data flow & impact, per-task implementation steps with concrete `file:line` references, logic/spec with an expected-value table where applicable, and completion criteria.
-- **ID correspondence is mandatory**: every checklist item ID in the progress-checklist comment MUST appear in the detailed plan comment, and vice versa, so "implement TASK-A2" is unambiguous.
+- **Self-contained comment test**: the detailed plan comment must let a context-less agent implement each task from the comment alone. Always include: domain/background, current→changed data flow & impact, per-task implementation steps with concrete `file:line` references, logic/spec with an expected-value table where applicable, any constraints, caveats or rationale that do not fit on the checklist line, and completion criteria.
+- **ID correspondence is mandatory**: every checklist item ID in the progress-checklist comment MUST appear in the detailed plan comment, and vice versa, so "implement TASK-A2" is unambiguous and so a checklist item's detail can be found by matching its ID — the only route, since items are not linked.
 - **Big-picture diagram is mandatory**: the issue MUST include a diagram that lets a reader grasp the whole at a glance — the problem/system the issue targets (e.g. affected components and their relationships, current vs. changed data flow, or the state transition being fixed). Author it as **mermaid** — the mermaid source is the **canonical record of the diagram's structure**. Choose the diagram type that best conveys the structure (`flowchart`, `sequenceDiagram`, `erDiagram`, `stateDiagram-v2`, etc.). **Author the mermaid via a subagent invoking the `draw-mermaid` skill** (input: the diagram intent; output: a syntax-validated mermaid source, or `FAILED: <reason>`) so it is guaranteed to parse before it is shown or handed to `mermaid-to-svg`. It is for human comprehension, not implementation detail; keep it high-level. In new-issue mode it lives in the description; in existing-issue mode place it near the top of the plan comment.
 - **Diagram is posted as an SVG image; mermaid is preserved in a collapsed `<details>` block**: the diagram is displayed as a **free-layout SVG image**, not a rendered mermaid block. `github-attachment-upload` attaches to an **existing** issue/PR (it does not create a throwaway one), so the image is embedded **after** its container is posted. Produce it via **subagents**: first `mermaid-to-svg` (input: the mermaid source; output: an SVG file path, or `FAILED: <reason>`), then — once the container exists — `github-attachment-upload` (input: that SVG path + the target `owner/repo`, issue/PR number, `target_type`, and `mode`; output: two lines `url:` / `location:`, or `FAILED: <reason>`). Which container and mode:
   - **New-issue mode** (diagram in the description): create the issue first with the mermaid in its fallback `<details>` form, then call `github-attachment-upload` with `target_type=issue`, `mode=edit`, and finally set the description via `gh issue edit --body` so `![big picture](<url>)` sits in the Big picture section, immediately followed by the mermaid source inside `<details><summary>…</summary>` with a ` ```mermaid ` fence.
@@ -55,14 +55,23 @@ This skill does NOT gather requirements or design the solution — that is the j
 ## Progress Checklist (format & location)
 
 - **Location**: the progress checklist lives in a **dedicated progress-checklist comment** on the tracking issue — NOT in the description. The description references it (e.g. "進捗は進捗チェックリストコメント参照 / See the progress-checklist comment"). This keeps the description non-destructive and the living progress tracker isolated and easy to edit.
-- **Format**: one checklist item per PR-granularity task. The `TASK-` line carries the checkbox; PR URLs are indented **sub-items** under their task. Dependency notes are inline (`※after TASK-X`).
+- **One item, one line**: each checklist item MUST fit in **70 characters or fewer** (count characters plainly — do not distinguish full-width from half-width). The line carries only a short noun-phrase summary of the deliverable. Constraints, rationale, file names, caveats and type/status tags such as `[設定]` / `[freeze]` / `[判定]` do NOT belong on it — they go under the matching `### TASK-<ID>:` heading in the plan comment, which the reader finds by the `TASK-` ID. If the summary will not fit, shorten the deliverable phrase — never the `TASK-` ID or the repo — and move the detail to the plan comment. This section is the single statement of the rule; everywhere else points here.
+
+  ```markdown
+  Good: - [ ] **TASK-A1** agent-skills: リリース準備 workflow 追加
+  Bad:  - [ ] **TASK-A1** agent-skills: s1-PR1 加算的準備 — set-commit-status composite action（NEW）、release-gate.yml（NEW・この時点では必須 check 化しない）…
+  ```
+
+- **Format**: one checklist item per PR-granularity task. The `TASK-` line carries the checkbox and the summary only. **Dependency notes and PR URLs are both indented sub-items**, one per line.
 
   ```markdown
   - [ ] **TASK-A1** {repo}: {PR-level work}
       - https://github.com/handlename/agent-skills/pull/1
-  - [ ] **TASK-A2** {repo}: {PR-level work} ※after TASK-A1
-  - [ ] **TASK-B1** {repo}: {PR-level work}
+  - [ ] **TASK-A2** {repo}: {PR-level work}
+      - ※after TASK-A1
   ```
+
+- **A pointer to the detail, not a link per item**: do NOT link individual items. The progress-checklist comment opens with one plain-text pointer line naming the plan comment (see the template). GitHub's current issue UI gives headings in issue bodies and comments **no anchor ids**, so `#user-content-<slug>` does not resolve; readers navigate by matching the `TASK-` ID.
 
 - **State transitions** (the only mutations progress-update mode performs):
   - **PR created for a task** → append that PR's URL as an indented sub-item under the task's `TASK-` line. Multiple PRs for one task → multiple sub-items.
@@ -89,7 +98,7 @@ Always prefix with `TASK-` so an ID alone identifies what it refers to.
 - **Multi-phase task** → a phase-identifying letter + number: `TASK-A1`, `TASK-G7`.
   - Assign each phase a distinct letter (in dependency/logical order; a mnemonic letter is fine if clearer).
   - Number tasks within a phase sequentially.
-- Granularity: **one checklist item per PR**. Note dependency order explicitly (e.g. `TASK-A1 → TASK-A2`).
+- Granularity: **one checklist item per PR**. Record dependency order as an indented `※after TASK-X` sub-item under the dependent task, never inline on the item line.
 - The scheme applies in all modes. The checklist lives in the dedicated progress-checklist comment.
 
 ## Language
@@ -108,7 +117,7 @@ Always prefix with `TASK-` so an ID alone identifies what it refers to.
    - **Comment on an existing issue** (default when the plan originates from, revises, or answers an existing issue — check the session for an issue the plan refers to): post the plan as a new comment there. Identify the superseded plan comment (if any) so it can be linked. **Run the issue-primacy gate first** (this is a write to an existing issue).
    - **Cross-repo alternative**: per-repo issues, offered alongside the single tracking issue.
 4. **Draft the description** *(new-issue mode only)* — Overview (what & why) + the **big-picture diagram authored as mermaid via a subagent invoking `draw-mermaid`** (the draft shows the syntax-validated mermaid source; it becomes an SVG image in step 8) + Scope (in/out) + a pointer to the progress-checklist comment. The description does **not** contain the checklist itself.
-5. **Draft the progress-checklist comment** *(new-issue mode)* — the PR-granularity checklist with `TASK-` IDs and dependency notes, in the format defined in Progress Checklist. (In existing-issue mode, the checklist may live inside the plan comment as acceptance criteria until the plan is accepted.)
+5. **Draft the progress-checklist comment** *(new-issue mode)* — the PR-granularity checklist with `TASK-` IDs, in the format defined in Progress Checklist. (In existing-issue mode, the checklist may live inside the plan comment as acceptance criteria until the plan is accepted.)
 6. **Draft the self-contained plan comment(s)** — sections: Provenance header (pipeline, stats, review invitation; and in existing-issue mode a supersession note linking the previous plan comment with a summary of what changed); Background/domain knowledge; Current → changed (data flow & impact); Implementation plan per `TASK-` ID with `file:line` references; Logic/spec + expected-value table; Completion criteria. Keep comment IDs in sync with the checklist.
 7. **Apply language detection** — render everything in the user's session language.
 8. **GitHub authorization gate** — present the drafted description, progress-checklist comment, and plan comment(s) to the user (the diagram appears as its mermaid source at this point) and obtain explicit approval BEFORE any GitHub write. The approval covers the posting in step 9 and the diagram attach in step 10.
@@ -154,15 +163,22 @@ flowchart LR
 
 ```markdown
 ## 進捗チェックリスト / Progress checklist
-{dependency note, e.g. TASK-A1 → TASK-A2 → (TASK-B1, TASK-C1 parallel)}
+> 各 TASK の詳細は実装計画コメントの同じ TASK-ID の見出しを参照 / See the heading with the same TASK- ID in the plan comment.
+
+### Stage 1: {phase name}
 
 - [ ] **TASK-A1** {repo}: {PR-level work}
     - {PR URL, appended when the PR is created}
-- [ ] **TASK-A2** {repo}: {PR-level work} ※after TASK-A1
-- [ ] **TASK-B1** {repo}: {PR-level work}
+- [ ] **TASK-A2** {repo}: {PR-level work}
+    - ※after TASK-A1
 
-> このコメントが進捗の正 / This comment is the source of truth for progress. Checked (`[x]`) = PR merged; sub-item URL = PR created.
+### Stage 2: {phase name}
+
+- [ ] **TASK-B1** {repo}: {PR-level work}
+    - ※after TASK-A2
 ```
+
+`### Stage N:` headings group a multi-phase plan (one per `TASK-` phase letter); omit them for a single-phase plan. The pointer line is plain text, not a link — GitHub gives comment headings no anchor ids — and applies to new-issue mode only, where the checklist has its own comment.
 
 ## Plan Comment Template
 
@@ -198,6 +214,7 @@ Goal: a person/agent without prior context can implement from this comment alone
 ## 3. Implementation plan (per TASK- ID)
 ### TASK-A1: {title}
 - References: `path/to/file.go:120`, ...
+- Constraints / caveats / rationale: {constraints, rationale and caveats that do not fit on the checklist line — omit if there are none}
 - Steps: ...
 
 ## 4. Logic / spec & expected values
@@ -218,7 +235,7 @@ Follow the `github-resource-access` skill: gh reads are free; **writes (issue cr
 - [ ] **Issue-primacy gate** ran before any write to an existing issue: issue and target comment re-fetched, last-updated time checked, and on divergence a diff was shown and reconciliation confirmed — never a silent overwrite of concurrent human edits.
 - [ ] New-issue mode: tracking issue has overview + scope in the description, a **dedicated progress-checklist comment** with `TASK-` IDs, and a self-contained plan comment.
 - [ ] Progress checklist is in a **dedicated comment**, not the description; the description is left non-destructive.
-- [ ] Checklist follows the format: `- [ ] **TASK-ID** {repo}: {work}` with PR URLs as indented sub-items and `※after` dependency notes inline.
+- [ ] Checklist follows the **Progress Checklist** format: one line per item, 70 characters or fewer, with PR URLs and dependency notes as indented sub-items; overflow relocated to the plan comment.
 - [ ] Progress-update mode applied the correct transition: PR created → URL sub-item appended; PR merged → box checked (`[x]`). issue#/TASK came from session context, not auto-discovery.
 - [ ] Proactive progress-update offer made when a PR was created in a tracking-issue session (create-pr left unmodified).
 - [ ] Big-picture diagram included (description for new-issue mode, top of the plan comment for existing-issue mode) and kept high-level.
