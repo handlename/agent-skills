@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Supervisor Dashboard</title>
+<style>
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #1c2128;
+  --muted: #59636e;
+  --border: #d8dee4;
+  --accent: #0969da;
+  --warn-bg: #fff8c5;
+  --warn-text: #7d4e00;
+  --ok-bg: #dafbe1;
+  --ok-text: #1a7f37;
+  --run-bg: #ddf4ff;
+  --run-text: #0550ae;
+  --idle-bg: #eaeef2;
+  --idle-text: #424a53;
+  --bad-bg: #ffebe9;
+  --bad-text: #cf222e;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --text: #e6edf3;
+    --muted: #9198a1;
+    --border: #30363d;
+    --accent: #4493f8;
+    --warn-bg: #3b2e00;
+    --warn-text: #e3b341;
+    --ok-bg: #0f2e1a;
+    --ok-text: #56d364;
+    --run-bg: #0c2d6b;
+    --run-text: #79c0ff;
+    --idle-bg: #262c36;
+    --idle-text: #c9d1d9;
+    --bad-bg: #3d1214;
+    --bad-text: #ff7b72;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --text: #e6edf3;
+  --muted: #9198a1;
+  --border: #30363d;
+  --accent: #4493f8;
+  --warn-bg: #3b2e00;
+  --warn-text: #e3b341;
+  --ok-bg: #0f2e1a;
+  --ok-text: #56d364;
+  --run-bg: #0c2d6b;
+  --run-text: #79c0ff;
+  --idle-bg: #262c36;
+  --idle-text: #c9d1d9;
+  --bad-bg: #3d1214;
+  --bad-text: #ff7b72;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+  overflow-wrap: anywhere;
+}
+main { max-width: 960px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 1.4rem; margin: 8px 0 16px; }
+h2 { font-size: 1.1rem; margin: 24px 0 8px; }
+h3 { font-size: 1rem; margin: 0 0 4px; }
+section > ul { list-style: none; margin: 0; padding: 0; }
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 0 0 8px;
+}
+.action { border-left: 4px solid var(--warn-text); }
+.meta, .empty, footer { color: var(--muted); font-size: 0.85rem; }
+.badge {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--idle-bg);
+  color: var(--idle-text);
+}
+.s-needs_user, .s-needs_input, .s-missing { background: var(--warn-bg); color: var(--warn-text); }
+.s-running { background: var(--run-bg); color: var(--run-text); }
+.s-done, .s-archived { background: var(--ok-bg); color: var(--ok-text); }
+.s-cancelled { background: var(--bad-bg); color: var(--bad-text); }
+.workers { list-style: none; margin: 8px 0 0; padding: 0; }
+.workers li { border-top: 1px solid var(--border); padding: 6px 0 0; margin: 6px 0 0; }
+.artifacts { margin: 4px 0 0; padding-left: 20px; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; }
+a { color: var(--accent); }
+footer { margin: 24px 0 8px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Supervisor Dashboard</h1>
+<section id="actions">
+<h2>Actions requested from you</h2>
+{{ACTIONS}}
+</section>
+<section id="tasks">
+<h2>Tasks</h2>
+{{TASKS}}
+</section>
+<section id="archived">
+<h2>Archived</h2>
+{{ARCHIVED}}
+</section>
+{{FOOTER}}
+</main>
+</body>
+</html>

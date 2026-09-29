@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "rev": 12,
+  "updated_at": "2026-10-17T10:42:00+09:00",
+  "supervisor": {
+    "dir": "/Users/handlename/supervisor",
+    "session_ids": ["sess_sup_01", "sess_sup_02"],
+    "archive_consent": { "text": "成果を確認できた worker は確認なしでアーカイブしてよい", "at": "2026-10-16T08:50:00+09:00" },
+    "dashboard": { "url": "https://claude.ai/code/artifact/xxxxxxxx", "path": "/Users/handlename/supervisor/dashboard.html" }
+  },
+  "tasks": [
+    {
+      "id": "T-0003",
+      "title": "Add retry to uploader",
+      "request": "repo-a と repo-b の uploader にリトライを追加して。push して PR を作ってよい",
+      "push_consent": { "text": "push して PR を作ってよい", "at": "2026-10-17T09:00:00+09:00" },
+      "status": "running",
+      "next_action": "w-0004 / w-0005 の完了待ち",
+      "user_actions": [
+        { "id": "UA-0002", "description": "repo-b の PR をレビュー", "since": "2026-10-17T10:30:00+09:00" }
+      ],
+      "artifacts": [
+        { "kind": "branch", "label": "repo-a hn/uploader-retry-x1", "ref": "/Users/handlename/src/github.com/org/repo-a#hn/uploader-retry-x1" },
+        { "kind": "commit", "label": "repo-a 3f2a9c1", "ref": "3f2a9c1e0d" },
+        { "kind": "pr", "label": "repo-a#42", "url": "https://github.com/org/repo-a/pull/42" },
+        { "kind": "ci", "label": "repo-a CI", "url": "https://github.com/org/repo-a/actions/runs/123" }
+      ],
+      "worker_ids": ["w-0004", "w-0005"],
+      "created_at": "2026-10-17T09:00:00+09:00"
+    },
+    {
+      "id": "T-0004",
+      "title": "Tidy notes folder",
+      "request": "~/notes の重複ファイルを整理して",
+      "push_consent": null,
+      "status": "waiting",
+      "next_action": "~/notes の先行 worker w-0006 のアーカイブ後に起動",
+      "user_actions": [],
+      "artifacts": [],
+      "worker_ids": ["w-0007"],
+      "created_at": "2026-10-17T10:00:00+09:00"
+    }
+  ],
+  "workers": [
+    {
+      "id": "w-0004",
+      "task_id": "T-0003",
+      "session_id": "sess_abc123",
+      "started_by": "sess_sup_01",
+      "handle": "t0003-w0004",
+      "title": "uploader retry (repo-a)",
+      "cwd": "/Users/handlename/src/github.com/org/repo-a",
+      "kind": "git",
+      "delivery": "push_pr",
+      "branch": "hn/uploader-retry-x1",
+      "base_branch": "main",
+      "worktree_path": "/Users/handlename/src/github.com/org/repo-a/.claude/worktrees/uploader-retry-x1",
+      "intended_state": "running",
+      "observed_state": "idle",
+      "observed_at": "2026-10-17T10:41:00+09:00",
+      "last_report": { "message_ref": "msg_01HXYZ", "status": "in_progress", "summary": "retry 実装中", "next_action": "テストを追加" }
+    },
+    {
+      "id": "w-0005",
+      "task_id": "T-0003",
+      "session_id": "sess_def456",
+      "started_by": "sess_sup_01",
+      "handle": "t0003-w0005",
+      "title": "uploader retry (repo-b)",
+      "cwd": "/Users/handlename/src/github.com/org/repo-b",
+      "kind": "git",
+      "delivery": "push_pr",
+      "branch": "hn/uploader-retry-y2",
+      "base_branch": "main",
+      "worktree_path": "/Users/handlename/src/github.com/org/repo-b/.claude/worktrees/uploader-retry-y2",
+      "intended_state": "running",
+      "observed_state": "needs_input",
+      "observed_at": "2026-10-17T10:41:00+09:00",
+      "last_report": { "message_ref": "msg_01HABC", "status": "unparsed", "error": "no supervisor-report block found", "at": "2026-10-17T10:40:00+09:00" }
+    },
+    {
+      "id": "w-0007",
+      "task_id": "T-0004",
+      "session_id": null,
+      "started_by": null,
+      "handle": "t0004-w0007",
+      "title": "notes tidy",
+      "cwd": "/Users/handlename/notes",
+      "kind": "non-git",
+      "delivery": "files",
+      "branch": null,
+      "worktree_path": null,
+      "intended_state": "pending",
+      "observed_state": "none",
+      "observed_at": null,
+      "last_report": null
+    }
+  ],
+  "archived": [
+    { "id": "T-0002", "title": "Rename config key", "artifacts": [], "archived_at": "2026-10-17T08:30:00+09:00", "cancelled": true, "reason": "ユーザーが不要と判断" },
+    { "id": "T-0001", "title": "Fix typo", "artifacts": [{ "kind": "pr", "label": "repo-a#40", "url": "https://github.com/org/repo-a/pull/40" }], "archived_at": "2026-10-17T08:00:00+09:00" }
+  ]
+}
