@@ -846,32 +846,36 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(subprocess.run(["sh", "-c", f"printf %s {cmd[4:]}"], capture_output=True, text=True).stdout,
                          "/tmp/it's here")
 
-    def test_every_worker_row_has_escaped_zed_command_and_copy_button(self):
+    def test_every_worker_row_has_escaped_click_to_copy_zed_command(self):
         state = fixture_state()
         find(state["workers"], "w-0004")["worktree_path"] = "/tmp/<b>&'x'{{TASKS}}"
         page = self.page(state)
         tasks = page[page.index('id="tasks"'):page.index('id="archived"')]
-        self.assertEqual(tasks.count('class="wk"'), tasks.count('class="wk__cmd"'))
-        self.assertEqual(tasks.count('class="wk__cmd"'), tasks.count('aria-label="Copy zed command">Copy</button>'))
-        self.assertIn('<code class="wk__cmd">zed &#x27;/tmp/&lt;b&gt;&amp;&#x27;\\&#x27;&#x27;x&#x27;\\&#x27;&#x27;&#123;&#123;TASKS&#125;&#125;&#x27;</code>', tasks)
+        self.assertEqual(tasks.count('class="wk"'), tasks.count('class="wk__cmd copyable"'))
+        self.assertEqual(tasks.count('class="wk__cmd copyable"'), tasks.count('aria-label="Copy zed command" title="クリックでコピー">zed '))
+        self.assertIn('<code class="wk__cmd copyable" data-copy role="button" tabindex="0" aria-label="Copy zed command" title="クリックでコピー">zed &#x27;/tmp/&lt;b&gt;&amp;&#x27;\\&#x27;&#x27;x&#x27;\\&#x27;&#x27;&#123;&#123;TASKS&#125;&#125;&#x27;</code>', tasks)
         self.assertNotIn("zed://", page)
+        self.assertNotIn(">Copy</button>", page)
         self.assertIn("navigator.clipboard.writeText", page)
 
-    def test_task_and_archived_ids_have_escaped_copy_button(self):
+    def test_task_and_archived_ids_are_click_to_copy_controls(self):
         state = fixture_state()
         find(state["tasks"], "T-0004")["id"] = "T-0004"
         state["archived"] = [{"id": "T-0900", "title": "old", "artifacts": [], "archived_at": "2026-01-01T00:00:00Z"}]
         page = self.page(state)
         tasks = page[page.index('id="tasks"'):page.index('id="archived"')]
         archived = page[page.index('id="archived"'):]
+        ctl = '<button type="button" class="{cls} copyable" data-copy aria-label="Copy {id}" title="クリックでコピー">{id}</button>'
         for t in state["tasks"]:
-            self.assertIn(f'<span class="id task__id">{t["id"]}</span><button type="button" class="copy" data-copy aria-label="Copy {t["id"]}">Copy</button>', tasks)
-        self.assertEqual(tasks.count('class="id task__id"'), len(state["tasks"]))
-        self.assertIn('<span class="id">T-0900</span><button type="button" class="copy" data-copy aria-label="Copy T-0900">Copy</button>', archived)
+            self.assertIn(ctl.format(cls="id task__id", id=t["id"]), tasks)
+        self.assertEqual(tasks.count('class="id task__id copyable"'), len(state["tasks"]))
+        self.assertIn(ctl.format(cls="id", id="T-0900"), archived)
+        self.assertNotIn(">Copy</button>", page)
 
-    def test_copy_button_label_is_html_escaped(self):
-        self.assertEqual(st._copy_button('T-<1>"'),
-                         '<button type="button" class="copy" data-copy aria-label="Copy T-&lt;1&gt;&quot;">Copy</button>')
+    def test_copy_control_text_is_html_escaped(self):
+        self.assertEqual(st._copy_id("id", 'T-<1>"'),
+                         '<button type="button" class="id copyable" data-copy aria-label="Copy T-&lt;1&gt;&quot;" '
+                         'title="クリックでコピー">T-&lt;1&gt;&quot;</button>')
 
     def test_external_resources_are_google_fonts_only(self):
         page = self.page(fixture_state())
