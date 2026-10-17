@@ -890,6 +890,12 @@ class RenderTest(unittest.TestCase):
             self.assertIn(".hero[data-pending]", selector)
         self.assertIn("@media (prefers-reduced-motion: reduce)", TEMPLATE)
 
+    def test_copyable_hover_changes_no_box_property(self):
+        rules = re.findall(r"([^{}]*\.copyable[^{}]*:hover[^{}]*)\{([^}]*)\}", TEMPLATE)
+        self.assertTrue(rules)
+        for selector, body in rules:
+            self.assertNotRegex(body, r"\b(padding|margin|border(?!-radius)|font|letter-spacing|width)[a-z-]*\s*:", selector)
+
 
 class DigestTest(unittest.TestCase):
     def test_contents(self):
