@@ -896,6 +896,11 @@ class RenderTest(unittest.TestCase):
         for selector, body in rules:
             self.assertNotRegex(body, r"\b(padding|margin|border(?!-radius)|font|letter-spacing|width)[a-z-]*\s*:", selector)
 
+    def test_copyable_rest_background_has_matching_hover_fill(self):
+        for selector, body in re.findall(r"([^{}]*\.copyable[^{}:]*)\{([^}]*)\}", TEMPLATE):
+            if re.search(r"\bbackground\s*:", body):
+                self.assertRegex(TEMPLATE, re.escape(selector.strip()) + r":hover\s*\{[^}]*background:\s*var\(--hover-bg\)")
+
 
 class DigestTest(unittest.TestCase):
     def test_contents(self):
