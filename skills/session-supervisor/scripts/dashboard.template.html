@@ -115,7 +115,7 @@ main { display: grid; gap: calc(var(--gap) * 1.5); }
   --font-body: "Barlow", "Hiragino Sans", "Noto Sans JP", "Segoe UI", sans-serif;
   --font-display: "Chakra Petch", "Barlow", "Hiragino Sans", "Noto Sans JP", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, Menlo, "Hiragino Sans", "Noto Sans JP", monospace;
-  --radius: 2px; --gap: 16px;
+  --radius: 2px; --gap: 16px; --hover-bg: rgba(10, 88, 132, 0.12);
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -132,6 +132,7 @@ main { display: grid; gap: calc(var(--gap) * 1.5); }
   --count-bg: var(--lamp); --count-fg: var(--lamp-text); --count-ring: none;
     --count-bg: var(--lamp); --count-fg: var(--lamp-text); --count-ring: none;
     --bracket: #8e9aa1; --tick: #66727a; --scan: rgba(255, 255, 255, 0.02); --bezel: #46525a;
+    --hover-bg: rgba(115, 198, 240, 0.18);
     color-scheme: dark;
   }
 }
@@ -147,6 +148,7 @@ main { display: grid; gap: calc(var(--gap) * 1.5); }
   --lamp: #ffc53d; --lamp-text: #0b0800; --advisory: #5fc6e8; --norm: #63d08f;
   --count-bg: var(--lamp); --count-fg: var(--lamp-text); --count-ring: none;
   --bracket: #8e9aa1; --tick: #66727a; --scan: rgba(255, 255, 255, 0.02); --bezel: #46525a;
+  --hover-bg: rgba(115, 198, 240, 0.18);
   color-scheme: dark;
 }
 
@@ -338,7 +340,7 @@ main { gap: 30px; }
   background: var(--surface-2); border: 1px solid var(--border); padding: 1px 6px;
 }
 .copyable { cursor: pointer; position: relative; }
-.copyable:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
+.copyable:hover { background: var(--hover-bg); border-radius: 2px; }
 .copyable:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .copyable[data-state]::after {
   content: attr(data-state); position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -346,7 +348,9 @@ main { gap: 30px; }
 }
 button.copyable { font: inherit; letter-spacing: inherit; color: inherit; text-align: inherit; margin: 0; border-radius: 0; }
 .wk__cmd.copyable { user-select: text; }
+button.copyable:hover { padding-inline: 4px; margin-inline: -4px; }
 .arc__title .id.copyable { background: none; border: 0; padding: 0; font-size: 0.8em; font-family: var(--font-mono); }
+.arc__title .id.copyable:hover { background: var(--hover-bg); padding-inline: 4px; margin-inline: -4px; }
 .wk__report::before { content: "› "; color: var(--tick); }
 .wk__rs { font-size: 1em; font-weight: 600; }
 .wk__rs::before { content: "["; }
