@@ -543,6 +543,20 @@ def _render_report(r):
             f'{_esc(r.get("summary"))}</p>')
 
 
+def _sh_quote(value):
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+def zed_command(worker):
+    return "zed " + _sh_quote(worker.get("worktree_path") or worker.get("cwd") or "")
+
+
+def _render_zed(worker):
+    # A copied command, not a zed:// link: links do not leave the published artifact's frame.
+    return (f'<p class="wk__zed"><code class="wk__cmd">{_esc(zed_command(worker))}</code>'
+            f'<button type="button" class="wk__copy" data-copy>Copy</button></p>')
+
+
 def _render_worker(w):
     seg = _segment_state(w)
     branch = f' · <code>{_esc(w.get("branch"))}</code>' if w.get("branch") else ""
@@ -550,6 +564,7 @@ def _render_worker(w):
         f'<li class="wk" data-state="{_esc(seg)}"><span class="dot" data-state="{_esc(seg)}" aria-hidden="true"></span>'
         f'<div class="wk__body"><p class="wk__title"><span class="id">{_esc(w.get("id"))}</span> {_esc(w.get("title"))} {_chip(w.get("observed_state"))}</p>'
         f'<p class="wk__meta"><code>{_esc(w.get("cwd"))}</code>{branch} · {_esc(w.get("delivery"))}</p>'
+        f'{_render_zed(w)}'
         f'{_render_report(w.get("last_report"))}</div></li>')
 
 

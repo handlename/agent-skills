@@ -332,6 +332,18 @@ main { gap: 30px; }
 .wk__meta { font: 400 0.72rem/1.45 var(--font-mono); }
 .wk__meta code { font-size: 1em; }
 .wk__report { font: 400 0.76rem/1.45 var(--font-mono); }
+.wk__zed { display: flex; align-items: baseline; gap: 8px; font: 400 0.72rem/1.45 var(--font-mono); color: var(--muted); }
+.wk__cmd {
+  flex: 1; min-width: 0; font-size: 1em; color: var(--text); user-select: all;
+  background: var(--surface-2); border: 1px solid var(--border); padding: 1px 6px;
+}
+.wk__copy {
+  flex: none; cursor: pointer; padding: 1px 8px; border-radius: 1px;
+  font: 600 0.62rem/1.6 var(--font-mono); letter-spacing: 0.12em; text-transform: uppercase;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border);
+}
+.wk__copy:hover { border-color: var(--accent); color: var(--accent); }
+.wk__copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .wk__report::before { content: "› "; color: var(--tick); }
 .wk__rs { font-size: 1em; font-weight: 600; }
 .wk__rs::before { content: "["; }
@@ -416,6 +428,29 @@ main { gap: 30px; }
   var upd = foot && foot.querySelector("time");
   if (asof && foot && upd) asof.textContent = "as of rev " + foot.dataset.rev + " · " + upd.textContent;
 })();
+// Copy the zed command; if the clipboard is refused (e.g. inside the artifact frame), select it for a manual copy.
+document.addEventListener("click", function (e) {
+  var btn = e.target.closest && e.target.closest("[data-copy]");
+  if (!btn) return;
+  var code = btn.parentNode.querySelector(".wk__cmd");
+  function flash(text) {
+    btn.textContent = text;
+    setTimeout(function () { btn.textContent = "Copy"; }, 1500);
+  }
+  function select() {
+    var range = document.createRange();
+    range.selectNodeContents(code);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    flash("Selected");
+  }
+  try {
+    navigator.clipboard.writeText(code.textContent).then(function () { flash("Copied"); }, select);
+  } catch (err) {
+    select();
+  }
+});
 </script>
 </body>
 </html>
