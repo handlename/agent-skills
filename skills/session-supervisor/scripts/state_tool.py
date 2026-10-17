@@ -551,10 +551,15 @@ def zed_command(worker):
     return "zed " + _sh_quote(worker.get("worktree_path") or worker.get("cwd") or "")
 
 
+def _copy_button(what):
+    # Copies the text of the preceding sibling element (see the click handler in the template).
+    return f'<button type="button" class="copy" data-copy aria-label="Copy {_esc(what)}">Copy</button>'
+
+
 def _render_zed(worker):
     # A copied command, not a zed:// link: links do not leave the published artifact's frame.
     return (f'<p class="wk__zed"><code class="wk__cmd">{_esc(zed_command(worker))}</code>'
-            f'<button type="button" class="wk__copy" data-copy>Copy</button></p>')
+            f'{_copy_button("zed command")}</p>')
 
 
 def _render_worker(w):
@@ -584,7 +589,7 @@ def _render_tasks(state):
                 cancel = f'<p class="task__cancel">{_chip("cancelled")} {_esc(task["cancel"].get("reason"))}</p>'
             out.append(
                 f'<article class="task" data-status="{_esc(task.get("status"))}"{" data-cancelled" if task.get("cancel") else ""} style="--i:{i}">'
-                f'<header class="task__head"><span class="id task__id">{_esc(task["id"])}</span>'
+                f'<header class="task__head"><span class="id task__id">{_esc(task["id"])}</span>{_copy_button(task["id"])}'
                 f'<h3 class="task__title">{_esc(task.get("title"))}</h3>{_chip(task.get("status"))}</header>'
                 f'{cancel}'
                 f'<div class="task__progress"><div class="task__segments" role="img" aria-label="{done} of {len(workers)} workers finished">{segs}</div>'
@@ -609,7 +614,7 @@ def _render_archived(state):
             if stub.get("cancelled"):
                 cancelled = f' {_chip("cancelled")} <span class="arc__reason">{_esc(stub.get("reason"))}</span>'
             items.append(
-                f'<li class="arc"{" data-cancelled" if stub.get("cancelled") else ""}><p class="arc__title"><span class="id">{_esc(stub["id"])}</span> '
+                f'<li class="arc"{" data-cancelled" if stub.get("cancelled") else ""}><p class="arc__title"><span class="id">{_esc(stub["id"])}</span>{_copy_button(stub["id"])} '
                 f'{_esc(stub.get("title"))}{cancelled}</p><p class="arc__meta">archived {_time(stub.get("archived_at"))}</p>'
                 f'{_render_artifact_list(stub.get("artifacts", []))}</li>')
         rows = f'<ul class="arc-list">{"".join(items)}</ul>'

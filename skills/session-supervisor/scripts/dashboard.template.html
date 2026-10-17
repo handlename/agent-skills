@@ -337,13 +337,15 @@ main { gap: 30px; }
   flex: 1; min-width: 0; font-size: 1em; color: var(--text); user-select: all;
   background: var(--surface-2); border: 1px solid var(--border); padding: 1px 6px;
 }
-.wk__copy {
+.copy {
   flex: none; cursor: pointer; padding: 1px 8px; border-radius: 1px;
   font: 600 0.62rem/1.6 var(--font-mono); letter-spacing: 0.12em; text-transform: uppercase;
   background: var(--surface); color: var(--text); border: 1px solid var(--border);
 }
-.wk__copy:hover { border-color: var(--accent); color: var(--accent); }
-.wk__copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.copy:hover { border-color: var(--accent); color: var(--accent); }
+.copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.task__id + .copy, .arc__title .copy { margin-left: -2px; padding: 0 6px; font-size: 0.56rem; }
+.arc__title .copy { margin-left: 6px; }
 .wk__report::before { content: "› "; color: var(--tick); }
 .wk__rs { font-size: 1em; font-weight: 600; }
 .wk__rs::before { content: "["; }
@@ -428,11 +430,11 @@ main { gap: 30px; }
   var upd = foot && foot.querySelector("time");
   if (asof && foot && upd) asof.textContent = "as of rev " + foot.dataset.rev + " · " + upd.textContent;
 })();
-// Copy the zed command; if the clipboard is refused (e.g. inside the artifact frame), select it for a manual copy.
+// Copy the text of the element before the button (zed command, task ID); if the clipboard is refused (e.g. inside the artifact frame), select it for a manual copy.
 document.addEventListener("click", function (e) {
   var btn = e.target.closest && e.target.closest("[data-copy]");
   if (!btn) return;
-  var code = btn.parentNode.querySelector(".wk__cmd");
+  var code = btn.previousElementSibling;
   function flash(text) {
     btn.textContent = text;
     setTimeout(function () { btn.textContent = "Copy"; }, 1500);

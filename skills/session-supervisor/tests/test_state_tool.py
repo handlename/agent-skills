@@ -852,10 +852,26 @@ class RenderTest(unittest.TestCase):
         page = self.page(state)
         tasks = page[page.index('id="tasks"'):page.index('id="archived"')]
         self.assertEqual(tasks.count('class="wk"'), tasks.count('class="wk__cmd"'))
-        self.assertEqual(tasks.count('class="wk__cmd"'), tasks.count('<button type="button" class="wk__copy" data-copy>Copy</button>'))
+        self.assertEqual(tasks.count('class="wk__cmd"'), tasks.count('aria-label="Copy zed command">Copy</button>'))
         self.assertIn('<code class="wk__cmd">zed &#x27;/tmp/&lt;b&gt;&amp;&#x27;\\&#x27;&#x27;x&#x27;\\&#x27;&#x27;&#123;&#123;TASKS&#125;&#125;&#x27;</code>', tasks)
         self.assertNotIn("zed://", page)
         self.assertIn("navigator.clipboard.writeText", page)
+
+    def test_task_and_archived_ids_have_escaped_copy_button(self):
+        state = fixture_state()
+        find(state["tasks"], "T-0004")["id"] = "T-0004"
+        state["archived"] = [{"id": "T-0900", "title": "old", "artifacts": [], "archived_at": "2026-01-01T00:00:00Z"}]
+        page = self.page(state)
+        tasks = page[page.index('id="tasks"'):page.index('id="archived"')]
+        archived = page[page.index('id="archived"'):]
+        for t in state["tasks"]:
+            self.assertIn(f'<span class="id task__id">{t["id"]}</span><button type="button" class="copy" data-copy aria-label="Copy {t["id"]}">Copy</button>', tasks)
+        self.assertEqual(tasks.count('class="id task__id"'), len(state["tasks"]))
+        self.assertIn('<span class="id">T-0900</span><button type="button" class="copy" data-copy aria-label="Copy T-0900">Copy</button>', archived)
+
+    def test_copy_button_label_is_html_escaped(self):
+        self.assertEqual(st._copy_button('T-<1>"'),
+                         '<button type="button" class="copy" data-copy aria-label="Copy T-&lt;1&gt;&quot;">Copy</button>')
 
     def test_external_resources_are_google_fonts_only(self):
         page = self.page(fixture_state())
