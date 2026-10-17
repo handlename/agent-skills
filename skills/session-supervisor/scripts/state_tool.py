@@ -446,8 +446,8 @@ def _esc(value):
     return html.escape("" if value is None else str(value)).replace("{", "&#123;").replace("}", "&#125;")
 
 
-def _badge(status):
-    return f'<span class="badge s-{_esc(status)}">{_esc(status)}</span>'
+def _chip(state):
+    return f'<span class="chip" data-state="{_esc(state)}">{_esc(state)}</span>'
 
 
 def _link_or_text(url, text):
@@ -456,70 +456,12 @@ def _link_or_text(url, text):
     return f"<code>{_esc(text)}</code>"
 
 
-def _render_actions(state):
-    items = []
-    for task in state["tasks"]:
-        for ua in task.get("user_actions", []):
-            items.append(f'{_esc(ua.get("description"))}<div class="meta">{_esc(task["id"])} · {_esc(ua.get("id"))} · since {_esc(ua.get("since"))}</div>')
-    for w in state["workers"]:
-        meta = f'<div class="meta">{_esc(w["task_id"])} · session {_esc(w.get("session_id"))} · {_esc(w.get("cwd"))}</div>'
-        if w.get("observed_state") in ("missing", "needs_input"):
-            items.append(f'Worker {_esc(w["id"])} ({_esc(w.get("title"))}) is {_badge(w["observed_state"])}{meta}')
-        elif _archived_externally(w):
-            items.append(f'Worker {_esc(w["id"])} ({_esc(w.get("title"))}) was archived outside the supervisor; its results need checking{meta}')
-    if not items:
-        return '<p class="empty">Nothing needs your attention.</p>'
-    return "<ul>\n" + "\n".join(f'<li class="card action">{i}</li>' for i in items) + "\n</ul>"
-
-
-def _render_artifact_list(artifacts):
-    if not artifacts:
+def _time(iso, cls="rel"):
+    # HH:MM is the static fallback; the page script swaps in a relative time and keeps the ISO value as a tooltip.
+    if not iso:
         return ""
-    items = "".join(f"<li>{_render_artifact(a)}</li>" for a in artifacts)
-    return f'<ul class="artifacts">{items}</ul>'
-
-
-def _cancelled_marker(reason):
-    """Return (badge for the heading, reason line below it)."""
-    return ' <span class="badge s-cancelled">cancelled</span>', f'<div class="meta">Cancelled: {_esc(reason)}</div>'
-
-
-def _render_tasks(state):
-    if not state["tasks"]:
-        return '<p class="empty">No active tasks.</p>'
-    workers_by_id = {w["id"]: w for w in state["workers"]}
-    cards = []
-    for task in state["tasks"]:
-        rows = []
-        for wid in task.get("worker_ids", []):
-            w = workers_by_id.get(wid, {})
-            branch = f' · branch <code>{_esc(w.get("branch"))}</code>' if w.get("branch") else ""
-            rows.append(
-                f'<li>{_esc(wid)} {_badge(w.get("observed_state"))} {_esc(w.get("title"))}'
-                f'<div class="meta"><code>{_esc(w.get("cwd"))}</code> · {_esc(w.get("kind"))}{branch} · intended {_esc(w.get("intended_state"))}</div></li>'
-            )
-        badge, reason = _cancelled_marker(task["cancel"].get("reason")) if task.get("cancel") else ("", "")
-        cards.append(
-            f'<li class="card"><h3>{_esc(task["id"])} {_esc(task.get("title"))} {_badge(task.get("status"))}{badge}</h3>{reason}'
-            f'<div>Next: {_esc(task.get("next_action"))}</div>'
-            f'{_render_artifact_list(task.get("artifacts", []))}'
-            f'<ul class="workers">{"".join(rows)}</ul></li>'
-        )
-    return "<ul>\n" + "\n".join(cards) + "\n</ul>"
-
-
-def _render_archived(state):
-    if not state["archived"]:
-        return '<p class="empty">No archived tasks.</p>'
-    cards = []
-    for stub in state["archived"]:
-        badge, reason = _cancelled_marker(stub.get("reason")) if stub.get("cancelled") else ("", "")
-        cards.append(
-            f'<li class="card"><h3>{_esc(stub["id"])} {_esc(stub.get("title"))}{badge}</h3>{reason}'
-            f'<div class="meta">archived {_esc(stub.get("archived_at"))}</div>'
-            f'{_render_artifact_list(stub.get("artifacts", []))}</li>'
-        )
-    return "<ul>\n" + "\n".join(cards) + "\n</ul>"
+    clock = iso[11:16] if len(iso) >= 16 else iso
+    return f'<time class="{cls}" datetime="{_esc(iso)}" title="{_esc(iso)}">{_esc(clock)}</time>'
 
 
 def _render_artifact(a):
@@ -530,14 +472,146 @@ def _render_artifact(a):
     return f"{_esc(kind)}: {_link_or_text(a.get('url'), label)}"
 
 
+def _render_artifact_list(artifacts):
+    if not artifacts:
+        return ""
+    items = "".join(f'<li data-kind="{_esc(a.get("kind"))}">{_render_artifact(a)}</li>' for a in artifacts)
+    return f'<ul class="artifacts">{items}</ul>'
+
+
+def _attention_items(state):
+    """Everything waiting on the user: user actions, needs_input / missing workers, and workers archived outside the supervisor."""
+    items = []
+    for task in state["tasks"]:
+        for ua in task.get("user_actions", []):
+            items.append(("user", task, ua))
+    for w in state["workers"]:
+        if w.get("observed_state") in ("missing", "needs_input"):
+            items.append(("worker", None, w))
+        elif _archived_externally(w):
+            items.append(("external", None, w))
+    return items
+
+
+def _render_hero(state):
+    items = _attention_items(state)
+    n = len(items)
+    # data-pending only when something waits: it drives the only looping animation on the page.
+    pending = f' data-pending="{n}"' if n else ""
+    if n:
+        label, sub = "Needs you", f"{n} item{'s' if n != 1 else ''} waiting on you"
+    else:
+        label, sub = "All clear", "Workers are on it. Nothing needs you right now."
+    rows = []
+    for i, (kind, task, obj) in enumerate(items):
+        if kind == "user":
+            rows.append(
+                f'<li class="act" data-kind="user" style="--i:{i}"><span class="act__kind">Action</span>'
+                f'<p class="act__text">{_esc(obj.get("description"))}</p>'
+                f'<p class="act__meta"><span class="id">{_esc(task["id"])}</span><span class="id">{_esc(obj.get("id"))}</span>'
+                f'<span>since {_time(obj.get("since"))}</span></p></li>')
+            continue
+        text = (f'is {_chip(obj["observed_state"])}' if kind == "worker"
+                else "was archived outside the supervisor; its results need checking")
+        rows.append(
+            f'<li class="act" data-kind="{kind}" style="--i:{i}"><span class="act__kind">Worker</span>'
+            f'<p class="act__text"><span class="id">{_esc(obj["id"])}</span> {_esc(obj.get("title"))} {text}</p>'
+            f'<p class="act__meta"><span class="id">{_esc(obj["task_id"])}</span><code>{_esc(obj.get("cwd"))}</code></p></li>')
+    body = (f'<ul class="hero__list">{"".join(rows)}</ul>' if rows
+            else '<p class="hero__clear">Nothing to review, approve or answer.</p>')
+    return (
+        f'<section class="hero" id="actions"{pending} aria-labelledby="hero-label">'
+        f'<span class="hero__sig" aria-hidden="true"></span>'
+        f'<div class="hero__head"><p class="hero__count">{n}</p>'
+        f'<div class="hero__words"><h2 class="hero__label" id="hero-label">{label}</h2><p class="hero__sub">{sub}</p></div></div>'
+        f'{body}</section>')
+
+
+def _segment_state(worker):
+    if _finished(worker):
+        return "done"
+    # Archived outside the supervisor still needs a look, so it must not read as an empty slot.
+    return "external" if _archived_externally(worker) else worker.get("observed_state")
+
+
+def _render_report(r):
+    if r is None:
+        return '<p class="wk__report" data-report="none">No report yet</p>'
+    if r.get("status") == "unparsed":
+        return f'<p class="wk__report" data-report="unparsed"><span class="wk__rs">unparsed</span> {_esc(r.get("error"))}</p>'
+    return (f'<p class="wk__report" data-report="{_esc(r.get("status"))}"><span class="wk__rs">{_esc(r.get("status"))}</span> '
+            f'{_esc(r.get("summary"))}</p>')
+
+
+def _render_worker(w):
+    seg = _segment_state(w)
+    branch = f' · <code>{_esc(w.get("branch"))}</code>' if w.get("branch") else ""
+    return (
+        f'<li class="wk" data-state="{_esc(seg)}"><span class="dot" data-state="{_esc(seg)}" aria-hidden="true"></span>'
+        f'<div class="wk__body"><p class="wk__title"><span class="id">{_esc(w.get("id"))}</span> {_esc(w.get("title"))} {_chip(w.get("observed_state"))}</p>'
+        f'<p class="wk__meta"><code>{_esc(w.get("cwd"))}</code>{branch} · {_esc(w.get("delivery"))}</p>'
+        f'{_render_report(w.get("last_report"))}</div></li>')
+
+
+def _render_tasks(state):
+    tasks = state["tasks"]
+    if not tasks:
+        cards = '<p class="empty">No active tasks.</p>'
+    else:
+        workers_by_id = {w["id"]: w for w in state["workers"]}
+        out = []
+        for i, task in enumerate(tasks):
+            workers = [workers_by_id[wid] for wid in task.get("worker_ids", []) if wid in workers_by_id]
+            done = sum(1 for w in workers if _finished(w))
+            segs = "".join(f'<span class="seg" data-state="{_esc(_segment_state(w))}"></span>' for w in workers)
+            cancel = ""
+            if task.get("cancel"):
+                cancel = f'<p class="task__cancel">{_chip("cancelled")} {_esc(task["cancel"].get("reason"))}</p>'
+            out.append(
+                f'<article class="task" data-status="{_esc(task.get("status"))}"{" data-cancelled" if task.get("cancel") else ""} style="--i:{i}">'
+                f'<header class="task__head"><span class="id task__id">{_esc(task["id"])}</span>'
+                f'<h3 class="task__title">{_esc(task.get("title"))}</h3>{_chip(task.get("status"))}</header>'
+                f'{cancel}'
+                f'<div class="task__progress"><div class="task__segments" role="img" aria-label="{done} of {len(workers)} workers finished">{segs}</div>'
+                f'<p class="task__progress-label"><b>{done}</b>/{len(workers)} done</p>'
+                f'<p class="task__elapsed">started {_time(task.get("created_at"))}</p></div>'
+                f'<p class="task__next"><span class="label">Next</span> {_esc(task.get("next_action"))}</p>'
+                f'<ul class="task__workers">{"".join(_render_worker(w) for w in workers)}</ul>'
+                f'{_render_artifact_list(task.get("artifacts", []))}</article>')
+        cards = "".join(out)
+    return (f'<section class="tasks" id="tasks" aria-labelledby="tasks-label"><h2 class="section-label" id="tasks-label">'
+            f'Tasks <span class="count">{len(tasks)}</span></h2><div class="task-list">{cards}</div></section>')
+
+
+def _render_archived(state):
+    stubs = state["archived"]
+    if not stubs:
+        rows = '<p class="empty">No archived tasks.</p>'
+    else:
+        items = []
+        for stub in stubs:
+            cancelled = ""
+            if stub.get("cancelled"):
+                cancelled = f' {_chip("cancelled")} <span class="arc__reason">{_esc(stub.get("reason"))}</span>'
+            items.append(
+                f'<li class="arc"{" data-cancelled" if stub.get("cancelled") else ""}><p class="arc__title"><span class="id">{_esc(stub["id"])}</span> '
+                f'{_esc(stub.get("title"))}{cancelled}</p><p class="arc__meta">archived {_time(stub.get("archived_at"))}</p>'
+                f'{_render_artifact_list(stub.get("artifacts", []))}</li>')
+        rows = f'<ul class="arc-list">{"".join(items)}</ul>'
+    return (f'<section class="archived" id="archived" aria-labelledby="archived-label"><h2 class="section-label" id="archived-label">'
+            f'Archived <span class="count">{len(stubs)}</span></h2>{rows}</section>')
+
+
 def render(state, template):
     """Return (body, footer). body keeps the {{FOOTER}} slot so it can be hashed without rev/updated_at."""
     body = (
-        template.replace("{{ACTIONS}}", _render_actions(state))
+        template.replace("{{HERO}}", _render_hero(state))
         .replace("{{TASKS}}", _render_tasks(state))
         .replace("{{ARCHIVED}}", _render_archived(state))
     )
-    footer = f'<!--sv-footer--><footer>rev {_esc(state.get("rev"))} · updated {_esc(state.get("updated_at"))}</footer><!--/sv-footer-->'
+    rev = _esc(state.get("rev"))
+    footer = (f'<!--sv-footer--><footer class="foot" data-rev="{rev}">rev {rev} · updated '
+              f'{_time(state.get("updated_at"), "abs")}</footer><!--/sv-footer-->')
 
     return body, footer
 

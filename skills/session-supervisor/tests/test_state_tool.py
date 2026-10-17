@@ -756,9 +756,47 @@ class RenderTest(unittest.TestCase):
         archived = page[page.index('id="archived"'):]
         self.assertIn('href="https://github.com/org/repo-a/pull/40"', archived)
         self.assertIn("T-0002", archived)
-        self.assertIn("s-cancelled", archived)
+        self.assertIn('data-state="cancelled"', archived)
         self.assertIn("ユーザーが不要と判断", archived)
-        self.assertEqual(archived.count("s-cancelled"), 1)
+        self.assertEqual(archived.count('data-state="cancelled"'), 1)
+
+    def test_hero_counts_every_attention_source(self):
+        state = fixture_state()
+        find(state["workers"], "w-0004")["observed_state"] = "archived"
+        hero = self.page(state).split('id="actions"', 1)[1].split('id="tasks"', 1)[0]
+        # UA-0002, w-0005 needs_input, w-0004 archived outside the supervisor
+        self.assertIn('data-pending="3"', hero)
+        self.assertIn('<p class="hero__count">3</p>', hero)
+
+    def test_hero_has_no_pending_marker_when_clear(self):
+        state = fixture_state()
+        find(state["tasks"], "T-0003")["user_actions"] = []
+        find(state["workers"], "w-0005")["observed_state"] = "running"
+        page = self.page(state)
+        self.assertNotIn("data-pending=", page.split("<main>", 1)[1])
+        self.assertIn("All clear", page)
+
+    def test_task_card_shows_progress_reports_and_cancel(self):
+        state = fixture_state()
+        find(state["tasks"], "T-0003")["cancel"] = {"at": "2026-10-17T11:00:00+09:00", "reason": "今回は不要"}
+        find(state["workers"], "w-0004")["intended_state"] = "archived"
+        tasks = self.page(state).split('id="tasks"', 1)[1].split('id="archived"', 1)[0]
+        self.assertIn("<b>0</b>/2 done", tasks)
+        self.assertIn('<span class="seg" data-state="idle"></span><span class="seg" data-state="needs_input"></span>', tasks)
+        self.assertIn('data-report="unparsed"><span class="wk__rs">unparsed</span> no supervisor-report block found', tasks)
+        self.assertIn('data-report="none">No report yet', tasks)
+        self.assertIn('<p class="task__cancel"><span class="chip" data-state="cancelled">cancelled</span> 今回は不要</p>', tasks)
+
+    def test_externally_archived_worker_segment_is_not_empty(self):
+        state = fixture_state()
+        find(state["workers"], "w-0004")["observed_state"] = "archived"
+        self.assertIn('<span class="seg" data-state="external"></span>', self.page(state))
+
+    def test_rev_and_updated_at_only_in_footer(self):
+        body, footer = st.render(fixture_state(), TEMPLATE)
+        self.assertNotIn("2026-10-17T10:42:00", body)
+        self.assertNotIn("rev 12", body)
+        self.assertIn('data-rev="12">rev 12', footer)
 
     def test_actions_section_lists_externally_archived_worker(self):
         state = fixture_state()
@@ -782,7 +820,7 @@ class RenderTest(unittest.TestCase):
         find(state["tasks"], "T-0003")["title"] = "<script>alert(1)</script>{{TASKS}}"
         find(state["tasks"], "T-0003")["artifacts"].append({"kind": "branch", "label": "x", "ref": "r", "url": "javascript:alert(1)"})
         page = self.page(state)
-        self.assertNotIn("<script>", page)
+        self.assertEqual(page.count("<script>"), TEMPLATE.count("<script>"))
         self.assertIn("&lt;script&gt;", page)
         self.assertNotIn('href="javascript:', page)
         self.assertNotIn("{{TASKS}}", page)
@@ -794,11 +832,18 @@ class RenderTest(unittest.TestCase):
         self.assertIn("<code>/Users/handlename/notes/a.txt</code>", page)
         self.assertNotIn('href="/Users', page)
 
-    def test_no_external_resources(self):
+    def test_external_resources_are_google_fonts_only(self):
         page = self.page(fixture_state())
-        self.assertIsNone(re.search(r"<(script|link)\b", page))
+        self.assertIsNone(re.search(r"<script\b[^>]*\bsrc=", page))
+        for href in re.findall(r'<link\b[^>]*\bhref="([^"]+)"', page):
+            self.assertRegex(href, r"^https://fonts\.(googleapis|gstatic)\.com")
         self.assertIn("prefers-color-scheme: dark", page)
         self.assertIn(':root[data-theme="dark"]', page)
+
+    def test_only_pending_hero_animates_forever(self):
+        for selector in re.findall(r"([^{}]+)\{[^}]*\binfinite\b", TEMPLATE):
+            self.assertIn(".hero[data-pending]", selector)
+        self.assertIn("@media (prefers-reduced-motion: reduce)", TEMPLATE)
 
 
 class DigestTest(unittest.TestCase):
