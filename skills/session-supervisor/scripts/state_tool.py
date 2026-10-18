@@ -543,24 +543,10 @@ def _render_report(r):
             f'{_esc(r.get("summary"))}</p>')
 
 
-def _sh_quote(value):
-    return "'" + value.replace("'", "'\\''") + "'"
-
-
-def zed_command(worker):
-    return "zed " + _sh_quote(worker.get("worktree_path") or worker.get("cwd") or "")
-
-
 def _copy_id(cls, text):
     # Click-to-copy control whose text is the ID itself (see the click handler in the template).
     return (f'<button type="button" class="{cls} copyable" data-copy aria-label="Copy {_esc(text)}" '
             f'title="クリックでコピー">{_esc(text)}</button>')
-
-
-def _render_zed(worker):
-    # A copied command, not a zed:// link: links do not leave the published artifact's frame.
-    return (f'<p class="wk__zed"><code class="wk__cmd copyable" data-copy role="button" tabindex="0" '
-            f'aria-label="Copy zed command" title="クリックでコピー">{_esc(zed_command(worker))}</code></p>')
 
 
 def _render_worker(w):
@@ -570,7 +556,6 @@ def _render_worker(w):
         f'<li class="wk" data-state="{_esc(seg)}"><span class="dot" data-state="{_esc(seg)}" aria-hidden="true"></span>'
         f'<div class="wk__body"><p class="wk__title"><span class="id">{_esc(w.get("id"))}</span> {_esc(w.get("title"))} {_chip(w.get("observed_state"))}</p>'
         f'<p class="wk__meta"><code>{_esc(w.get("cwd"))}</code>{branch} · {_esc(w.get("delivery"))}</p>'
-        f'{_render_zed(w)}'
         f'{_render_report(w.get("last_report"))}</div></li>')
 
 

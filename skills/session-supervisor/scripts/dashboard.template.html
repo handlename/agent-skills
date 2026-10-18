@@ -334,11 +334,6 @@ main { gap: 30px; }
 .wk__meta { font: 400 0.72rem/1.45 var(--font-mono); }
 .wk__meta code { font-size: 1em; }
 .wk__report { font: 400 0.76rem/1.45 var(--font-mono); }
-.wk__zed { display: flex; align-items: baseline; gap: 8px; font: 400 0.72rem/1.45 var(--font-mono); color: var(--muted); }
-.wk__cmd {
-  flex: 1; min-width: 0; font-size: 1em; color: var(--text); user-select: all;
-  background: var(--surface-2); border: 1px solid var(--border); padding: 1px 6px;
-}
 .copyable { cursor: pointer; position: relative; }
 .copyable:hover { background: var(--hover-bg); box-shadow: 0 0 0 3px var(--hover-bg); border-radius: 2px; }
 .copyable:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -347,7 +342,6 @@ main { gap: 30px; }
   background: var(--surface-2); color: var(--accent); text-decoration: none; font-weight: 600;
 }
 button.copyable { font: inherit; letter-spacing: inherit; color: inherit; text-align: inherit; margin: 0; border-radius: 0; }
-.wk__cmd.copyable { user-select: text; }
 .arc__title .id.copyable { background: none; border: 0; padding: 0; font-size: 0.8em; font-family: var(--font-mono); }
 .arc__title .id.copyable:hover { background: var(--hover-bg); }
 .wk__report::before { content: "› "; color: var(--tick); }
@@ -434,7 +428,7 @@ button.copyable { font: inherit; letter-spacing: inherit; color: inherit; text-a
   var upd = foot && foot.querySelector("time");
   if (asof && foot && upd) asof.textContent = "as of rev " + foot.dataset.rev + " · " + upd.textContent;
 })();
-// Click-to-copy: copy the text of the clicked [data-copy] element (zed command, task ID); if the clipboard is refused (e.g. inside the artifact frame), select it for a manual copy.
+// Click-to-copy: copy the text of the clicked [data-copy] element (task ID); if the clipboard is refused (e.g. inside the artifact frame), select it for a manual copy.
 function copyFrom(el) {
   function flash(text) {
     el.dataset.state = text;

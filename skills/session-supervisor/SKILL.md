@@ -270,7 +270,7 @@ Run the state-change set only when something differs.
 3. After a recovery or a new supervisor session, read the artifact by `supervisor.dashboard.url`, then publish to that `url` so the link stays the same.
 4. The displayed rev may lag behind `state.json`; that is acceptable.
 5. If Artifacts are unavailable, give the user the local path `<dir>/dashboard.html` instead.
-6. Each worker row shows `zed '<dir>'` (`<dir>` is `worktree_path`, else `cwd`) as click-to-copy text (still selectable; falls back to selecting the command when the clipboard is refused). Each task card header and archived entry shows the task ID as a click-to-copy button (label `Copy T-0007`, keyboard-focusable, briefly shows `Copied`) that copies exactly the ID, so the user can paste it into chat (e.g. "T-0007 を Zed で開いて"). There are no separate Copy buttons. Do not add `zed://` links: inside the published artifact they open a blank page.
+6. Each task card header and archived entry shows the task ID as a click-to-copy button (label `Copy T-0007`, keyboard-focusable, briefly shows `Copied`; falls back to selecting the ID when the clipboard is refused) that copies exactly the ID, so the user can paste it into chat. There are no separate Copy buttons.
 
 #### 6.6 Cancel
 

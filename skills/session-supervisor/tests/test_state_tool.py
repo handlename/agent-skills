@@ -832,32 +832,6 @@ class RenderTest(unittest.TestCase):
         self.assertIn("<code>/Users/handlename/notes/a.txt</code>", page)
         self.assertNotIn('href="/Users', page)
 
-    def test_zed_command_prefers_worktree_path_over_cwd(self):
-        state = fixture_state()
-        git_task(state, "T-0100", "w-0100")
-        nongit_task(state, "T-0101", "w-0101", "/Users/handlename/notes", "running", "running")
-        self.assertEqual(st.zed_command(find(state["workers"], "w-0100")), "zed '/repo/a/.claude/worktrees/license-x1'")
-        self.assertEqual(st.zed_command(find(state["workers"], "w-0101")), "zed '/Users/handlename/notes'")
-
-    def test_zed_command_quotes_single_quotes_for_posix_shell(self):
-        worker = {"cwd": "/tmp/it's here", "worktree_path": None}
-        cmd = st.zed_command(worker)
-        self.assertEqual(cmd, "zed '/tmp/it'\\''s here'")
-        self.assertEqual(subprocess.run(["sh", "-c", f"printf %s {cmd[4:]}"], capture_output=True, text=True).stdout,
-                         "/tmp/it's here")
-
-    def test_every_worker_row_has_escaped_click_to_copy_zed_command(self):
-        state = fixture_state()
-        find(state["workers"], "w-0004")["worktree_path"] = "/tmp/<b>&'x'{{TASKS}}"
-        page = self.page(state)
-        tasks = page[page.index('id="tasks"'):page.index('id="archived"')]
-        self.assertEqual(tasks.count('class="wk"'), tasks.count('class="wk__cmd copyable"'))
-        self.assertEqual(tasks.count('class="wk__cmd copyable"'), tasks.count('aria-label="Copy zed command" title="クリックでコピー">zed '))
-        self.assertIn('<code class="wk__cmd copyable" data-copy role="button" tabindex="0" aria-label="Copy zed command" title="クリックでコピー">zed &#x27;/tmp/&lt;b&gt;&amp;&#x27;\\&#x27;&#x27;x&#x27;\\&#x27;&#x27;&#123;&#123;TASKS&#125;&#125;&#x27;</code>', tasks)
-        self.assertNotIn("zed://", page)
-        self.assertNotIn(">Copy</button>", page)
-        self.assertIn("navigator.clipboard.writeText", page)
-
     def test_task_and_archived_ids_are_click_to_copy_controls(self):
         state = fixture_state()
         find(state["tasks"], "T-0004")["id"] = "T-0004"
@@ -871,6 +845,7 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(tasks.count('class="id task__id copyable"'), len(state["tasks"]))
         self.assertIn(ctl.format(cls="id", id="T-0900"), archived)
         self.assertNotIn(">Copy</button>", page)
+        self.assertIn("navigator.clipboard.writeText", page)
 
     def test_copy_control_text_is_html_escaped(self):
         self.assertEqual(st._copy_id("id", 'T-<1>"'),
