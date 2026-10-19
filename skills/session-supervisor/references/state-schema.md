@@ -225,6 +225,7 @@ The source of truth is `supervisor_errors` in the secretary skill's `state_tool.
 - Renaming a field, changing its type, value range, or meaning, changing user-action wording or the occupy rule, or bumping `schema_version` affects the secretary. Update, in the same change, the secretary skill's `state_tool.py` (`supervisor_errors`, `merge_supervisor`, `_occupies_cwd`, `SUPERVISOR_UA_RULES`) and the relay_mode classification table in the secretary skill's `references/state-schema.md`.
 - After a `schema_version` bump the secretary keeps showing its last merged items, its overlap check fails, and new relay sessions to external sources are rejected until it is updated.
 - Adding a field is compatible. A new user-action wording is still classified, so check it against the secretary's classification table.
+- Run the secretary skill's tests as well; its contract test checks this state shape and the quoted user-action wording from the secretary's side.
 
 ## Invariants
 
