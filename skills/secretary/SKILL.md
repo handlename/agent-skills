@@ -1,6 +1,6 @@
 ---
 name: secretary
-description: Run a resident secretary session in the Claude desktop app that collects today's tasks and pending decisions from the session-supervisor state.json (read-only) and from external agents defined in the secretary directory's CLAUDE.md, tracks due dates in its own validated state.json, publishes one dashboard artifact ordered by due date, and relays the user's verbatim answers back to the right place (paste text for the supervisor, a relay session for external sources). Triggers include "秘書として動いて", "今日やることと判断待ちをまとめて", "判断待ちの期限を管理して", "act as my secretary", "collect my todos and pending decisions", "run the secretary dashboard".
+description: Run a resident secretary session in the Claude desktop app that collects today's tasks and pending decisions from the session-supervisor state.json (read-only) and from external agents defined in the secretary directory's CLAUDE.md, tracks due dates in its own validated state.json, publishes one dashboard artifact ordered by due date, and relays the user's verbatim answers back to the right place (paste text for the supervisor, a relay session for external sources). It also sets up a secretary directory interactively when started in a directory that is not one yet. Triggers include "秘書として動いて", "秘書をセットアップして", "このディレクトリを秘書にして", "今日やることと判断待ちをまとめて", "判断待ちの期限を管理して", "act as my secretary", "set up a secretary here", "collect my todos and pending decisions", "run the secretary dashboard".
 ---
 
 # Secretary
@@ -31,7 +31,7 @@ In the commands below, `<skill-dir>` is the directory containing this SKILL.md a
 
 ## When to Use
 
-- The user asks to set up or run a secretary (first run included).
+- The user asks to set up or run a secretary (first run included). Setup runs interactively in a session opened in the directory to set up.
 - The session runs in the Claude Code tab of the desktop app, in a secretary directory prepared by `setup`.
 - The user wants one place that lists today's tasks and the decisions waiting on them, with due dates, across a session-supervisor and other agents.
 - The SessionStart hook injected a secretary digest (after startup, resume, `/clear`, or compaction).
@@ -50,7 +50,7 @@ In the commands below, `<skill-dir>` is the directory containing this SKILL.md a
 Decide which case applies before anything else:
 
 - **This session's `cwd` has `state.json` and `.secretary/`**: it is the secretary. Continue with the Capability check (section 2).
-- **Otherwise**: ask the user for the secretary directory (default `~/secretary`) and the supervisor directory (default `~/supervisor`). If `<dir>/state.json` does not exist, run Setup (section 3). Then tell the user to open `<dir>` in the app and start a **new** session there in auto permission mode, and stop. This session never acts as the secretary: the SessionStart hook does not fire here, and turn-end notes of sessions started from here would not reach a session in `<dir>`.
+- **Otherwise**: this session sets up a secretary directory and never acts as the secretary itself. The SessionStart hook that setup adds is not loaded into a session that is already running, and turn-end notes of sessions started from here would not reach a later session. Run the interactive setup (section 3) with `cwd` as the proposed secretary directory, then stop after its hand-off step.
 
 ### 1. Core rules
 
@@ -92,7 +92,7 @@ Run at the start of every secretary session and after every recovery (section 10
    python3 "<skill-dir>/scripts/state_tool.py" version
    ```
 
-   If the two outputs differ, re-run setup (section 3).
+   If the two outputs differ, re-run the `setup` command (section 3, version update).
 
 Facts the procedures rely on (observed in the desktop app):
 
@@ -105,23 +105,42 @@ Facts the procedures rely on (observed in the desktop app):
 
 ### 3. Setup
 
-Run from the Entry (section 0) for a new directory, and again whenever the version check differs. The directory must not be inside a git repository and must not be the supervisor directory or nested with it.
+Two paths use this section:
 
-```bash
-python3 "<skill-dir>/scripts/state_tool.py" setup --dir "$HOME/secretary" --supervisor-dir "$HOME/supervisor"
-```
+- **Interactive setup** (from the Entry, section 0): the user opened a session in the directory they want as the secretary directory and asked to set it up. Follow steps 1–6 below.
+- **Version update** (from the Capability check, step 5): only re-run the `setup` command of step 3 for `<dir>`; it overwrites the copied script and template and keeps everything else.
 
-`setup` is idempotent. It creates the directory (aborting when either rule above is broken), copies `state_tool.py` and `dashboard.template.html` to `<dir>/.secretary/`, adds a SessionStart hook (matcher `startup|resume|clear|compact`) to `<dir>/.claude/settings.json` unless already present, creates `state.json` and `CLAUDE.md` (a short note, an empty `## Sources`, and a commented example) if missing, and prints what it created, kept, or updated. It reports when the supervisor directory does not exist; the secretary then runs with external sources only.
+Ask one question per message, show the default or your suggestion with each, and accept the user's free-form answers. Never edit files outside `<dir>`.
 
-Then help the user fill `## Sources` ([references/sources-format.md](references/sources-format.md)) and validate it:
+1. **Secretary directory.** Propose `cwd` as `<dir>` and confirm it. The directory must not be inside a git repository (`git -C "<dir>" rev-parse --show-toplevel` succeeds) and must not be the supervisor directory, inside it, or contain it. If `cwd` breaks a rule, ask the user for another directory (default `~/secretary`); setup then creates it, and the hand-off (step 6) tells the user to open that directory instead.
+2. **Supervisor directory.** Ask for the session-supervisor directory (default `~/supervisor`). Check whether `<supervisor-dir>/state.json` exists and say what you found. The user may answer that they have no supervisor; then pass the default anyway, and the secretary runs with external sources only.
+3. **Run setup**:
 
-```bash
-python3 "<dir>/.secretary/state_tool.py" validate-sources --claude-md "<dir>/CLAUDE.md"
-```
+   ```bash
+   python3 "<skill-dir>/scripts/state_tool.py" setup --dir "<dir>" --supervisor-dir "<supervisor-dir>"
+   ```
 
-Exit 1 prints one `error:` line per problem (`CLAUDE.md:<line>: <message>`, or a missing directory); fix them before relying on that source.
+   `setup` is idempotent. It creates the directory (aborting when a rule of step 1 is broken), copies `state_tool.py` and `dashboard.template.html` to `<dir>/.secretary/`, adds a SessionStart hook (matcher `startup|resume|clear|compact`) to `<dir>/.claude/settings.json` unless already present, creates `state.json` and `CLAUDE.md` (a short note, an empty `## Sources`, and a commented example) if missing, and prints what it created, kept, or updated. It reports on stderr when the supervisor directory does not exist. Show the user the printed lines.
 
-When telling the user to open the new session, also explain that:
+   If `CLAUDE.md` already existed and has no `## Sources` line, ask before appending an empty `## Sources` section at its end; without it no external source can be defined.
+4. **Sources.** Ask whether to register an external agent. For each one, ask in turn:
+   - the directory where that agent runs (`~` is allowed). Check that it exists. If it has a `CLAUDE.md`, read it (read-only) to learn what the agent manages, and use that to suggest the id and the query;
+   - the id (`[a-z0-9-]`, 32 characters or fewer, not `supervisor`, unique; suggest one from the directory name);
+   - the query: one line, 500 characters or fewer, in the language the agent understands. Suggest one that asks for today's tasks and the items waiting on the user's decision, and adapt it to what the agent manages;
+   - the interval (`<n>m`, `<n>h`, or `<n>d`, at least 15m; default `2h`). Mention that a query starts a session and uses some usage;
+   - whether the secretary may relay the user's answers to that agent (`relay: yes`) or only display its items (`relay: no`; default `no`).
+
+   Show the `### <id>` block you will write, append it under `## Sources` in `<dir>/CLAUDE.md`, and validate:
+
+   ```bash
+   python3 "<dir>/.secretary/state_tool.py" validate-sources --claude-md "<dir>/CLAUDE.md"
+   ```
+
+   Exit 1 prints one `error:` line per problem (`CLAUDE.md:<line>: <message>`, or a missing directory). Fix the block with the user and validate again until it passes. Then ask whether to add another source. The format and rules are in [references/sources-format.md](references/sources-format.md). Sources can be added or changed later by editing `## Sources`; the secretary picks them up on its next commit.
+5. **Summary.** Show the secretary directory, the supervisor directory (and whether its `state.json` was found), and the registered sources with their intervals and relay settings.
+6. **Hand-off.** Tell the user to start a **new** session in `<dir>` in auto permission mode and write "秘書として動いて" there. This session stays a setup session: the hook added in step 3 is loaded only by sessions that start after it, and the secretary depends on it for recovery. The user may archive this session afterwards. Stop here.
+
+When handing off, also explain that:
 
 - the dashboard is a private artifact republished on every visible change;
 - periodic reconciliation (`/loop`, about every 5 minutes) runs only while query or relay sessions exist and uses some usage even when nothing changes;
