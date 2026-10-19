@@ -1,0 +1,22 @@
+flowchart LR
+  user(["User"])
+  sup["Supervisor"]
+  workers["Workers"]
+  supState[("Supervisor state.json")]
+  supDash["Supervisor dashboard"]
+  sec["Secretary"]
+  secState[("Secretary state.json")]
+  secDash["Secretary dashboard"]
+  sources["Sources list (CLAUDE.md)"]
+  ext["External agents (query / relay sessions)"]
+  user -->|"tasks, answers"| sup
+  sup -->|"start / verify / archive"| workers
+  sup -->|"writes"| supState
+  sup -->|"publishes"| supDash
+  sec -.->|"reads only"| supState
+  sec -->|"paste text / app operation"| user
+  sec -->|"writes"| secState
+  sec -->|"publishes"| secDash
+  sec -->|"reads"| sources
+  sec -->|"query / relay"| ext
+  sec -.->|"busy check before relay"| workers

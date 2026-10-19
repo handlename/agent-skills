@@ -29,6 +29,8 @@ Reference files:
 
 In the commands below, `<skill-dir>` is the directory containing this SKILL.md and `<dir>` is the secretary directory.
 
+How the secretary and the session-supervisor split responsibilities: [Session orchestration: supervisor and secretary](https://github.com/handlename/agent-skills#session-orchestration-supervisor-and-secretary).
+
 ## When to Use
 
 - The user asks to set up or run a secretary (first run included). Setup runs interactively in a session opened in the directory to set up.

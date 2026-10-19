@@ -188,7 +188,7 @@ An entry leaves `sessions[]` only when reconciliation observes it archived or `m
 
 | Order | Words | `relay_mode` | Origin in session-supervisor |
 | :--- | :--- | :--- | :--- |
-| 1 | `in the app`, `unpin`, `please archive`, `open repo` | `app` | App-operation user actions: open repo, close or unpin, please archive, answer the pending approval |
+| 1 | `in the app`, `unpin`, `please archive`, `open repo` | `app` | App-operation user actions: open repo, close or unpin, please archive, answer the pending approval, tell a worker in the app (send unavailable) |
 | 2 | `waiting task`, `push`, `pull request`, `new worker`, `replace`, `restart`, `start`, `cancel`, `archive` | `paste` | The automatic waiting-task action, push decisions, missing-worker questions |
 | 3 | anything else (report blockers, unparsed summaries, `is not progressing`) | `paste` | Blocker answers; a relayed answer does not advance the supervisor's state |
 

@@ -22,6 +22,47 @@ A personal collection of custom AI Agent Skills compatible with `gh skill instal
 | `session-supervisor` | Run a supervisor session in the Claude desktop app (Code tab) that governs worker sessions: the user talks only to the supervisor, which starts a worker per task (a git worktree, or one session per non-git directory), tracks every task in a single-writer `state.json` that survives context compaction (re-injected by a `SessionStart` hook), auto-archives workers once their deliverables are verified on a committed branch or as recorded files (or the user cancels the task), and publishes a dashboard artifact rendered from that state (user actions first, per-task progress with links to branches/PRs, recently archived tasks). Push/PR only on explicit consent in the task request. | `gh skill install handlename/agent-skills session-supervisor` | Claude Code (desktop app) |
 | `setup-tagpr` | Set up [tagpr](https://github.com/Songmu/tagpr) for automated release management: creates and updates release pull requests for unreleased items, tags them on merge, and creates GitHub Releases. Covers goreleaser (Go) and TypeScript/Node.js projects. | `gh skill install handlename/agent-skills setup-tagpr` | Claude Code, Copilot, Gemini CLI, Cursor |
 
+## Session orchestration: supervisor and secretary
+
+`session-supervisor` and `secretary` both run as resident sessions in the Claude desktop app, each in its own non-git directory.
+They split work by ownership: **the supervisor owns the tasks the user gives it directly (running and verifying them); the secretary owns the collection and due dates of decisions that other agents (the supervisor and external agents) are waiting on.**
+A relay only delivers the user's answer; it never moves ownership of the work.
+
+<!-- Source: docs/session-orchestration.mmd (mermaid). Regenerate the SVG with the mermaid-to-svg skill after editing it. -->
+![Relationship between session-supervisor and secretary](docs/session-orchestration.svg)
+
+| | `session-supervisor` | `secretary` |
+| :--- | :--- | :--- |
+| Owns | Splitting the user's tasks by directory, starting workers, verifying committed branches or recorded files, archiving workers, its own `state.json` and dashboard | Merging pending decisions from the supervisor and external sources, their due dates, relaying the user's verbatim answers, its own `state.json` and dashboard |
+| Never does | Responding to or coordinating with the secretary | Writing the supervisor's `state.json` or directory, messaging the supervisor, owning the work behind a decision |
+
+### Interaction rules
+
+- The dependency is one-way: the secretary depends on the supervisor, and the supervisor works the same with or without a secretary.
+- The secretary opens the supervisor's `state.json` read-only and turns each `tasks[].user_actions[]` entry into a pending decision.
+- The secretary never messages the supervisor. A supervisor decision is answered by pasting the secretary's paste text into the supervisor chat, or by an operation in the app.
+- Before starting a relay session in a source directory, the secretary checks that the directory does not overlap a running non-git worker of the supervisor (busy check).
+- The secretary directory must not be, contain, or sit inside the supervisor directory.
+- The supervisor's `state.json` fields and user-action wording are the secretary's input contract; see [Read by the secretary](skills/session-supervisor/references/state-schema.md#read-by-the-secretary).
+
+### Which one to ask
+
+| Request | Ask |
+| :--- | :--- |
+| "Refactor repos A and B" | Supervisor: a task the user gives directly |
+| "Show today's pending decisions by due date" | Secretary: collecting decisions others are waiting on |
+| "Set a due date on a pending decision" | Secretary: due dates are its own data |
+| "Answer the question a worker is asking" | Supervisor, which owns the task; from the secretary dashboard, paste its paste text into the supervisor chat |
+
+### Where a new feature belongs
+
+| Feature idea | Belongs to |
+| :--- | :--- |
+| Automatic retry of a failed worker | Supervisor: running the task |
+| Reminders for decisions close to their due date | Secretary: due-date management |
+| A new kind of external source | Secretary: collecting decisions |
+| Watching CI of a PR the supervisor opened, before archiving the worker | Supervisor: verifying the task's result |
+
 
 ## Plugins
 

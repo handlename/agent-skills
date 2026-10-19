@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="480" viewBox="0 0 880 480">
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M0,0 L8,4 L0,8 z" fill="#57606a"/>
+    </marker>
+    <style>
+      text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1f2328; }
+      .title { font-size: 14px; font-weight: 600; text-anchor: middle; dominant-baseline: central; }
+      .focal { font-size: 16px; font-weight: 600; text-anchor: middle; dominant-baseline: central; }
+      .sub { font-size: 12px; text-anchor: middle; dominant-baseline: central; }
+      .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; }
+      .elabel { font-size: 12px; text-anchor: middle; paint-order: stroke; stroke: #ffffff; stroke-width: 3; stroke-linejoin: round; }
+      .legend { font-size: 12px; dominant-baseline: central; }
+      .edge { fill: none; stroke: #57606a; stroke-width: 1.5; marker-end: url(#arrow); }
+      .dashed { stroke-dasharray: 4 3; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="880" height="480" fill="#ffffff"/>
+
+  <!-- edges (drawn before nodes) -->
+  <path class="edge" d="M216,44 H112 Q104,44 104,52 V136"/>
+  <path class="edge" d="M96,184 V280 Q96,288 104,288 H256"/>
+  <path class="edge" d="M176,160 H248"/>
+  <path class="edge" d="M56,184 V360"/>
+  <path class="edge dashed" d="M424,160 H352"/>
+  <path class="edge" d="M520,136 V52 Q520,44 512,44 H312"/>
+  <path class="edge" d="M584,176 H592 Q600,176 600,184 V240 Q600,248 608,248 H696"/>
+  <path class="edge" d="M584,144 H592 Q600,144 600,136 V80 Q600,72 608,72 H696"/>
+  <path class="edge" d="M560,184 V336 Q560,344 568,344 H696"/>
+  <path class="edge" d="M584,160 H696"/>
+  <path class="edge dashed" d="M496,184 V280 Q496,288 488,288 H344"/>
+
+  <!-- nodes -->
+  <rect x="216" y="24" width="96" height="40" rx="20" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+  <text class="title" x="264" y="44">User</text>
+
+  <rect x="32" y="136" width="144" height="48" rx="6" fill="#ddf4ff" stroke="#0969da" stroke-width="1.5"/>
+  <text class="focal" x="104" y="160">Supervisor</text>
+
+  <path d="M248,136 A52,8 0 0 1 352,136 V184 A52,8 0 0 1 248,184 Z" fill="#f6f8fa" stroke="#57606a" stroke-width="1.5"/>
+  <path d="M248,136 A52,8 0 0 0 352,136" fill="none" stroke="#57606a" stroke-width="1.5"/>
+  <text class="title" x="300" y="156">Supervisor</text>
+  <text class="sub mono" x="300" y="176">state.json</text>
+
+  <rect x="256" y="264" width="88" height="48" rx="6" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <text class="title" x="300" y="288">Workers</text>
+
+  <rect x="32" y="360" width="176" height="48" rx="6" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <text class="title" x="120" y="384">Supervisor dashboard</text>
+
+  <rect x="424" y="136" width="160" height="48" rx="6" fill="#ddf4ff" stroke="#0969da" stroke-width="1.5"/>
+  <text class="focal" x="504" y="160">Secretary</text>
+
+  <rect x="696" y="48" width="168" height="48" rx="6" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <text class="title" x="780" y="72">Secretary dashboard</text>
+
+  <rect x="696" y="132" width="168" height="56" rx="6" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+  <text class="title" x="780" y="152">External agents</text>
+  <text class="sub" x="780" y="172">(query / relay sessions)</text>
+
+  <path d="M696,224 A84,8 0 0 1 864,224 V272 A84,8 0 0 1 696,272 Z" fill="#f6f8fa" stroke="#57606a" stroke-width="1.5"/>
+  <path d="M696,224 A84,8 0 0 0 864,224" fill="none" stroke="#57606a" stroke-width="1.5"/>
+  <text class="title" x="780" y="244">Secretary</text>
+  <text class="sub mono" x="780" y="264">state.json</text>
+
+  <rect x="696" y="316" width="168" height="56" rx="6" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <text class="title" x="780" y="336">Sources list</text>
+  <text class="sub mono" x="780" y="356">(CLAUDE.md)</text>
+
+  <!-- edge labels -->
+  <text class="elabel" x="160" y="36">tasks, answers</text>
+  <text class="elabel" x="176" y="280">start / verify / archive</text>
+  <text class="elabel" x="212" y="152">writes</text>
+  <text class="elabel" x="64" y="332" text-anchor="start" style="text-anchor:start">publishes</text>
+  <text class="elabel" x="388" y="152">reads only</text>
+  <text class="elabel" x="416" y="36">paste text / app operation</text>
+  <text class="elabel" x="648" y="240">writes</text>
+  <text class="elabel" x="648" y="64">publishes</text>
+  <text class="elabel" x="628" y="336">reads</text>
+  <text class="elabel" x="652" y="152">query / relay</text>
+  <text class="elabel" x="420" y="280">busy check before relay</text>
+
+  <!-- legend -->
+  <line x1="16" y1="432" x2="864" y2="432" stroke="#d8dee4" stroke-width="1"/>
+  <rect x="24" y="448" width="16" height="16" rx="3" fill="#ddf4ff" stroke="#0969da" stroke-width="1.5"/>
+  <text class="legend" x="48" y="456">Skill (focus)</text>
+  <rect x="144" y="448" width="16" height="16" rx="3" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <text class="legend" x="168" y="456">Component</text>
+  <path d="M256,450 A8,3 0 0 1 272,450 V462 A8,3 0 0 1 256,462 Z" fill="#f6f8fa" stroke="#57606a" stroke-width="1.2"/>
+  <path d="M256,450 A8,3 0 0 0 272,450" fill="none" stroke="#57606a" stroke-width="1.2"/>
+  <text class="legend" x="280" y="456">State file</text>
+  <rect x="360" y="448" width="16" height="16" rx="3" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+  <text class="legend" x="384" y="456">External</text>
+  <path class="edge" d="M464,456 H496"/>
+  <text class="legend" x="504" y="456">Direct action</text>
+  <path class="edge dashed" d="M616,456 H648"/>
+  <text class="legend" x="656" y="456">Read-only / advisory</text>
+</svg>
