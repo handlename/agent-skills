@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "rev": 42,
+  "updated_at": "2026-10-18T09:25:00+09:00",
+  "supervisor": {
+    "dir": "/Users/handlename/supervisor",
+    "session_ids": ["sess_sup_01"],
+    "archive_consent": null,
+    "dashboard": { "url": "https://claude.ai/code/artifact/yyyyyyyy", "path": "/Users/handlename/supervisor/dashboard.html" }
+  },
+  "tasks": [
+    {
+      "id": "T-0003", "title": "Fix LICENSE year", "status": "needs_user",
+      "user_actions": [
+        { "id": "UA-0002", "description": "Decide whether to push branch claude/license-x1 of /repo/a (and whether to open a PR)", "since": "2026-10-17T10:30:00+09:00" }
+      ],
+      "worker_ids": ["w-0004"]
+    },
+    {
+      "id": "T-0004", "title": "Tidy notes folder", "status": "needs_user",
+      "user_actions": [
+        { "id": "UA-0001", "description": "Please archive w-0007 from the app; it was refused while the session was on screen", "since": "2026-10-17T11:00:00+09:00" }
+      ],
+      "worker_ids": ["w-0007"]
+    },
+    {
+      "id": "T-0005", "title": "Summarize logs", "status": "needs_user",
+      "user_actions": [
+        { "id": "UA-0003", "description": "Worker w-0008 is missing. Replace it or drop the task?", "since": "2026-10-18T09:20:00+09:00" }
+      ],
+      "worker_ids": ["w-0008"]
+    }
+  ],
+  "workers": [
+    { "id": "w-0004", "task_id": "T-0003", "kind": "git", "cwd": "/repo/a", "intended_state": "running", "observed_state": "idle" },
+    { "id": "w-0007", "task_id": "T-0004", "kind": "non-git", "cwd": "/Users/handlename/notes", "intended_state": "archived", "observed_state": "idle" },
+    { "id": "w-0008", "task_id": "T-0005", "kind": "non-git", "cwd": "/Users/handlename/logs", "intended_state": "running", "observed_state": "missing" }
+  ],
+  "archived": []
+}

@@ -1,0 +1,3 @@
+```secretary-report
+{"source_id": "obsidian", "mode": "query", "status": "done", "today": [{"id": "x", "title": "t", "link": "javascript:alert(1)"}], "decisions": [], "summary": "", "blockers": []}
+```
