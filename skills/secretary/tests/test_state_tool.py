@@ -905,9 +905,9 @@ class RenderTest(unittest.TestCase):
         self.assertIn(':root[data-theme="dark"]', page)
 
     def test_hero_surface_is_neutral(self):
-        hero = re.search(r"\.hero \{([^}]*)\}", TEMPLATE).group(1)
-        self.assertIn("var(--surface-2)", hero)
-        self.assertNotRegex(hero, r"warn|bad|attention")
+        hero = " ".join(re.findall(r"\.hero \{([^}]*)\}", TEMPLATE))
+        self.assertNotIn("background", hero)
+        self.assertNotRegex(hero, r"red|amber|blue")
 
     def test_copyable_hover_changes_no_box_property(self):
         rules = re.findall(r"([^{}]*\.(?:copyable|paste)[^{}]*:hover[^{}]*)\{([^}]*)\}", TEMPLATE)
