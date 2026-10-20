@@ -64,9 +64,60 @@ Consent paragraph:
 
 | delivery | Paragraph to insert |
 | :--- | :--- |
-| `push_pr` | The permission for the following push / pull request is the user's original request written to the supervisor session: `> {task.push_consent.text}` |
+| `push_pr` | The permission for the following push / pull request is the user's words written to the supervisor session (the original request or a later message): `> {task.push_consent.text}` |
 | `commit` | Do not push, do not create pull requests, and do not write to any remote. |
 | `files` | Do not push, do not create pull requests, and do not write to any remote. |
+
+## Push-only worker
+
+A `push_pr` worker added after the task's commit was verified (SKILL.md 6.3 step 7) only pushes an existing branch. It is started from the original branch (`source_branch`) with a worktree, and gets the normal `prompt` and `background` with these changes:
+
+- The `{git only: ...}` line is replaced by: `You are in an app worktree started from branch {branch}. Do not commit, do not edit files, and do not switch branches.` (The normal line asks for a commit, which a push-only worker must not make.)
+- "What to do" and "Delivery" both hold the push-only order below; "Done when" is `The remote branch {branch} on origin points at {commit}.` plus, when a PR is allowed, `A pull request with head {branch} exists.`
+- `background` uses the `push_pr` consent paragraph.
+
+Fields: `{branch}` is `worker.branch` (the pushed branch, not the app branch of this worktree), `{repo}` is `worker.cwd`, `{commit}` is the expected sha of SKILL.md 6.3 step 7. A PR is allowed when `push_consent.text` grants one; otherwise drop the PR step.
+
+````markdown
+Push branch `{branch}` of `{repo}` to `origin` from this worktree. Branch refs are shared between worktrees, so do not check the branch out.
+
+1. Confirm that both commands print `{commit}`:
+
+   ```bash
+   git rev-parse refs/heads/{branch}
+   git rev-parse HEAD
+   ```
+
+   If either differs, push nothing and end the turn with status `needs_input`, putting both values in `blockers`.
+2. Push exactly that commit:
+
+   ```bash
+   git push origin {commit}:refs/heads/{branch}
+   ```
+
+3. {PR allowed only: Open a pull request for `{branch}` with `gh pr create --head {branch}`, a title and a body summarizing the commits; the body starts with the worker marker from the background.}
+
+Make no commits and do not switch branches. Report `branch` = `{branch}`, `commit` = `{commit}`, and the PR URL in `pr`.
+````
+
+## Push follow-up
+
+Sent with the send capability to a reused worker (SKILL.md 6.3 step 7, Reuse), which is still on `{branch}` in its own worktree. It replaces the `commit` consent paragraph of that worker's background.
+
+````markdown
+The user allowed the push in the supervisor session: `> {task.push_consent.text}`. This replaces the "Do not push" rule of your background for this branch only.
+
+1. Confirm that `git rev-parse HEAD` prints `{commit}`. If it does not, push nothing and end the turn with status `needs_input`, putting the value in `blockers`.
+2. Push your branch:
+
+   ```bash
+   git push origin {branch}
+   ```
+
+3. {PR allowed only: Open a pull request with `gh pr create --head {branch}`, its body starting with `<sub>🤖 by session-supervisor worker</sub>`.}
+
+Make no new commits. End the turn with a `supervisor-report` block reporting `branch` = `{branch}`, `commit` = `{commit}`, and the PR URL in `pr`.
+````
 
 ## Report block
 

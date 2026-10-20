@@ -639,6 +639,318 @@ class NextStateTest(unittest.TestCase):
         self.assertEqual(state["archived"][0]["id"], "T-0030")
         self.assertNotIn("cancelled", state["archived"][0])
 
+    def pending_push(self):
+        git_task(self.current, "T-0020", "w-0020", intended="archived", observed="archived")
+        commit_artifacts(self.current, "T-0020")
+        push_decision(self.current, "T-0020")
+
+    def push_worker_candidate(self, text="push して PR を作って", message="claude/license-x1 を push して PR を作って"):
+        cand = self.candidate()
+        task = find(cand["tasks"], "T-0020")
+        task["push_consent"] = {"text": text, "at": NOW}
+        if message is not None:
+            task["push_consent"]["message"] = message
+        task["user_actions"] = []
+        cand["workers"].append(dict(find(cand["workers"], "w-0020"), id="w-0021", session_id=None, delivery="push_pr",
+                                    worktree_path=None, intended_state="pending", observed_state="none"))
+        task["worker_ids"].append("w-0021")
+        return cand
+
+    def test_consent_message_accepted_while_resolving_push_decision(self):
+        self.pending_push()
+        new = st.next_state(self.current, self.push_worker_candidate(), NOW)
+        self.assertEqual(find(new["tasks"], "T-0020")["status"], "waiting")
+
+    def test_consent_message_without_pending_push_decision_rejected(self):
+        cand = self.candidate()
+        find(cand["tasks"], "T-0003")["push_consent"]["message"] = "もう一度 push して PR を作ってよい"
+        self.assertRejected(cand, "T-0003: push_consent.message may be set only while resolving a pending push decision")
+
+    def test_consent_message_with_push_decision_kept_rejected(self):
+        self.pending_push()
+        cand = self.push_worker_candidate()
+        push_decision(cand, "T-0020")
+        self.assertRejected(cand, "only while resolving a pending push decision")
+
+    def test_consent_text_not_in_message_rejected(self):
+        self.pending_push()
+        self.assertRejected(self.push_worker_candidate(text="PR は不要"), "push_consent.text quoted from push_consent.message")
+
+    def test_consent_text_not_in_request_without_message_rejected(self):
+        self.pending_push()
+        self.assertRejected(self.push_worker_candidate(message=None), "push_consent.text quoted")
+
+    def test_non_string_consent_message_rejected(self):
+        self.pending_push()
+        for bad in (["push"], 1, ""):
+            self.assertRejected(self.push_worker_candidate(message=bad), "push_consent.message must be a non-empty string")
+
+    def test_switching_running_commit_worker_with_message_rejected(self):
+        git_task(self.current, "T-0020", "w-0020", intended="running", observed="running")
+        cand = self.candidate()
+        find(cand["tasks"], "T-0020")["push_consent"] = {"text": "push して", "at": NOW, "message": "push して"}
+        find(cand["workers"], "w-0020")["delivery"] = "push_pr"
+        self.assertRejected(cand, "only while resolving a pending push decision")
+
+    def test_new_push_worker_flow_archives_task(self):
+        self.pending_push()
+        state = st.next_state(self.current, self.push_worker_candidate(), NOW)
+        w = find(state["workers"], "w-0021")
+        self.assertEqual((w["branch"], w["base_branch"]), ("claude/license-x1", "main"))
+        cand = copy.deepcopy(state)
+        find(cand["workers"], "w-0021").update(session_id="sess_21", intended_state="running", observed_state="running")
+        state = st.next_state(state, cand, NOW)
+        self.assertEqual(find(state["tasks"], "T-0020")["status"], "running")
+        cand = copy.deepcopy(state)
+        find(cand["tasks"], "T-0020")["artifacts"].append({"kind": "pr", "url": "https://github.com/org/a/pull/7"})
+        find(cand["workers"], "w-0021")["intended_state"] = "archived"
+        state = st.next_state(state, cand, NOW)
+        cand = copy.deepcopy(state)
+        find(cand["workers"], "w-0021")["observed_state"] = "archived"
+        state = st.next_state(state, cand, NOW)
+        self.assertNotIn("T-0020", [t["id"] for t in state["tasks"]])
+        self.assertEqual(state["archived"][0]["id"], "T-0020")
+
+    def test_reuse_push_worker_flow(self):
+        git_task(self.current, "T-0020", "w-0020", intended="archived", observed="idle")
+        commit_artifacts(self.current, "T-0020")
+        push_decision(self.current, "T-0020")
+        find(self.current["tasks"], "T-0020")["user_actions"].append(
+            {"id": "UA-0101", "description": "Close w-0020 from the screen or unpin it", "since": NOW})
+        cand = self.candidate()
+        task = find(cand["tasks"], "T-0020")
+        task["push_consent"] = {"text": "push して", "at": NOW, "message": "やっぱり push して"}
+        task["user_actions"] = []
+        find(cand["workers"], "w-0020").update(delivery="push_pr", intended_state="running", continues=0)
+        new = st.next_state(self.current, cand, NOW)
+        self.assertEqual(find(new["tasks"], "T-0020")["status"], "running")
+
+    def test_archived_stub_push_flow(self):
+        self.current["archived"].insert(0, {"id": "T-0019", "title": "old", "archived_at": NOW, "artifacts": [
+            {"kind": "branch", "label": "a", "ref": "/repo/a#claude/license-x1"},
+            {"kind": "commit", "label": "a", "ref": "abc123"},
+        ]})
+        cand = self.candidate()
+        git_task(cand, "T-0060", "w-0060", delivery="push_pr", intended="pending", observed="none")
+        task = find(cand["tasks"], "T-0060")
+        task["request"] = "T-0019 の claude/license-x1 を push して PR を作ってよい"
+        task["push_consent"] = {"text": "push して PR を作ってよい", "at": NOW}
+        task["artifacts"] = copy.deepcopy(cand["archived"][0]["artifacts"])
+        find(cand["workers"], "w-0060")["session_id"] = None
+        state = st.next_state(self.current, cand, NOW)
+        self.assertEqual(find(state["tasks"], "T-0060")["status"], "waiting")
+        cand = copy.deepcopy(state)
+        find(cand["workers"], "w-0060").update(session_id="sess_60", intended_state="archived", observed_state="idle")
+        with self.assertRaisesRegex(st.StateError, "lacks push_pr artifacts"):
+            st.next_state(state, cand, NOW)
+        find(cand["tasks"], "T-0060")["artifacts"].append({"kind": "pr", "url": "https://github.com/org/a/pull/8"})
+        state = st.next_state(state, cand, NOW)
+        cand = copy.deepcopy(state)
+        find(cand["workers"], "w-0060")["observed_state"] = "archived"
+        state = st.next_state(state, cand, NOW)
+        self.assertEqual(state["archived"][0]["id"], "T-0060")
+
+
+GUARD_TAIL = "The supervisor does not change repositories"
+
+BASH_BLOCK = [
+    "git commit -m x",
+    "git -C /repo push origin b",
+    "cd /repo && git push",
+    "FOO=1 git add .",
+    "/usr/bin/git reset --hard",
+    "echo a#b; git push",
+    "git status\ngit push",
+    "git status &&\n git push",
+    "git status;\ngit push",
+    "git status\n\ngit push",
+    "git -C /repo \\\n push",
+    "echo ok\ngit push",
+    "git worktree add ../w",
+    "git tag v1",
+    "git branch -D b",
+    "git symbolic-ref -d HEAD",
+    "git symbolic-ref HEAD refs/heads/x",
+    "git config set user.name x",
+    "git config --unset user.name",
+    "git config user.name x",
+    "git diff --output=/tmp/x",
+    "git log --output /tmp/x",
+    "git reflog expire --all",
+    "git fetch",
+    "jj commit -m x",
+    "jj describe -m x",
+    "jj -R ~/supervisor git push",
+    "gh pr create --title t --body b",
+    "gh pr merge 1",
+    "gh issue create",
+    "gh api -X POST repos/o/r/issues",
+    "gh api repos/o/r/issues -f title=x",
+    "bash -c 'git push'",
+    "bash -lc 'git push'",
+    "sh -ec 'git commit -m x'",
+    "echo $(git push)",
+    'echo "$(git push)"',
+    "echo `git commit`",
+    'echo "unbalanced git push',
+]
+
+BASH_ALLOW = [
+    "git -C /repo status --porcelain",
+    "git status\ngit log -1",
+    "git -C /repo \\\n status --porcelain",
+    "git rev-parse @{u}",
+    "git log --format=%H -1",
+    "git diff --output-indicator-new=+ HEAD",
+    "git rev-list --count main..HEAD",
+    "git ls-remote origin refs/heads/b",
+    "git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null",
+    "git remote -v 2>&1",
+    "git remote get-url origin",
+    "git branch --list b",
+    "git stash show",
+    "git config get user.email",
+    "git config user.email",
+    "git config --get user.email",
+    "git log --grep=push",
+    "gh pr view 1 --json state | grep MERGED",
+    "gh api repos/o/r/pulls/1",
+    "gh api -X GET search/issues -f q=x",
+    "jj st",
+    "jj -R ~/supervisor log",
+    'echo "git push"',
+    "git ci -m x",
+    'echo "unbalanced',
+]
+
+
+class GuardTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name).resolve()
+        self.dir = root / "sup"
+        self.config = root / "config"
+        self.outside = root / "outside"
+        for d in (self.dir / ".supervisor", self.config, self.outside):
+            d.mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def path(self, path, cwd=None, tmp_dirs=()):
+        return st.path_violation(str(path), str(cwd or self.dir), str(self.dir), str(self.config), list(tmp_dirs))
+
+    def decide(self, tool, value, env=None, **extra):
+        key = st.GUARD_INPUT_KEYS.get(tool, "file_path")
+        payload = dict({"tool_name": tool, "tool_input": {key: value}, "cwd": str(self.dir)}, **extra)
+        return st.guard_decision(payload, str(self.dir), env or {"CLAUDE_CONFIG_DIR": str(self.config)})
+
+    def test_bash_block(self):
+        for command in BASH_BLOCK:
+            with self.subTest(command=command):
+                self.assertTrue(st.bash_violations(command))
+                message = self.decide("Bash", command)
+                self.assertTrue(message.startswith("[session-supervisor guard] blocked: "), message)
+                self.assertIn(GUARD_TAIL, message)
+
+    def test_bash_allow(self):
+        commands = BASH_ALLOW + [
+            f"python3 {self.dir}/.supervisor/state_tool.py commit --state {self.dir}/state.json --candidate {self.dir}/state.next.json",
+            f"cp {self.dir}/state.json {self.dir}/state.next.json",
+            f"zed '{self.dir}'",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(st.bash_violations(command), [])
+                self.assertIsNone(self.decide("Bash", command))
+
+    def test_block_message_names_the_subcommand(self):
+        self.assertIn("blocked: git push (", self.decide("Bash", "git -C /repo push origin b"))
+        self.assertIn("gh pr create (", self.decide("Bash", "gh pr create"))
+
+    def test_path_block(self):
+        link = self.dir / "link"
+        link.symlink_to(self.outside, target_is_directory=True)
+        cases = [
+            (self.outside / "x.txt", None),
+            ("../x", self.dir),
+            (link / "x.txt", None),
+            (self.dir / ".claude" / "settings.json", None),
+            (self.dir / "state.json", None),
+            (self.dir / ".supervisor" / "state_tool.py", None),
+            (self.dir / ".supervisor" / "dashboard.template.html", None),
+            (self.config / "plans" / "p.md", None),
+            (self.config / "settings.json", None),
+        ]
+        for path, cwd in cases:
+            with self.subTest(path=str(path)):
+                self.assertIsNotNone(self.path(path, cwd))
+
+    def test_path_allow(self):
+        cases = [
+            (self.dir / "state.next.json", ()),
+            (self.dir / ".supervisor" / "observations" / "verify-w-0001.json", ()),
+            ("state.next.json", ()),
+            (self.config / "projects" / "x" / "memory" / "m.md", ()),
+            (self.outside / "scratch" / "n.txt", (str(self.outside),)),
+        ]
+        for path, tmp_dirs in cases:
+            with self.subTest(path=str(path)):
+                self.assertIsNone(self.path(path, tmp_dirs=tmp_dirs))
+
+    def test_tool_routing(self):
+        outside = "/nonexistent-sv-guard/x.ipynb"
+        for tool in ("Edit", "MultiEdit", "Write", "NotebookEdit"):
+            with self.subTest(tool=tool):
+                self.assertIn(f"blocked: {tool} /nonexistent-sv-guard/x.ipynb (outside", self.decide(tool, outside))
+        self.assertIsNone(self.decide("Edit", str(self.dir / "state.next.json")))
+        self.assertIsNone(self.decide("Write", "/tmp/sv-guard-scratch.txt"))
+
+    def test_memory_dir_with_and_without_config_env(self):
+        self.assertIsNone(self.decide("Write", str(self.config / "projects" / "x" / "memory" / "m.md")))
+        self.assertIsNotNone(self.decide("Write", str(self.config / "plans" / "p.md")))
+        home = self.config.parent / "home"
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            self.assertIsNone(self.decide("Write", str(home / ".claude" / "projects" / "x" / "memory" / "m.md"), env={"TMPDIR": ""}))
+            self.assertIsNotNone(self.decide("Write", str(home / ".claude" / "plans" / "p.md"), env={"TMPDIR": ""}))
+
+    def test_unknown_tool_missing_fields_and_agent_id(self):
+        self.assertIsNone(self.decide("Read", "/etc/hosts"))
+        self.assertIsNone(st.guard_decision({"tool_name": "Bash"}, str(self.dir), {}))
+        self.assertIsNone(st.guard_decision({"tool_name": "Edit", "tool_input": "x"}, str(self.dir), {}))
+        self.assertIsNone(self.decide("Bash", "git status", agent_id="a1", agent_type="observer"))
+        self.assertIsNotNone(self.decide("Bash", "git push", agent_id="a1", agent_type="observer"))
+
+    def installed_command(self):
+        proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(self.dir)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        settings = json.loads((self.dir / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        return settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+
+    def run_hook(self, command, stdin):
+        return subprocess.run(command, shell=True, input=stdin, capture_output=True, text=True)
+
+    def test_wrapper_blocks_with_exit_2(self):
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push"}, "cwd": str(self.dir)})
+        proc = self.run_hook(self.installed_command(), payload)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("[session-supervisor guard] blocked: git push", proc.stderr)
+        allowed = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git status"}, "cwd": str(self.dir)})
+        self.assertEqual(self.run_hook(self.installed_command(), allowed).returncode, 0)
+
+    def test_wrapper_fails_open(self):
+        command = self.installed_command()
+        proc = self.run_hook(command, "{not json")
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("[session-supervisor guard] warning:", proc.stderr)
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push"}})
+        script = self.dir / ".supervisor" / "state_tool.py"
+        script.write_text("import argparse\np = argparse.ArgumentParser()\np.add_subparsers(required=True).add_parser('digest')\np.parse_args()\n", encoding="utf-8")
+        self.assertEqual(self.run_hook(command, payload).returncode, 0)
+        script.unlink()
+        self.assertEqual(self.run_hook(command, payload).returncode, 0)
+
+
 class CommitCliTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1009,8 +1321,8 @@ class SetupTest(unittest.TestCase):
     def files(self, target):
         return sorted(str(p.relative_to(target)) for p in target.rglob("*") if p.is_file())
 
-    def hooks(self, target):
-        return json.loads((target / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"]["SessionStart"]
+    def hooks(self, target, event="SessionStart"):
+        return json.loads((target / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"][event]
 
     def test_creates_five_files_with_matcher(self):
         target = self.root / "sup"
@@ -1031,7 +1343,47 @@ class SetupTest(unittest.TestCase):
         proc = self.setup_dir(target)
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(len(self.hooks(target)), 1)
+        self.assertEqual(len(self.hooks(target, "PreToolUse")), 1)
         self.assertTrue(all(line.startswith("exists:") for line in proc.stdout.splitlines()), proc.stdout)
+
+    def test_installs_guard_hook(self):
+        target = self.root / "sup"
+        self.assertEqual(self.setup_dir(target).returncode, 0)
+        entries = self.hooks(target, "PreToolUse")
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["matcher"], "Edit|MultiEdit|Write|NotebookEdit|Bash")
+        self.assertEqual(entries[0]["hooks"][0]["command"],
+                         f"python3 {target / '.supervisor' / 'state_tool.py'} guard --dir {target}; [ $? -eq 3 ] && exit 2; exit 0")
+        self.assertIn("state_tool.py guard", (target / "CLAUDE.md").read_text(encoding="utf-8"))
+
+    def test_adds_guard_to_existing_setup(self):
+        target = self.root / "sup"
+        self.setup_dir(target)
+        settings_path = target / ".claude" / "settings.json"
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        del settings["hooks"]["PreToolUse"]
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+        proc = self.setup_dir(target)
+        self.assertIn(f"updated: {settings_path}", proc.stdout)
+        self.assertEqual(len(self.hooks(target)), 1)
+        self.assertEqual(len(self.hooks(target, "PreToolUse")), 1)
+
+    def test_preserves_existing_pre_tool_use(self):
+        target = self.root / "sup"
+        (target / ".claude").mkdir(parents=True)
+        user_entry = {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo mine"}]}
+        (target / ".claude" / "settings.json").write_text(json.dumps({"hooks": {"PreToolUse": [user_entry]}}), encoding="utf-8")
+        self.assertEqual(self.setup_dir(target).returncode, 0)
+        entries = self.hooks(target, "PreToolUse")
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0], user_entry)
+
+    def test_guard_entry_predicate_matches_quoted_and_unquoted(self):
+        for name in ("sup", "my sup"):
+            target = self.root / name
+            self.assertEqual(self.setup_dir(target).returncode, 0)
+            commands = [h["command"] for e in self.hooks(target, "PreToolUse") for h in e["hooks"]]
+            self.assertTrue(any("state_tool.py" in c and " guard --dir" in c for c in commands), commands)
 
     def test_preserves_existing_keys(self):
         target = self.root / "sup"
@@ -1055,7 +1407,8 @@ class SetupTest(unittest.TestCase):
         self.assertFalse((target / "state.json").exists())
 
     def test_malformed_hooks_abort(self):
-        for settings in ({"hooks": []}, {"hooks": {"SessionStart": {}}}, {"hooks": {"SessionStart": ["x"]}}):
+        for settings in ({"hooks": []}, {"hooks": {"SessionStart": {}}}, {"hooks": {"SessionStart": ["x"]}},
+                         {"hooks": {"PreToolUse": {}}}, {"hooks": {"PreToolUse": ["x"]}}):
             target = self.root / "sup"
             (target / ".claude").mkdir(parents=True, exist_ok=True)
             (target / ".claude" / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
@@ -1081,6 +1434,12 @@ class SetupTest(unittest.TestCase):
         proc = subprocess.run(command, shell=True, capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0)
         self.assertIn("rev 0", proc.stdout)
+        guard = self.hooks(target, "PreToolUse")[0]["hooks"][0]["command"]
+        self.assertIn(f"'{target / '.supervisor' / 'state_tool.py'}' guard --dir '{target}'", guard)
+        payload = json.dumps({"tool_name": "Write", "tool_input": {"file_path": "/nonexistent-sv-guard/x"}, "cwd": str(target)})
+        proc = subprocess.run(guard, shell=True, input=payload, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("outside the supervisor directory", proc.stderr)
 
     def test_version_matches_copy(self):
         target = self.root / "sup"

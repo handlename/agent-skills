@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """State tool for the session-supervisor skill.
 
-Functional core: validate, next_state, render, digest, parse_report, cwd_busy, serialize.
+Functional core: validate, next_state, render, digest, parse_report, cwd_busy, serialize,
+guard_decision (bash_violations, path_violation).
 Imperative shell: the argparse subcommands at the bottom of this file.
 """
 
@@ -40,6 +41,67 @@ REPORT_ARTIFACT_KEYS = ("branch", "commit", "pr", "ci")
 FOOTER_RE = re.compile(r"<!--sv-footer-->.*?<!--/sv-footer-->", re.S)
 REPORT_RE = re.compile(r"```supervisor-report[ \t]*\r?\n(.*?)\r?\n[ \t]*```", re.S)
 UA_ID_RE = re.compile(r"^UA-(\d+)$")
+
+GUARD_MATCHER = "Edit|MultiEdit|Write|NotebookEdit|Bash"
+GUARD_INPUT_KEYS = {"Edit": "file_path", "MultiEdit": "file_path", "Write": "file_path", "NotebookEdit": "notebook_path", "Bash": "command"}
+GUARD_PROTECTED = (".claude", "state.json", ".supervisor/state_tool.py", ".supervisor/" + TEMPLATE_NAME)
+GUARD_SEPARATOR_CHARS = frozenset(";&|()\n")
+GUARD_SHELLS = ("sh", "bash", "zsh")
+GUARD_WORD_RE = re.compile(r"(?<![\w./-])(git|jj|gh)(?![\w.-])")
+GUARD_VALUE_OPTIONS = {
+    "git": ("-C", "-c", "--git-dir", "--work-tree", "--namespace"),
+    "jj": ("-R", "--repository", "--at-op", "--at-operation", "--color", "--config", "--config-file"),
+    "gh": ("-R", "--repo"),
+}
+GIT_DENY = frozenset({
+    "commit", "push", "pull", "fetch", "merge", "rebase", "reset", "add", "rm", "mv", "cherry-pick", "revert",
+    "checkout", "switch", "restore", "clean", "apply", "am", "format-patch", "update-ref", "gc", "prune",
+    "filter-branch", "init", "clone",
+})
+GIT_DENY_ACTIONS = {
+    "worktree": frozenset({"add", "remove", "move", "prune", "repair", "lock", "unlock"}),
+    "remote": frozenset({"add", "remove", "rm", "rename", "set-url", "set-head", "set-branches", "prune", "update"}),
+    "reflog": frozenset({"expire", "delete"}),
+}
+GIT_ALLOW_ACTIONS = {
+    "stash": frozenset({"list", "show"}),
+    "notes": frozenset({"list", "show"}),
+    "submodule": frozenset({"status", "summary"}),
+}
+GIT_TAG_FLAGS = ("-d", "-a", "-s", "-f", "-m")
+GIT_BRANCH_FLAGS = ("-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy", "-f", "--force", "-u",
+                    "--set-upstream-to", "--unset-upstream", "--edit-description")
+GIT_BRANCH_LIST_FLAGS = ("--list", "-l", "--contains", "--merged", "--no-merged", "--points-at")
+GIT_CONFIG_WRITE_FLAGS = ("--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section", "-e", "--edit")
+JJ_DENY = frozenset({
+    "commit", "describe", "desc", "new", "edit", "squash", "split", "abandon", "rebase", "restore", "resolve",
+    "duplicate", "backout", "revert", "absorb", "diffedit", "fix", "sign", "unsign", "parallelize",
+    "simplify-parents", "metaedit", "undo", "redo", "init", "git",
+})
+JJ_DENY_ACTIONS = {
+    "file": frozenset({"chmod", "track", "untrack"}),
+    "config": frozenset({"set", "unset", "edit"}),
+}
+JJ_ALLOW_ACTIONS = {
+    "bookmark": frozenset({"list"}),
+    "branch": frozenset({"list"}),
+    "tag": frozenset({"list"}),
+    "op": frozenset({"log", "show", "diff"}),
+    "workspace": frozenset({"list", "root"}),
+}
+GH_DENY_ACTIONS = {
+    "pr": frozenset({"create", "merge", "edit", "close", "reopen", "comment", "review", "ready", "lock", "unlock", "checkout", "update-branch"}),
+    "issue": frozenset({"create", "edit", "close", "reopen", "comment", "delete", "transfer", "pin", "unpin", "lock", "unlock", "develop"}),
+    "repo": frozenset({"create", "edit", "delete", "fork", "clone", "rename", "archive", "unarchive", "sync", "set-default"}),
+    "release": frozenset({"create", "edit", "delete", "upload", "delete-asset"}),
+    "label": frozenset({"create", "edit", "delete", "clone"}),
+    "secret": frozenset({"set", "delete"}),
+    "variable": frozenset({"set", "delete"}),
+    "workflow": frozenset({"run", "enable", "disable"}),
+    "run": frozenset({"rerun", "cancel", "delete"}),
+    "gist": frozenset({"create", "edit", "delete"}),
+}
+GH_API_FIELD_FLAGS = ("-f", "-F", "--field", "--raw-field", "--input")
 
 
 class StateError(Exception):
@@ -107,6 +169,190 @@ def _cwds_overlap(a, b):
 
 def cwd_busy(state, cwd):
     return any(_occupies_cwd(w) and _cwds_overlap(w["cwd"], cwd) for w in state.get("workers", []))
+
+
+def _shell_tokens(command):
+    lex = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
+    lex.whitespace = " \t\r"
+    lex.whitespace_split = True
+    lex.commenters = ""
+    return list(lex)
+
+
+def _segments(tokens):
+    # shlex groups adjacent punctuation (`&&\n`, `;;`), so any token made only of separator characters separates.
+    segments, current = [], []
+    for tok in tokens:
+        if tok and set(tok) <= GUARD_SEPARATOR_CHARS:
+            segments.append(current)
+            current = []
+        else:
+            current.append(tok)
+    segments.append(current)
+    return [s for s in segments if s]
+
+
+def _strip_redirections(segment):
+    words, i = [], 0
+    while i < len(segment):
+        tok = segment[i]
+        if tok and set(tok) <= set("<>&|") and ("<" in tok or ">" in tok):
+            if words and words[-1].isdigit():
+                words.pop()
+            i += 2
+            continue
+        words.append(tok)
+        i += 1
+    return words
+
+
+def _positionals(args):
+    return [a for a in args if not a.startswith("-")]
+
+
+def _has_flag(args, flags):
+    return any(a.split("=", 1)[0] in flags if a.startswith("--") else a in flags for a in args)
+
+
+def _action_violation(sub, first, deny_actions, allow_actions):
+    if first in deny_actions.get(sub, ()) or (sub in allow_actions and first not in allow_actions[sub]):
+        return f"{sub} {first} (mutating command)" if first else f"{sub} (mutating command)"
+    return None
+
+
+def _git_config_writes(args, pos):
+    if pos and pos[0] in ("get", "list"):
+        return False
+    if pos and pos[0] in ("set", "unset", "rename-section", "remove-section", "edit"):
+        return True
+    return _has_flag(args, GIT_CONFIG_WRITE_FLAGS) or len(pos) >= 2
+
+
+def _git_violation(sub, args):
+    pos = _positionals(args)
+    if any(a == "--output" or a.startswith("--output=") for a in args):
+        return f"{sub} --output (writes a file)"
+    if sub in GIT_DENY:
+        return f"{sub} (mutating command)"
+    found = _action_violation(sub, pos[0] if pos else None, GIT_DENY_ACTIONS, GIT_ALLOW_ACTIONS)
+    if found:
+        return found
+    if sub == "tag" and (pos or _has_flag(args, GIT_TAG_FLAGS)):
+        return "tag (creates or deletes a tag)"
+    if sub == "branch" and (_has_flag(args, GIT_BRANCH_FLAGS) or (pos and not _has_flag(args, GIT_BRANCH_LIST_FLAGS))):
+        return "branch (creates, renames or deletes a branch)"
+    if sub == "config" and _git_config_writes(args, pos):
+        return "config (writes configuration)"
+    if sub == "symbolic-ref" and (_has_flag(args, ("-d", "--delete")) or len(pos) >= 2):
+        return "symbolic-ref (changes a ref)"
+    return None
+
+
+def _jj_violation(sub, args):
+    if sub in JJ_DENY:
+        return f"{sub} (mutating command)"
+    pos = _positionals(args)
+    return _action_violation(sub, pos[0] if pos else None, JJ_DENY_ACTIONS, JJ_ALLOW_ACTIONS)
+
+
+def _gh_violation(sub, args):
+    if sub == "api":
+        method = next((args[i + 1] for i, a in enumerate(args[:-1]) if a in ("-X", "--method")), None)
+        if method is not None:
+            return None if method == "GET" else f"api -X {method} (non-GET request)"
+        return "api (fields without -X GET make gh send POST)" if _has_flag(args, GH_API_FIELD_FLAGS) else None
+    pos = _positionals(args)
+    return _action_violation(sub, pos[0] if pos else None, GH_DENY_ACTIONS, {})
+
+
+GUARD_CHECKS = {"git": _git_violation, "jj": _jj_violation, "gh": _gh_violation}
+
+
+def _split_subcommand(tool, args):
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in GUARD_VALUE_OPTIONS[tool] else 1
+    return (args[i], args[i + 1:]) if i < len(args) else (None, [])
+
+
+def _tool_violations(words):
+    for i, tok in enumerate(words):
+        tool = os.path.basename(tok)
+        if tool in GUARD_CHECKS:
+            sub, args = _split_subcommand(tool, words[i + 1:])
+            found = GUARD_CHECKS[tool](sub, args) if sub else None
+            return [f"{tool} {found}"] if found else []
+    return []
+
+
+def _shell_c_violations(words):
+    for i, tok in enumerate(words):
+        if os.path.basename(tok) not in GUARD_SHELLS:
+            continue
+        has_c = False
+        for opt in words[i + 1:]:
+            if not opt.startswith("-"):
+                return bash_violations(opt) if has_c else []
+            has_c = has_c or (not opt.startswith("--") and "c" in opt[1:])
+        return []
+    return []
+
+
+def bash_violations(command):
+    """Deny-list matches of git / jj / gh in a Bash command. A guardrail, not a security boundary."""
+    command = command.replace("\\\n", "")
+    try:
+        tokens = _shell_tokens(command)
+    except ValueError:
+        if GUARD_WORD_RE.search(command):
+            return ["unparsable command (could not parse; quote the command correctly or split it)"]
+        return []
+    violations = []
+    for segment in _segments(tokens):
+        text = " ".join(segment)
+        if ("`" in text or "$(" in text) and GUARD_WORD_RE.search(text):
+            violations.append("command substitution (split the command; command substitution around git/jj/gh is not inspected)")
+            continue
+        words = _strip_redirections(segment)
+        violations += _shell_c_violations(words) + _tool_violations(words)
+    return violations
+
+
+def path_violation(path, cwd, supervisor_dir, config_dir, tmp_dirs):
+    full = _real(os.path.join(_real(cwd), os.path.expanduser(path)))
+    if _under(full, supervisor_dir):
+        if any(_under(full, os.path.join(supervisor_dir, rel)) for rel in GUARD_PROTECTED):
+            return f"{full} (written only by setup or commit)"
+        return None
+    if _under(full, config_dir):
+        parts = Path(os.path.relpath(full, _real(config_dir))).parts
+        if len(parts) >= 4 and parts[0] == "projects" and parts[2] == "memory":
+            return None
+        return f"{full} (inside Claude's configuration directory)"
+    if any(_under(full, d) for d in tmp_dirs):
+        return None
+    return f"{full} (outside the supervisor directory)"
+
+
+def guard_decision(payload, supervisor_dir, env):
+    """Return the block message for a PreToolUse payload, or None to allow it."""
+    tool = payload.get("tool_name")
+    tool_input = payload.get("tool_input")
+    key = GUARD_INPUT_KEYS.get(tool)
+    value = tool_input.get(key) if key and isinstance(tool_input, dict) else None
+    if not isinstance(value, str) or not value:
+        return None
+    if tool == "Bash":
+        violations = bash_violations(value)
+    else:
+        config_dir = env.get("CLAUDE_CONFIG_DIR") or "~/.claude"
+        tmp_dirs = [d for d in (env.get("TMPDIR"), "/tmp") if d]
+        found = path_violation(value, payload.get("cwd") or supervisor_dir, supervisor_dir, config_dir, tmp_dirs)
+        violations = [f"{tool} {found}"] if found else []
+    if not violations:
+        return None
+    return (f"[session-supervisor guard] blocked: {'; '.join(violations)}. The supervisor does not change repositories: "
+            "send it to a worker session, or ask an observer subagent for read-only facts.")
 
 
 def _archived_externally(worker):
@@ -213,8 +459,11 @@ def _shape_errors(state):
     for t in state["tasks"]:
         if not isinstance(t.get("worker_ids", []), list) or not all(isinstance(i, str) for i in t.get("worker_ids", [])):
             errors.append(f"task {t['id']}: worker_ids must be a list of strings")
-        if t.get("push_consent") is not None and not isinstance(t.get("push_consent"), dict):
+        consent = t.get("push_consent")
+        if consent is not None and not isinstance(consent, dict):
             errors.append(f"task {t['id']}: push_consent must be an object or null")
+        elif consent is not None and "message" in consent and not (isinstance(consent["message"], str) and consent["message"]):
+            errors.append(f"task {t['id']}: push_consent.message must be a non-empty string when present")
         cancel = t.get("cancel")
         if cancel is not None and not (isinstance(cancel, dict) and all(isinstance(cancel.get(k), str) and cancel.get(k) for k in ("at", "reason"))):
             errors.append(f"task {t['id']}: cancel must be null or {{at, reason}} with non-empty strings")
@@ -312,9 +561,11 @@ def validate(state):
         if (delivery == "files") != (w.get("kind") == "non-git"):
             errors.append(f"{prefix}: delivery {delivery!r} does not match kind {w.get('kind')!r}")
         if delivery == "push_pr" and task is not None:
-            consent = (task.get("push_consent") or {}).get("text") or ""
-            if not consent or consent not in (task.get("request") or ""):
-                errors.append(f"{prefix}: push_pr requires push_consent.text quoted from the task request")
+            consent = task.get("push_consent") or {}
+            text = consent.get("text") or ""
+            source = consent["message"] if "message" in consent else task.get("request")
+            if not text or text not in (source or ""):
+                errors.append(f"{prefix}: push_pr requires push_consent.text quoted from push_consent.message when present, else from the task request")
         # A vanished session produces no deliverables, so giving it up requires none.
         exempt = task is None or task.get("cancel") or w.get("observed_state") == "missing"
         if w.get("intended_state") == "archived" and not exempt:
@@ -372,6 +623,23 @@ def _transition_errors(current, candidate):
     return errors
 
 
+def _consent_message_errors(current, candidate):
+    # A consent given after intake is accepted only while it resolves a pending push decision.
+    errors = []
+    cur_tasks = {t["id"]: t for t in current["tasks"]}
+    cur_workers = {w["id"]: w for w in current["workers"]}
+    for task in candidate["tasks"]:
+        message = (task.get("push_consent") or {}).get("message")
+        cur = cur_tasks.get(task["id"], {})
+        if message is None or message == (cur.get("push_consent") or {}).get("message"):
+            continue
+        git_workers = [cur_workers[wid] for wid in cur.get("worker_ids", []) if cur_workers.get(wid, {}).get("kind") == "git"]
+        pending = {ua["id"] for ua in cur.get("user_actions", []) if any(_is_push_decision(ua, w) for w in git_workers)}
+        if not pending - {ua["id"] for ua in task.get("user_actions", [])}:
+            errors.append(f"task {task['id']}: push_consent.message may be set only while resolving a pending push decision")
+    return errors
+
+
 def waiting_start_description(task_id):
     return f"Waiting task {task_id} can start now: send any message to the supervisor to start it."
 
@@ -415,7 +683,7 @@ def next_state(current, candidate, now):
     errors = validate(state)
     if errors:
         raise StateError(errors)
-    errors = _deletion_errors(current, state) + _transition_errors(current, state)
+    errors = _deletion_errors(current, state) + _transition_errors(current, state) + _consent_message_errors(current, state)
     if errors:
         raise StateError(errors)
 
@@ -813,6 +1081,8 @@ This directory belongs to the session-supervisor skill. It is not a project.
 - Write `state.json` only through `python3 .supervisor/state_tool.py commit`.
 - `supervisor.archive_consent` in `state.json` is the user's explicit consent that archiving requires. It covers only worker sessions whose `startedBy` is in `supervisor.session_ids`.
 - Never delete sessions.
+- The supervisor only operates sessions, changes state through commit, publishes the dashboard, and talks to the user. Workers edit, commit, push, and open PRs; observer subagents run read-only checks and investigations, write results under .supervisor/observations/, and return the path.
+- A PreToolUse hook (state_tool.py guard) blocks edits outside this directory and mutating git / jj / gh commands. To disable it, remove its entry from .claude/settings.json by hand; the supervisor asks before restoring a missing entry.
 """
 
 
@@ -830,12 +1100,13 @@ def cmd_setup(args):
         if not isinstance(settings, dict):
             raise StateError(f"{settings_path} must contain a JSON object")
         hooks = settings.get("hooks", {})
-        session_start = hooks.get("SessionStart", []) if isinstance(hooks, dict) else None
-        if not isinstance(session_start, list) or not all(
-            isinstance(e, dict) and isinstance(e.get("hooks", []), list) and all(isinstance(h, dict) for h in e.get("hooks", []))
-            for e in session_start
-        ):
-            raise StateError(f"{settings_path}: hooks.SessionStart must be a list of hook entries; fix it and rerun setup")
+        for event in ("SessionStart", "PreToolUse"):
+            entries = hooks.get(event, []) if isinstance(hooks, dict) else None
+            if not isinstance(entries, list) or not all(
+                isinstance(e, dict) and isinstance(e.get("hooks", []), list) and all(isinstance(h, dict) for h in e.get("hooks", []))
+                for e in entries
+            ):
+                raise StateError(f"{settings_path}: hooks.{event} must be a list of hook entries; fix it and rerun setup")
 
     report = []
     sv_dir = target / ".supervisor"
@@ -849,14 +1120,22 @@ def cmd_setup(args):
         report.append((status, dest))
 
     state_path = target / "state.json"
-    command = f"python3 {shlex.quote(str(sv_dir / Path(__file__).name))} digest --state {shlex.quote(str(state_path))}"
-    entries = settings.setdefault("hooks", {}).setdefault("SessionStart", [])
-    has_hook = any(h.get("command") == command for e in entries for h in e.get("hooks", []))
-    if has_hook:
+    script = shlex.quote(str(sv_dir / Path(__file__).name))
+    # The guard exits 3 on a block; anything else (missing script, stale copy, crash) must not block the call.
+    wanted = (
+        ("SessionStart", "startup|resume|clear|compact", f"python3 {script} digest --state {shlex.quote(str(state_path))}"),
+        ("PreToolUse", GUARD_MATCHER, f"python3 {script} guard --dir {shlex.quote(str(target))}; [ $? -eq 3 ] && exit 2; exit 0"),
+    )
+    added = False
+    for event, matcher, command in wanted:
+        entries = settings.setdefault("hooks", {}).setdefault(event, [])
+        if not any(h.get("command") == command for e in entries for h in e.get("hooks", [])):
+            entries.append({"matcher": matcher, "hooks": [{"type": "command", "command": command}]})
+            added = True
+    if not added:
         report.append(("exists", settings_path))
     else:
         existed = settings_path.exists()
-        entries.append({"matcher": "startup|resume|clear|compact", "hooks": [{"type": "command", "command": command}]})
         settings_path.parent.mkdir(parents=True, exist_ok=True)
         _write_atomic(str(settings_path), json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
         report.append(("updated" if existed else "created", settings_path))
@@ -877,6 +1156,18 @@ def cmd_setup(args):
     for status, path in report:
         print(f"{status}: {path}")
     return 0
+
+
+def cmd_guard(args):
+    try:
+        message = guard_decision(json.loads(sys.stdin.read()), args.dir, dict(os.environ))
+        if message:
+            print(message, file=sys.stderr)
+            return 3
+        return 0
+    except BaseException as e:  # A broken guard must never block the session.
+        print(f"[session-supervisor guard] warning: {type(e).__name__}: {e}", file=sys.stderr)
+        return 0
 
 
 def build_parser():
@@ -907,6 +1198,10 @@ def build_parser():
     p.add_argument("--expect-task")
     p.add_argument("--expect-worker")
     p.set_defaults(func=cmd_parse_report)
+
+    p = sub.add_parser("guard", help="PreToolUse hook: exit 3 with a reason on stderr when the call is blocked, else 0")
+    p.add_argument("--dir", required=True)
+    p.set_defaults(func=cmd_guard)
 
     p = sub.add_parser("check-cwd", help="print busy or free for a non-git cwd")
     p.add_argument("--state", required=True)

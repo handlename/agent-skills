@@ -121,7 +121,7 @@ The example is a snapshot for illustration: `w-0005` and `w-0006` are elided, so
 | :--- | :--- |
 | `id`, `title` | Task id and short display title. |
 | `request` | The user's request, copied **verbatim** (never summarized). |
-| `push_consent` | `null`, or `{text, at}` where `text` is the exact phrase from `request` (or a later user message) that grants push / PR. |
+| `push_consent` | `null`, or `{text, at, message?}` where `text` is the exact phrase that grants push / PR. Without `message`, `text` comes from `request`. `message` is a later user message verbatim (including a consent given while the worker was still running, applied once the push-decision user action exists) and holds `text`; it may be set or changed only in a candidate that resolves a pending push-decision user action of the task (enforced by `commit`, the only path that accepts it). Its content is an audit record. Each push decision covers only the branch its user action names; a later consent overwrites `message`. |
 | `status` | Derived by `commit`. Never write it yourself (see Derivation). |
 | `next_action` | What the supervisor will do next for this task. |
 | `user_actions[]` | `{id, description, since}`: things the user must do. A non-empty list makes the task `needs_user`. The supervisor removes each one in the candidate that records its resolution (SKILL.md section 5). |
@@ -140,11 +140,16 @@ The example is a snapshot for illustration: `w-0005` and `w-0006` are elided, so
 | `cwd` | Repo root (git) or target directory (non-git), absolute. |
 | `kind` | `git` or `non-git`. |
 | `delivery` | `push_pr`, `commit`, or `files` (see Value ranges). |
-| `branch`, `base_branch`, `worktree_path` | git only, filled after start. `branch` and `worktree_path` come from get; `base_branch` is get's `sourceBranch`, else `git symbolic-ref --short refs/remotes/origin/HEAD` (e.g. `origin/main`). |
+| `branch`, `base_branch`, `worktree_path` | git only, filled after start. `branch` and `worktree_path` come from get; `base_branch` is get's `sourceBranch`, else the remote default branch (`refs/remotes/origin/HEAD`, e.g. `origin/main`), observed by a subagent. A push-only worker (SKILL.md 6.3 step 7) keeps `branch` = the pushed branch instead of the app branch from get, and copies the original worker's `base_branch`; one started from an archived stub (or from the fallback when the stub expired or lacks a `commit` artifact) uses the observed remote default branch, never get's `sourceBranch` (the pushed branch). |
 | `intended_state` | What the supervisor wants. |
 | `observed_state`, `observed_at` | What the supervisor last observed, and when. |
 | `last_report` | Last processed report (see last_report). |
 | `continues` | Optional integer >= 0: consecutive "continue" nudges sent for unchanged `in_progress` reports. Reset to 0 when the report's `summary` or `next_action` changes; at 3 the supervisor stops nudging and adds a user action. |
+
+Later push workers (SKILL.md 6.3 step 7):
+
+- A task may gain a `push_pr` worker after its `commit` workers were archived.
+- A reused worker's `delivery` may change from `commit` to `push_pr` together with `intended_state` from `archived` back to `running` (only workers that newly become archived are checked), in the candidate that sets `push_consent`.
 
 ### archived[]
 
@@ -235,7 +240,7 @@ Single-state checks (`validate`):
 
 - Ids are unique, every task has at least one entry in `worker_ids`, and `worker.task_id` and `task.worker_ids` agree in both directions.
 - At most one non-git worker occupies each directory tree: two occupied `cwd`s may be neither equal nor ancestor / descendant of each other (after realpath normalization). A worker occupies its `cwd` while `intended_state == running`, and also while `intended_state == archived` but `observed_state` is neither `archived` nor `missing` (an archive was requested but not yet observed).
-- `delivery == push_pr` requires a non-empty `push_consent.text` that is a substring of the task's `request`. This guarantees consistency between the two fields only; keeping `request` verbatim is the supervisor's rule.
+- `delivery == push_pr` requires a non-empty `push_consent.text` that is a substring of `push_consent.message` when `message` is present, else of the task's `request`. `message`, when present, is a non-empty string. This guarantees consistency between the fields only; keeping `request` and `message` verbatim is the supervisor's rule.
 - A task that is not cancelled and has a worker with `intended_state == archived` holds the artifacts its delivery requires:
   - `push_pr`: `branch` + `commit` + (`pr`, or a `branch` with `url`)
   - `commit`: `branch` + `commit`
@@ -254,6 +259,7 @@ Checks against the current state (`next_state`):
   - if its delivery is `commit` and the task is not cancelled, the candidate task must contain the push-decision user action
   - `supervisor.archive_consent` must not be null, unless the worker is already observed `archived` or `missing` (no archive call follows)
 - Removing the push-decision user action from a candidate whose workers are already `archived` (or whose archive was refused and the worker remains) is accepted: the transition checks apply only to workers that newly become archived.
+- Push consent from a later message: for each candidate task whose `push_consent.message` is new or differs from the current task's, the task must exist in current, current must hold a push-decision user action for it (naming the branch of one of its git workers), and the candidate must no longer hold that user action. Otherwise: `task T-xxxx: push_consent.message may be set only while resolving a pending push decision`.
 
 ## Report to artifacts
 
