@@ -936,6 +936,17 @@ class NextStateTest(unittest.TestCase):
         find(cand["workers"], "w-0021").update(intended_state="archived", observed_state="missing", replaced_by="w-0020")
         self.assertRejected(cand, "replaced_by chain loops")
 
+    def test_replace_worker_already_archived_with_result_rejected(self):
+        for observed in ("archived", "missing"):
+            with self.subTest(observed=observed):
+                self.setUp()
+                git_task(self.current, "T-0020", "w-0020", intended="archived", observed=observed)
+                commit_artifacts(self.current, "T-0020")
+                push_decision(self.current, "T-0020")
+                cand = self.candidate()
+                self.replace(cand, "w-0020", "w-0021")
+                self.assertRejected(cand, "w-0020: replaced_by cannot be added to a worker already intended archived")
+
     def test_replaced_external_archive_and_given_up_successor_need_user(self):
         git_task(self.current, "T-0020", "w-0020", intended="running", observed="archived")
         cand = self.candidate()

@@ -701,7 +701,11 @@ def _transition_errors(current, candidate):
     for w in candidate["workers"]:
         if w["intended_state"] != "archived":
             continue
-        if cur_workers.get(w["id"], {}).get("intended_state") == "archived":
+        cur = cur_workers.get(w["id"], {})
+        if cur.get("intended_state") == "archived":
+            # Already finished with its result recorded (or cancelled): never replaced afterwards.
+            if not cur.get("replaced_by") and w.get("replaced_by"):
+                errors.append(f"worker {w['id']}: replaced_by cannot be added to a worker already intended archived")
             continue
         # Consent covers archives the supervisor performs; an archived or vanished session needs none.
         if w["observed_state"] not in ("archived", "missing") and not candidate["supervisor"].get("archive_consent"):
