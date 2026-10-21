@@ -9,7 +9,7 @@ Field names are agent-neutral:
 - `session_id`: the session identifier issued by the runtime (the value the start capability returns).
 - `handle`: the `[a-z0-9-]` name (24 characters or fewer) given to the session at start, e.g. `t0003-w0004`.
 - `branch` / `worktree_path`: decided by the app (it adds a prefix and a suffix to the requested slug). Fill them from the get capability after start; never guess them.
-- `task.id`: `T-NNNN`. `worker.id`: `w-NNNN`. `user_actions[].id`: `UA-NNNN`. Allocate the next number after the highest one in the current `tasks` / `workers` / `user_actions`; for task ids also count the `archived` stubs, which keep their task id. Stubs keep no worker or user-action ids, so those numbers may be reused after a task is archived; uniqueness is checked only within the current state.
+- `task.id`: `T-NNNN`. `worker.id`: `w-NNNN`. `user_actions[].id`: `UA-NNNN`. Allocate the next number after the highest one in the current `tasks` / `workers` / `user_actions`; for task ids also count the `archived` stubs, which keep their task id (a revived task reuses its stub's id, see archived[]). Stubs keep no worker or user-action ids, so those numbers may be reused after a task is archived; uniqueness is checked only within the current state.
 
 ## Example
 
@@ -30,6 +30,9 @@ Field names are agent-neutral:
       "title": "Add retry to uploader",
       "request": "repo-a と repo-b の uploader にリトライを追加して。push して PR を作ってよい",
       "push_consent": { "text": "push して PR を作ってよい", "at": "2026-10-17T09:00:00+09:00" },
+      "followups": [
+        { "text": "repo-a の方は指数バックオフにして", "at": "2026-10-17T10:20:00+09:00" }
+      ],
       "status": "running",
       "next_action": "w-0004 / w-0005 の完了待ち",
       "user_actions": [
@@ -98,7 +101,7 @@ Field names are agent-neutral:
   ],
   "archived": [
     { "id": "T-0002", "title": "Bump deps", "artifacts": [], "archived_at": "2026-10-17T08:30:00+09:00", "cancelled": true, "reason": "やっぱり不要" },
-    { "id": "T-0001", "title": "Fix typo", "artifacts": [{ "kind": "pr", "label": "repo-a#40", "url": "https://github.com/org/repo-a/pull/40" }], "archived_at": "2026-10-17T08:00:00+09:00" }
+    { "id": "T-0001", "title": "Fix typo", "request": "repo-a の README の typo を直して", "artifacts": [{ "kind": "pr", "label": "repo-a#40", "url": "https://github.com/org/repo-a/pull/40" }], "archived_at": "2026-10-17T08:00:00+09:00" }
   ]
 }
 ```
@@ -121,7 +124,8 @@ The example is a snapshot for illustration: `w-0005` and `w-0006` are elided, so
 | Field | Meaning |
 | :--- | :--- |
 | `id`, `title` | Task id and short display title. |
-| `request` | The user's request, copied **verbatim** (never summarized). |
+| `request` | The user's request, copied **verbatim** (never summarized). Immutable: `commit` rejects a candidate that changes the `request` of a task already in the current state (`task T-xxxx: request is verbatim and must not change`). |
+| `followups[]` | Optional. `{text, at}` entries (both non-empty strings), oldest first: later user requests that continue this task, each `text` copied **verbatim** (the whole message). Appended by the supervisor (SKILL.md 6.7); an existing `text` is never changed; an entry is removed only by a correction (SKILL.md 6.9). Carried into the `archived` stub when non-empty. |
 | `push_consent` | `null`, or `{text, at, message?}` where `text` is the exact phrase that grants push / PR. Without `message`, `text` comes from `request`. `message` is a later user message verbatim (including a consent given while the worker was still running, applied once the push-decision user action exists) and holds `text`; it may be set or changed only in a candidate that resolves a pending push-decision user action of the task (enforced by `commit`, the only path that accepts it). Its content is an audit record. Each push decision covers only the branch its user action names; a later consent overwrites `message`. |
 | `status` | Derived by `commit`. Never write it yourself (see Derivation). |
 | `next_action` | What the supervisor will do next for this task. |
@@ -141,10 +145,11 @@ The example is a snapshot for illustration: `w-0005` and `w-0006` are elided, so
 | `cwd` | Repo root (git) or target directory (non-git), absolute. |
 | `kind` | `git` or `non-git`. |
 | `delivery` | `push_pr`, `commit`, or `files` (see Value ranges). |
-| `branch`, `base_branch`, `worktree_path` | git only, filled after start. `branch` and `worktree_path` come from get; `base_branch` is get's `sourceBranch`, else the remote default branch (`refs/remotes/origin/HEAD`, e.g. `origin/main`), observed by a subagent. A push-only worker (SKILL.md 6.3 step 7) keeps `branch` = the pushed branch instead of the app branch from get, and copies the original worker's `base_branch`; one started from an archived stub (or from the fallback when the stub expired or lacks a `commit` artifact) uses the observed remote default branch, never get's `sourceBranch` (the pushed branch). |
+| `branch`, `base_branch`, `worktree_path` | git only, filled after start. `branch` and `worktree_path` come from get; `base_branch` is get's `sourceBranch`, else the remote default branch (`refs/remotes/origin/HEAD`, e.g. `origin/main`), observed by a subagent. A push-only worker (SKILL.md 6.3 step 7) keeps `branch` = the pushed branch instead of the app branch from get, and copies the original worker's `base_branch`; a replacement worker (`replaced_by`, SKILL.md 6.8) likewise inherits the old worker's `base_branch` and does not use get's `sourceBranch`; one started from an archived stub (or from the fallback when the stub expired or lacks a `commit` artifact) uses the observed remote default branch, never get's `sourceBranch` (the pushed branch). |
 | `intended_state` | What the supervisor wants. |
 | `observed_state`, `observed_at` | What the supervisor last observed, and when. |
 | `last_report` | Last processed report (see last_report). |
+| `replaced_by` | Optional worker id, or null. Marks this worker as replaced by another worker of the same task (SKILL.md 6.8): the id of a different, existing worker with the same `task_id`. Allowed only with `intended_state: archived`. Following `replaced_by` from worker to worker must end at a worker without `replaced_by` (no cycles). The replacement count of a `cwd` is the number of workers of the task with that `cwd` and a `replaced_by`. A worker with `replaced_by` is exempt from the delivery artifact and push-decision requirements (see Invariants) but not from `archive_consent`, and `derive_status` does not count it as verified-archived (see Derivation). |
 | `continues` | Optional integer >= 0: consecutive "continue" nudges sent for unchanged `in_progress` reports. Reset to 0 when the report's `summary` or `next_action` changes; at 3 the supervisor stops nudging and adds a user action. |
 
 Later push workers (SKILL.md 6.3 step 7):
@@ -154,7 +159,15 @@ Later push workers (SKILL.md 6.3 step 7):
 
 ### archived[]
 
-Stubs of finished tasks: `{id, title, artifacts, archived_at}`, plus `cancelled: true` and `reason` (copied from `cancel.reason`) for cancelled tasks; newest first, at most 20. The dashboard lists them with their artifact links and a cancelled badge. Task cards list their own artifacts.
+Stubs of finished tasks: `{id, title, request, artifacts, archived_at}`, plus `followups` (copied from the task, only when non-empty), and `cancelled: true` and `reason` (copied from `cancel.reason`) for cancelled tasks; newest first, at most 20. `request` is always present on stubs written by `commit`; a stub without `request` is an older stub. The dashboard lists them with their artifact links and a cancelled badge. Task cards list their own artifacts.
+
+Revival (SKILL.md 6.7 (c)):
+
+- A user request that continues an archived task revives it as a task with the **same id** as its stub. `commit` accepts a task id that is also in `archived` only when the stub has a `request`, is not `cancelled`, and its `request` equals the task's `request`. Otherwise it rejects: `task T-xxxx: id is an archived stub; revive only a non-cancelled stub with the same request`.
+- The stub stays in `archived` while the task is alive, so the same id shows both on a task card and in the archived list. The revived task starts with empty `artifacts` and `push_consent: null`; nothing is copied from the stub, so earlier deliveries are never re-reported or re-verified.
+- When the revived task is archived again, `commit` replaces the old stub with a new one. The new stub's `artifacts` are the old stub's `artifacts` followed by the task's `artifacts`, order preserved and without deduplication, so the last `branch` artifact of a directory is always the newest generation.
+- A stub that fell out of the 20-stub window while its task was revived has lost its artifacts: the new stub holds only the task's `artifacts`.
+- A cancelled stub never revives: a continuing request starts a new task. A revived task that is cancelled can never be revived again.
 
 ## Value ranges
 
@@ -187,7 +200,7 @@ Idempotency uses `message_ref`: if the latest message's id equals `last_report.m
 1. `needs_user`: the task's `user_actions` is not empty, or some worker is observed `archived` while its `intended_state` is not `archived` (archived outside the supervisor; cleared when the supervisor verifies the result and sets `intended_state: archived`).
 2. `running`: some worker has `observed_state` in `running` / `idle` / `needs_input`, or is `missing` while its `intended_state` is not `archived`. A `missing` worker with `intended_state: archived` counts as finished.
 3. `waiting`: only unstarted workers (`observed_state == none`) remain.
-4. `done`: every worker is finished: observed `archived`, or `missing` with `intended_state: archived`.
+4. `done`: every worker is finished: observed `archived`, or `missing` with `intended_state: archived`. A worker with `replaced_by` is not counted as verified-archived by the final fallback of this rule: a task whose only remaining workers are replaced external-archive workers and replacements that gave up as `missing` derives `needs_user`, not `done`.
 
 Before deriving, `commit` maintains one automatic user action, the only one the supervisor never edits. When a non-git `cwd` is occupied in current and free in the candidate, every task with a `pending` / `none` non-git worker on that `cwd` gets `Waiting task T-xxxx can start now: send any message to the supervisor to start it.` (added once, matched by exact description). `commit` removes it from a task as soon as that task has no startable worker (non-git, `pending` / `none`, `cwd` free in the candidate): the worker was started or removed, or the `cwd` is busy again because another waiting task on it started. The supervisor never adds or removes this user action itself.
 
@@ -245,10 +258,13 @@ Single-state checks (`validate`):
 - Ids are unique, every task has at least one entry in `worker_ids`, and `worker.task_id` and `task.worker_ids` agree in both directions.
 - At most one non-git worker occupies each directory tree: two occupied `cwd`s may be neither equal nor ancestor / descendant of each other (after realpath normalization). A worker occupies its `cwd` while `intended_state == running`, and also while `intended_state == archived` but `observed_state` is neither `archived` nor `missing` (an archive was requested but not yet observed).
 - `delivery == push_pr` requires a non-empty `push_consent.text` that is a substring of `push_consent.message` when `message` is present, else of the task's `request`. `message`, when present, is a non-empty string. This guarantees consistency between the fields only; keeping `request` and `message` verbatim is the supervisor's rule.
-- A task that is not cancelled and has a worker with `intended_state == archived` holds the artifacts its delivery requires:
+- A task that is not cancelled and has a worker with `intended_state == archived` and without `replaced_by` holds the artifacts its delivery requires:
   - `push_pr`: `branch` + `commit` + (`pr`, or a `branch` with `url`)
   - `commit`: `branch` + `commit`
   - `files`: at least one `file`
+- `replaced_by`, when present, names a different existing worker of the same task; its worker has `intended_state: archived`; following the chain ends at a worker without `replaced_by`.
+- `followups[]`, when present, is a list of objects with non-empty string `text` and `at`; a stub's `request` and `followups` have the same shapes.
+- A task id that is also in `archived` is a revival: the stub has a `request`, is not `cancelled`, and its `request` equals the task's `request`.
 - `last_report`, when not null, has `message_ref`.
 - A task with `cancel` has no worker with `intended_state: running`.
 - `continues`, when present, is an integer >= 0.
@@ -264,9 +280,11 @@ Checks against the current state (`next_state`):
 
 - The candidate's `rev` equals the current `rev`. The written state gets `rev + 1`.
 - No silent deletion: a task present in current but absent from the candidate is always rejected. Tasks leave `tasks` only through the move that `commit` itself performs for tasks derived as `done`, so never remove a task from the candidate. A worker with a non-null `session_id` may disappear only together with its task's move.
+- `request` of a task present in both current and candidate is unchanged. Existing `followups[].text` values are not constrained by `commit`; keeping them verbatim is the supervisor's rule.
 - Transition to archived: for each worker whose `intended_state` is not `archived` in current and is `archived` in the candidate:
-  - if its delivery is `commit` and the task is not cancelled, the candidate task must contain the push-decision user action
-  - `supervisor.archive_consent` must not be null, unless the worker is already observed `archived` or `missing` (no archive call follows)
+  - if its delivery is `commit`, the task is not cancelled, and the worker has no `replaced_by`, the candidate task must contain the push-decision user action
+  - `supervisor.archive_consent` must not be null, unless the worker is already observed `archived` or `missing` (no archive call follows); a worker with `replaced_by` is not exempt from this
+- The automatic waiting-task user action is never offered for a worker that is the `replaced_by` target of another worker, so a replacement waits for the supervisor's next user turn instead of prompting the user.
 - Removing the push-decision user action from a candidate whose workers are already `archived` (or whose archive was refused and the worker remains) is accepted: the transition checks apply only to workers that newly become archived.
 - Push consent from a later message: for each candidate task whose `push_consent.message` is new or differs from the current task's, the task must exist in current, current must hold a push-decision user action for it (naming the branch of one of its git workers; a user action with `follow_up` is never a push decision), and the candidate must no longer hold that user action. Otherwise: `task T-xxxx: push_consent.message may be set only while resolving a pending push decision`.
 
@@ -276,7 +294,7 @@ Record artifacts from values the supervisor observed, not from the report alone.
 
 | Report field | task.artifacts entry |
 | :--- | :--- |
-| `branch` | `{kind: branch, ref: "<repo>#<branch from state>", url?: branch URL once pushed}` |
+| `branch` | `{kind: branch, ref: "<cwd>#<branch from state>", url?: branch URL once pushed}`, where `<cwd>` is the worker's repo root as an absolute path (the form of the Example). SKILL.md 6.7 finds the source branch of a follow-up by this `<cwd>#` prefix. |
 | `commit` | `{kind: commit, ref: <observed HEAD sha>}`. If it differs from the report, use the observed value and note it in the summary. |
 | `pr` | `{kind: pr, url}`, only when the PR head sha equals the observed HEAD. |
 | `ci` | `{kind: ci, url}` |

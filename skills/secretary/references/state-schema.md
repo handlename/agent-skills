@@ -206,7 +206,7 @@ The script decides `relay_mode` for supervisor items on every merge, so a change
 | :--- | :--- | :--- | :--- |
 | 0 | `follow_up` is set (the wording is not looked at) | `paste` | Follow-ups created from a `## Follow-ups` rule (e.g. "Review repo-a#42"); the user reports completion by pasting |
 | 1 | `in the app`, `unpin`, `please archive`, `open repo` | `app` | App-operation user actions: open repo, close or unpin, please archive, answer the pending approval, tell a worker in the app (send unavailable) |
-| 2 | `waiting task`, `push`, `pull request`, `new worker`, `replace`, `restart`, `start`, `cancel`, `archive` | `paste` | The automatic waiting-task action, push decisions, missing-worker questions |
+| 2 | `waiting task`, `push`, `pull request`, `new worker`, `replace`, `restart`, `start`, `cancel`, `archive` | `paste` | The automatic waiting-task action, push decisions, the replacement-limit question (replacement workers went missing or unverified 3 times: start a new worker, record the result, or cancel) |
 | 3 | anything else (report blockers, unparsed summaries, `is not progressing`) | `paste` | Blocker answers; a relayed answer does not advance the supervisor's state |
 
 Rows 2 and 3 give the same mode; they stay separate to record their origin. A misclassification only changes which guidance the dashboard shows. Update this table when the supervisor's user-action wording changes.

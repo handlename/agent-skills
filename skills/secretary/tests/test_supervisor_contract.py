@@ -30,6 +30,7 @@ QUOTED_UAS = (
     ("Answer the pending approval", "app"),
     ("Tell w-xxxx in the app", "app"),
     ("can start now", "paste"),
+    ("went missing or unverified", "paste"),
 )
 
 

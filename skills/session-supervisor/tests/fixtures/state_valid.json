@@ -13,6 +13,7 @@
       "id": "T-0003",
       "title": "Add retry to uploader",
       "request": "repo-a と repo-b の uploader にリトライを追加して。push して PR を作ってよい",
+      "followups": [{ "text": "repo-a のリトライ回数は 3 回にして", "at": "2026-10-17T09:30:00+09:00" }],
       "push_consent": { "text": "push して PR を作ってよい", "at": "2026-10-17T09:00:00+09:00" },
       "status": "running",
       "next_action": "w-0004 / w-0005 の完了待ち",

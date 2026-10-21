@@ -2,7 +2,8 @@
 """State tool for the session-supervisor skill.
 
 Functional core: validate, next_state, render, digest, parse_report, cwd_busy, serialize,
-guard_decision (bash_violations, path_violation), parse_follow_ups, new_pr_urls, follow_up_actions.
+guard_decision (bash_violations, path_violation), parse_follow_ups, new_pr_urls, follow_up_actions,
+parse_locations, default_locations, add_missing_locations, clone_url_parts.
 Imperative shell: the argparse subcommands at the bottom of this file.
 """
 
@@ -16,6 +17,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 from datetime import datetime
@@ -50,6 +52,19 @@ FOLLOW_UP_DONE = ("pr_closed", "manual")
 FOLLOW_UP_PLACEHOLDERS = ("{label}", "{url}")
 FOLLOW_UP_TEXT_MAX = 200
 PR_URL_RE = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)/?$", re.I)
+
+LOCATIONS_HEADING = "## Locations"
+LOCATION_KEYS = ("clone_root", "work_root")
+LOCATIONS_NOTE = ("`python3 .supervisor/state_tool.py prepare-dir` is the only command that writes outside this directory: "
+                  "it clones repositories into `clone_root/<host>/<owner>/<repo>` and creates work directories under `work_root`. "
+                  "A missing key uses its default.")
+CLONE_URL_RES = (
+    re.compile(r"^https://([^/]+)/([^/]+)/([^/]+?)(?:\.git)?/?$"),
+    re.compile(r"^git@([^:/]+):([^/]+)/([^/]+?)(?:\.git)?$"),
+)
+CLONE_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+CLONE_TIMEOUT = 300
+WORK_NAME_RE = re.compile(r"^T-\d{4,}-[a-z0-9-]{1,40}$")
 
 GUARD_MATCHER = "Edit|MultiEdit|Write|NotebookEdit|Bash"
 GUARD_INPUT_KEYS = {"Edit": "file_path", "MultiEdit": "file_path", "Write": "file_path", "NotebookEdit": "notebook_path", "Bash": "command"}
@@ -380,8 +395,9 @@ def derive_status(task, workers_by_id):
         return "running"
     if any(o == "none" for o in observed):
         return "waiting"
-    # Workers given up as missing deliver nothing; without one verified archive the task needs a replacement or a cancel.
-    if not any(w.get("observed_state") == "archived" for w in workers):
+    # Workers given up as missing deliver nothing, and a replaced worker was never verified;
+    # without one verified archive the task needs a replacement or a cancel.
+    if not any(w.get("observed_state") == "archived" and not w.get("replaced_by") for w in workers):
         return "needs_user"
     return "done"
 
@@ -465,6 +481,13 @@ def _shape_errors(state):
             items = owner.get(key, [])
             if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
                 errors.append(f"{prefix}: {key} must be a list of objects")
+        followups = owner.get("followups", [])
+        if not isinstance(followups, list) or not all(
+                isinstance(f, dict) and all(isinstance(f.get(k), str) and f.get(k) for k in ("text", "at")) for f in followups):
+            errors.append(f"{prefix}: followups must be a list of {{text, at}} with non-empty strings")
+    for s in state["archived"]:
+        if s.get("request") is not None and not isinstance(s["request"], str):
+            errors.append(f"archived {s['id']}: request must be a string")
     for t in state["tasks"]:
         if not isinstance(t.get("worker_ids", []), list) or not all(isinstance(i, str) for i in t.get("worker_ids", [])):
             errors.append(f"task {t['id']}: worker_ids must be a list of strings")
@@ -480,6 +503,8 @@ def _shape_errors(state):
         for key in ("task_id", "cwd"):
             if not isinstance(w.get(key), str):
                 errors.append(f"worker {w['id']}: {key} must be a string")
+        if w.get("replaced_by") is not None and not isinstance(w["replaced_by"], str):
+            errors.append(f"worker {w['id']}: replaced_by must be a string")
         continues = w.get("continues", 0)
         if not isinstance(continues, int) or isinstance(continues, bool) or continues < 0:
             errors.append(f"worker {w['id']}: continues must be a non-negative integer")
@@ -555,6 +580,7 @@ def validate(state):
             errors.append(f"duplicate {label} ids: {dupes}")
     tasks_by_id = {t.get("id"): t for t in tasks}
     workers_by_id = {w.get("id"): w for w in workers}
+    stubs_by_id = {s["id"]: s for s in state["archived"]}
 
     for task in tasks:
         tid = task.get("id")
@@ -578,6 +604,10 @@ def validate(state):
         cwds = [w["cwd"] for w in workers if w.get("task_id") == tid and w.get("cwd")]
         for i, artifact in enumerate(task.get("artifacts", [])):
             errors += _validate_artifact(f"{prefix} artifact[{i}]", artifact, cwds)
+        stub = stubs_by_id.get(tid)
+        if stub is not None and not (isinstance(stub.get("request"), str) and not stub.get("cancelled")
+                                     and stub["request"] == task.get("request")):
+            errors.append(f"{prefix}: id is an archived stub; revive only a non-cancelled stub with the same request")
 
     occupants = []
     for w in workers:
@@ -606,8 +636,8 @@ def validate(state):
             source = consent["message"] if "message" in consent else task.get("request")
             if not text or text not in (source or ""):
                 errors.append(f"{prefix}: push_pr requires push_consent.text quoted from push_consent.message when present, else from the task request")
-        # A vanished session produces no deliverables, so giving it up requires none.
-        exempt = task is None or task.get("cancel") or w.get("observed_state") == "missing"
+        # A vanished session produces no deliverables, so giving it up requires none; nor does handing a worker to its replacement.
+        exempt = task is None or task.get("cancel") or w.get("observed_state") == "missing" or w.get("replaced_by")
         if w.get("intended_state") == "archived" and not exempt:
             if not _delivery_artifacts_ok(delivery, task.get("artifacts", [])):
                 errors.append(f"{prefix}: archive requested but task lacks {delivery} artifacts")
@@ -619,6 +649,23 @@ def validate(state):
             if _cwds_overlap(cwd_a, cwd_b):
                 where = cwd_a if cwd_a == cwd_b else f"{cwd_a} / {cwd_b} (nested)"
                 errors.append(f"non-git cwd {where} is held by more than one worker: {[wid_a, wid_b]}")
+    for w in workers:
+        target = w.get("replaced_by")
+        if target is None:
+            continue
+        prefix = f"worker {w.get('id')}"
+        successor = workers_by_id.get(target)
+        if successor is None or target == w.get("id") or successor.get("task_id") != w.get("task_id"):
+            errors.append(f"{prefix}: replaced_by {target} must name another worker of the same task")
+        if w.get("intended_state") != "archived":
+            errors.append(f"{prefix}: replaced_by requires intended_state archived")
+        seen, cur = {w.get("id")}, successor
+        while cur is not None and cur.get("replaced_by") is not None:
+            if cur.get("id") in seen:
+                errors.append(f"{prefix}: replaced_by chain loops")
+                break
+            seen.add(cur.get("id"))
+            cur = workers_by_id.get(cur["replaced_by"])
 
     for stub in state["archived"]:
         for i, artifact in enumerate(stub.get("artifacts", [])):
@@ -660,9 +707,15 @@ def _transition_errors(current, candidate):
         if w["observed_state"] not in ("archived", "missing") and not candidate["supervisor"].get("archive_consent"):
             errors.append(f"worker {w['id']}: archive requested without supervisor.archive_consent")
         task = tasks.get(w["task_id"], {})
-        if w["delivery"] == "commit" and not task.get("cancel") and w["observed_state"] != "missing" and not any(_is_push_decision(ua, w) for ua in task.get("user_actions", [])):
+        if w["delivery"] == "commit" and not task.get("cancel") and w["observed_state"] != "missing" and not w.get("replaced_by") and not any(_is_push_decision(ua, w) for ua in task.get("user_actions", [])):
             errors.append(f"worker {w['id']}: commit delivery archive requires a push-decision user_action")
     return errors
+
+
+def _request_errors(current, candidate):
+    cur_tasks = {t["id"]: t for t in current["tasks"]}
+    return [f"task {t['id']}: request is verbatim and must not change"
+            for t in candidate["tasks"] if t["id"] in cur_tasks and cur_tasks[t["id"]].get("request") != t.get("request")]
 
 
 def _consent_message_errors(current, candidate):
@@ -689,10 +742,12 @@ def waiting_start_description(task_id):
 def _startable_workers(state, task, workers_by_id):
     if task.get("cancel"):
         return []
+    # A replacement is started on the next user message anyway, so it needs no user action.
+    replacements = {w.get("replaced_by") for w in state["workers"]}
     return [
         w for w in (workers_by_id.get(wid) for wid in task["worker_ids"])
         if w and w["kind"] == "non-git" and w["intended_state"] == "pending" and w["observed_state"] == "none"
-        and not cwd_busy(state, w["cwd"])
+        and w["id"] not in replacements and not cwd_busy(state, w["cwd"])
     ]
 
 
@@ -725,7 +780,8 @@ def next_state(current, candidate, now):
     errors = validate(state)
     if errors:
         raise StateError(errors)
-    errors = _deletion_errors(current, state) + _transition_errors(current, state) + _consent_message_errors(current, state)
+    errors = (_deletion_errors(current, state) + _transition_errors(current, state) + _request_errors(current, state)
+              + _consent_message_errors(current, state))
     if errors:
         raise StateError(errors)
 
@@ -736,13 +792,18 @@ def next_state(current, candidate, now):
 
     done = [t for t in state["tasks"] if t["status"] == "done"]
     done_ids = {t["id"] for t in done}
+    old_stubs = {s["id"]: s for s in state["archived"]}
     stubs = []
     for t in done:
-        stub = {"id": t["id"], "title": t.get("title"), "artifacts": t.get("artifacts", []), "archived_at": now}
+        # A revived task replaces its old stub; keeping the order makes the last group the newest generation.
+        artifacts = old_stubs.get(t["id"], {}).get("artifacts", []) + t.get("artifacts", [])
+        stub = {"id": t["id"], "title": t.get("title"), "request": t.get("request"), "artifacts": artifacts, "archived_at": now}
+        if t.get("followups"):
+            stub["followups"] = t["followups"]
         if t.get("cancel"):
             stub.update(cancelled=True, reason=t["cancel"]["reason"])
         stubs.append(stub)
-    state["archived"] = (list(reversed(stubs)) + state["archived"])[:ARCHIVED_KEEP]
+    state["archived"] = (list(reversed(stubs)) + [s for s in state["archived"] if s["id"] not in done_ids])[:ARCHIVED_KEEP]
     state["tasks"] = [t for t in state["tasks"] if t["id"] not in done_ids]
     state["workers"] = [w for w in state["workers"] if w["task_id"] not in done_ids]
 
@@ -1137,6 +1198,74 @@ def parse_follow_ups(text):
     return rules, []
 
 
+def _section_heads(lines, heading):
+    return [i for i, line in enumerate(lines) if line.rstrip() == heading]
+
+
+def _section_end(lines, head):
+    return next((i for i in range(head + 1, len(lines)) if re.match(r"^#{1,2} ", lines[i].rstrip())), len(lines))
+
+
+def parse_locations(text):
+    """Parse the `## Locations` section of CLAUDE.md. Returns (values, errors); a missing key is absent from values."""
+    lines = _strip_ignored(text.splitlines())
+    heads = _section_heads(lines, LOCATIONS_HEADING)
+    if not heads:
+        return {}, []
+    if len(heads) > 1:
+        return {}, [f"CLAUDE.md:{i + 1}: duplicate '{LOCATIONS_HEADING}' heading" for i in heads[1:]]
+    values, errors = {}, []
+    for i in range(heads[0] + 1, _section_end(lines, heads[0])):
+        m = re.match(r"^- ([A-Za-z_]+):(.*)$", lines[i].rstrip())
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2).strip()
+        if key not in LOCATION_KEYS:
+            errors.append(f"CLAUDE.md:{i + 1}: unknown key {key!r} (use {list(LOCATION_KEYS)})")
+        elif key in values:
+            errors.append(f"CLAUDE.md:{i + 1}: duplicate key {key!r}")
+        elif not (os.path.isabs(value) or value == "~" or value.startswith("~/")):
+            errors.append(f"CLAUDE.md:{i + 1}: {key} must be an absolute path or start with ~, got {value!r}")
+        else:
+            values[key] = value
+    return ({}, errors) if errors else (values, [])
+
+
+def default_locations(supervisor_dir):
+    sup = os.path.normpath(supervisor_dir)
+    return {"clone_root": "~/src", "work_root": os.path.join(os.path.dirname(sup), os.path.basename(sup) + "-work")}
+
+
+def add_missing_locations(text, supervisor_dir):
+    """Return CLAUDE.md text with each missing `## Locations` key added at its default. Existing values are kept."""
+    values, errors = parse_locations(text)
+    if errors:
+        raise StateError(errors)
+    defaults = default_locations(supervisor_dir)
+    missing = [f"- {key}: {defaults[key]}\n" for key in LOCATION_KEYS if key not in values]
+    if not missing:
+        return text
+    heads = _section_heads(_strip_ignored(text.splitlines()), LOCATIONS_HEADING)
+    if not heads:
+        section = f"{LOCATIONS_HEADING}\n\n{LOCATIONS_NOTE}\n\n" + "".join(missing)
+        return text.rstrip("\n") + "\n\n" + section if text.strip() else section
+    lines = text.splitlines(keepends=True)
+    end = _section_end(_strip_ignored(text.splitlines()), heads[0])
+    last = max(i for i in range(heads[0], end) if lines[i].strip())
+    if not lines[last].endswith("\n"):
+        lines[last] += "\n"
+    return "".join(lines[:last + 1] + missing + lines[last + 1:])
+
+
+def clone_url_parts(url):
+    """(host, owner, repo) of an https or scp-style ssh clone url whose parts are plain names, else None."""
+    for pattern in CLONE_URL_RES:
+        m = pattern.match(url)
+        if m and all(CLONE_PART_RE.match(part) for part in m.groups()):
+            return m.groups()
+    return None
+
+
 def _pr_urls(task):
     urls = []
     for a in task.get("artifacts", []):
@@ -1302,7 +1431,7 @@ This directory belongs to the session-supervisor skill. It is not a project.
 - `supervisor.archive_consent` in `state.json` is the user's explicit consent that archiving requires. It covers only worker sessions whose `startedBy` is in `supervisor.session_ids`.
 - Never delete sessions.
 - The supervisor only operates sessions, changes state through commit, publishes the dashboard, and talks to the user. Workers edit, commit, push, and open PRs; observer subagents run read-only checks and investigations, write results under .supervisor/observations/, and return the path.
-- A PreToolUse hook (state_tool.py guard) blocks edits outside this directory and mutating git / jj / gh commands. To disable it, remove its entry from .claude/settings.json by hand; the supervisor asks before restoring a missing entry.
+- A PreToolUse hook (state_tool.py guard) blocks edits outside this directory and mutating git / jj / gh commands. The one allowed exception is `state_tool.py prepare-dir`, which writes only under the `## Locations` roots. To disable it, remove its entry from .claude/settings.json by hand; the supervisor asks before restoring a missing entry.
 - `## Follow-ups` (optional) turns each newly verified PR into a user action such as "Review org/repo#42". Format: references/follow-ups-format.md in the session-supervisor skill. Check it with `python3 .supervisor/state_tool.py validate-follow-ups --claude-md CLAUDE.md`.
 
 <!-- Example: remove the comment markers to enable it.
@@ -1320,6 +1449,9 @@ def cmd_setup(args):
     target = Path(os.path.abspath(os.path.expanduser(args.dir)))
     if _inside_git(target):
         raise StateError(f"{target} is inside a git repository; choose a directory outside any repository")
+    claude_md = target / "CLAUDE.md"
+    old_md = claude_md.read_text(encoding="utf-8") if claude_md.exists() else None
+    new_md = add_missing_locations(CLAUDE_MD if old_md is None else old_md, str(target))
     settings_path = target / ".claude" / "settings.json"
     settings = {}
     if settings_path.exists():
@@ -1376,12 +1508,14 @@ def cmd_setup(args):
         _write_atomic(str(state_path), serialize(empty_state(str(target))))
         report.append(("created", state_path))
 
-    claude_md = target / "CLAUDE.md"
-    if claude_md.exists():
-        report.append(("exists", claude_md))
-    else:
-        claude_md.write_text(CLAUDE_MD, encoding="utf-8")
+    if old_md is None:
+        claude_md.write_text(new_md, encoding="utf-8")
         report.append(("created", claude_md))
+    elif new_md != old_md:
+        _write_atomic(str(claude_md), new_md)
+        report.append(("updated", claude_md))
+    else:
+        report.append(("exists", claude_md))
 
     for status, path in report:
         print(f"{status}: {path}")
@@ -1462,6 +1596,93 @@ def cmd_follow_ups(args):
     return 0
 
 
+def _git_output(argv):
+    proc = subprocess.run(argv, capture_output=True, text=True)
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def _locations_for(claude_md):
+    """Resolved {key: (realpath, is_default)} and the supervisor directory, after the checks every prepare-dir mode shares."""
+    sup = os.path.dirname(os.path.abspath(claude_md))
+    text = Path(claude_md).read_text(encoding="utf-8") if os.path.exists(claude_md) else ""
+    values, errors = parse_locations(text)
+    if errors:
+        raise StateError(errors)
+    defaults = default_locations(sup)
+    roots = {key: (_real(values.get(key, defaults[key])), key not in values) for key in LOCATION_KEYS}
+    for key, (root, _) in roots.items():
+        if _under(root, sup):
+            errors.append(f"{key} {root} is inside the supervisor directory; workers would inherit its CLAUDE.md")
+    if _inside_git(roots["work_root"][0]):
+        errors.append(f"work_root {roots['work_root'][0]} is inside a git repository")
+    if _cwds_overlap(roots["clone_root"][0], roots["work_root"][0]):
+        errors.append(f"clone_root {roots['clone_root'][0]} and work_root {roots['work_root'][0]} are nested")
+    if errors:
+        raise StateError(errors)
+    return roots, sup
+
+
+def _check_dest(dest, root, sup):
+    # Realpath on both sides, so a symlinked destination cannot lead outside the root.
+    if not _under(dest, root) or _under(dest, sup):
+        raise StateError(f"{dest} resolves outside {root}")
+
+
+def _clone(url, root, sup):
+    parts = clone_url_parts(url)
+    if parts is None:
+        raise StateError(f"--clone {url!r} must be https://<host>/<owner>/<repo> or git@<host>:<owner>/<repo> with plain names")
+    dest = os.path.join(root, *parts)
+    _check_dest(dest, root, sup)
+    if os.path.exists(os.path.join(dest, ".git")):
+        origin = _git_output(["git", "-C", dest, "remote", "get-url", "origin"])
+        found = clone_url_parts(origin) if origin else None
+        if found is None or [p.lower() for p in found] != [p.lower() for p in parts]:
+            raise StateError(f"{dest} already exists with origin {origin!r}, which is not {url}")
+        if _git_output(["git", "-C", dest, "rev-parse", "--verify", "HEAD"]) is None:
+            raise StateError(f"{dest} has no HEAD (an interrupted clone?); ask the user whether to delete it, then rerun")
+        print(f"exists: {dest}")
+        return 0
+    existed = os.path.exists(dest)
+    if existed and (not os.path.isdir(dest) or os.listdir(dest)):
+        raise StateError(f"{dest} exists and is neither an empty directory nor a clone of {url}")
+    # Never wait for a password or a host-key prompt; the user's own ssh command is kept.
+    ssh = os.environ.get("GIT_SSH_COMMAND") or _git_output(["git", "config", "--get", "core.sshCommand"]) or "ssh"
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_SSH_COMMAND=f"{ssh} -o BatchMode=yes")
+    try:
+        proc = subprocess.run(["git", "clone", "--", url, dest], env=env, timeout=CLONE_TIMEOUT, capture_output=True, text=True)
+        error = None if proc.returncode == 0 else f"git clone exited with {proc.returncode}: {proc.stderr.strip()}"
+    except subprocess.TimeoutExpired:
+        error = f"git clone timed out after {CLONE_TIMEOUT} seconds"
+    if error:
+        if not existed:
+            shutil.rmtree(dest, ignore_errors=True)
+        raise StateError(error)
+    print(f"cloned: {dest}")
+    return 0
+
+
+def cmd_prepare_dir(args):
+    # The only write outside the supervisor directory, so it keeps itself to the ## Locations roots.
+    roots, sup = _locations_for(args.claude_md)
+    if args.show:
+        for key in LOCATION_KEYS:
+            path, is_default = roots[key]
+            print(f"{key}: {path}{' (default)' if is_default else ''}")
+        return 0
+    if args.clone is not None:
+        return _clone(args.clone, roots["clone_root"][0], sup)
+    if not WORK_NAME_RE.match(args.work):
+        raise StateError(f"--work {args.work!r} must match T-<number>-<slug> (lowercase letters, digits and '-', up to 40 characters)")
+    root = roots["work_root"][0]
+    dest = os.path.join(root, args.work)
+    _check_dest(dest, root, sup)
+    existed = os.path.isdir(dest)
+    os.makedirs(dest, exist_ok=True)
+    print(f"{'exists' if existed else 'created'}: {dest}")
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="state_tool.py", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1508,6 +1729,14 @@ def build_parser():
     p.add_argument("--task", help="manual mode: add follow-ups for --url of this task without comparing (re-adds removed ones)")
     p.add_argument("--url")
     p.set_defaults(func=cmd_follow_ups)
+
+    p = sub.add_parser("prepare-dir", help="show the ## Locations roots, or clone a repository / create a work directory under them")
+    p.add_argument("--claude-md", required=True)
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--show", action="store_true", help="print clone_root and work_root as absolute paths (read-only)")
+    mode.add_argument("--work", metavar="NAME", help="create work_root/NAME (NAME is T-NNNN-<slug>)")
+    mode.add_argument("--clone", metavar="URL", help="clone URL into clone_root/<host>/<owner>/<repo>")
+    p.set_defaults(func=cmd_prepare_dir)
 
     p = sub.add_parser("check-cwd", help="print busy or free for a non-git cwd")
     p.add_argument("--state", required=True)

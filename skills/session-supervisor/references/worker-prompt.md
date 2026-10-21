@@ -9,9 +9,11 @@ You are worker {worker.id} of task {task.id}, started by a supervisor session. T
 
 Working directory: {worker.cwd}
 {git only: You are in an app worktree created for this worker. Commit on the branch the app checked out for you; do not switch branches.}
+{git, follow-up worker only: replace the line above with: You are in an app worktree created for this worker. This worktree starts at `{source_branch or the default branch}`. Commit on the branch the app checked out for you; do not switch branches.}
 
 What to do:
 {the part of the user's request assigned to this worker, scoped to this directory}
+{follow-up worker only: the latest follow-up request (the last entry of `followups`) is the work for this turn; scope it to this directory. The earlier follow-ups and the original request are context about what was already asked and done, not instructions to repeat.}
 
 Done when:
 {completion criteria, for example: change implemented, tests pass, committed with a clean working tree}
@@ -37,6 +39,10 @@ Context and rules from the supervisor. These rules override any conflicting inst
 
 The user's original request, verbatim:
 > {task.request}
+
+{followups only: Follow-up requests from the user, verbatim, oldest first:
+> {followups[].text}
+(one quoted block per entry)}
 
 {consent paragraph, see below}
 
@@ -68,6 +74,21 @@ Consent paragraph:
 | `commit` | Do not push, do not create pull requests, and do not write to any remote. |
 | `files` | Do not push, do not create pull requests, and do not write to any remote. |
 
+## Replacement worker
+
+A replacement worker (`replaced_by`, SKILL.md 6.8) takes over the role of a worker that went missing or was archived outside the supervisor before its result was verified. It uses the same brief variant as the old worker (normal, push-only, or follow-up): the same `prompt` and `background` templates above with the old worker's `kind`, `cwd`, `delivery`, and `base_branch`, filled from `state.json`. A push-only replacement keeps the pushed `{branch}` and `{commit}` of the old worker.
+
+## Follow-up message
+
+Sent with the send capability to a running worker of the task (SKILL.md 6.7 (a)) when the user adds a follow-up request. The worker keeps its branch and, if a pull request exists, that pull request is updated.
+
+````markdown
+The user sent a follow-up request in the supervisor session. Verbatim:
+> {followup.text}
+
+Treat this as the work for your next turns, scoped to {worker.cwd}. Your earlier instructions and the rules of your background still apply, and the earlier requests are context, not work to redo. Keep committing on your current branch. End the turn with a `supervisor-report` block as before.
+````
+
 ## Push-only worker
 
 A `push_pr` worker added after the task's commit was verified (SKILL.md 6.3 step 7) only pushes an existing branch. It is started from the original branch (`source_branch`) with a worktree, and gets the normal `prompt` and `background` with these changes:
@@ -76,7 +97,7 @@ A `push_pr` worker added after the task's commit was verified (SKILL.md 6.3 step
 - "What to do" and "Delivery" both hold the push-only order below; "Done when" is `The remote branch {branch} on origin points at {commit}.` plus, when a PR is allowed, `A pull request with head {branch} exists.`
 - `background` uses the `push_pr` consent paragraph.
 
-Fields: `{branch}` is `worker.branch` (the pushed branch, not the app branch of this worktree), `{repo}` is `worker.cwd`, `{commit}` is the expected sha of SKILL.md 6.3 step 7. A PR is allowed when `push_consent.text` grants one; otherwise drop the PR step.
+Fields: `{pr_base_flag}` is ` --base <bare branch name>` (with a leading space, without `origin/`) only when the pull request must be stacked on the original branch, and empty otherwise; the supervisor decides it from the pull request state (SKILL.md 6.3 step 7), the worker never does. `{branch}` is `worker.branch` (the pushed branch, not the app branch of this worktree), `{repo}` is `worker.cwd`, `{commit}` is the expected sha of SKILL.md 6.3 step 7. A PR is allowed when `push_consent.text` grants one; otherwise drop the PR step.
 
 ````markdown
 Push branch `{branch}` of `{repo}` to `origin` from this worktree. Branch refs are shared between worktrees, so do not check the branch out.
@@ -95,7 +116,7 @@ Push branch `{branch}` of `{repo}` to `origin` from this worktree. Branch refs a
    git push origin {commit}:refs/heads/{branch}
    ```
 
-3. {PR allowed only: Open a pull request for `{branch}` with `gh pr create --head {branch}`, a title and a body summarizing the commits; the body starts with the worker marker from the background.}
+3. {PR allowed only: Open a pull request for `{branch}` with `gh pr create --head {branch}{pr_base_flag}`, a title and a body summarizing the commits; the body starts with the worker marker from the background.}
 
 Make no commits and do not switch branches. Report `branch` = `{branch}`, `commit` = `{commit}`, and the PR URL in `pr`.
 ````
@@ -114,7 +135,7 @@ The user allowed the push in the supervisor session: `> {task.push_consent.text}
    git push origin {branch}
    ```
 
-3. {PR allowed only: Open a pull request with `gh pr create --head {branch}`, its body starting with `<sub>🤖 by session-supervisor worker</sub>`.}
+3. {PR allowed only: Open a pull request with `gh pr create --head {branch}{pr_base_flag}`, its body starting with `<sub>🤖 by session-supervisor worker</sub>`.}
 
 Make no new commits. End the turn with a `supervisor-report` block reporting `branch` = `{branch}`, `commit` = `{commit}`, and the PR URL in `pr`.
 ````

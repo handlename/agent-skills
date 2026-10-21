@@ -28,7 +28,7 @@ Write one JSON object with the fields of this purpose to the result file with th
 
 ## Result files
 
-- Path: `<dir>/.supervisor/observations/<purpose>-<id>.json`, where `<id>` is the worker id (the task id for `kind`, the fixed value `follow-ups` for `pr-state`, which belongs to no worker or task). Each run overwrites the file.
+- Path: `<dir>/.supervisor/observations/<purpose>-<id>.json`, where `<id>` is the worker id (the task id for `kind` and `locate`). For `pr-state` it depends on the mode: the fixed value `follow-ups` in the follow-ups mode (`target.urls`, which belongs to no worker or task), and the worker id in the branch mode (`target.branch`: the worker being started, or the worker that pushes). Each run overwrites the file.
 - User questions: `<dir>/.supervisor/observations/question-<UTC timestamp>.md`, e.g. `question-20261020T091500Z.md`.
 - Every JSON result has `purpose`, `target` (the target fields as given), `observed_at` (ISO 8601 with offset), and `errors` (a list of strings, empty when every command ran), plus the facts of its purpose.
 
@@ -39,23 +39,45 @@ Write one JSON object with the fields of this purpose to the result file with th
 Used by SKILL.md 6.1. Target: `dirs`, the absolute directories of the task. For each directory:
 
 ```bash
+ls -d "<cwd>"
 git -C "<cwd>" rev-parse --show-toplevel
 ls -d "<cwd>/.jj"
 ```
 
-Also check each ancestor of `<cwd>` for a `.jj` directory with `ls -d`; do not run jj.
+Also check each ancestor of `<cwd>` for a `.jj` directory with `ls -d`; do not run jj. When `ls -d "<cwd>"` fails, skip the other commands for that directory.
 
 ```json
-{"purpose": "kind", "targets": [{"cwd": "/abs/dir", "kind": "git", "repo_root": "/abs/repo", "has_jj": false}]}
+{"purpose": "kind", "targets": [{"cwd": "/abs/dir", "exists": true, "kind": "git", "repo_root": "/abs/repo", "has_jj": false}]}
 ```
 
+- `exists`: `ls -d "<cwd>"` succeeded. When `false`, `kind` and `repo_root` are `null` and `has_jj` is `false`.
 - `kind`: `git` when `rev-parse` succeeds; otherwise `jj-only` when `has_jj`; otherwise `non-git`.
 - `repo_root`: the `rev-parse` output, or `null`.
 - `has_jj`: `<cwd>` or one of its ancestors contains `.jj`.
 
+### locate
+
+Used by SKILL.md 6.1 when the request names a repository only by name. Target: `clone_root` (the absolute path printed by `prepare-dir --show`), `names` (the repository names as a one-line JSON array), and `owner` (when known; otherwise empty). For each name:
+
+```bash
+ls -d "<clone_root>"/*/*/"<name>"
+gh repo view "<owner>/<name>" --json url,sshUrl
+gh config get git_protocol
+```
+
+Run `gh repo view` with `<owner>/<name>` when `owner` is given, otherwise with `<name>` alone (gh then uses the authenticated user). Run `gh config get git_protocol` once.
+
+```json
+{"purpose": "locate", "git_protocol": "https", "names": [{"name": "repo-a", "local": ["/Users/me/src/github.com/org/repo-a"], "remote": {"url": "https://github.com/org/repo-a", "sshUrl": "git@github.com:org/repo-a.git"}}]}
+```
+
+- `local`: every directory matched by `ls -d`, in its output order; empty when none matched.
+- `remote`: `{url, sshUrl}` from `gh repo view`, or `null` when it failed; the error goes into `errors`.
+- `git_protocol`: the output of `gh config get git_protocol`, or `null` when it failed.
+
 ### base
 
-Used by SKILL.md 6.2 and 6.3 step 7. Target: `repo`, and `branch` when the supervisor needs that branch's tip.
+Used by SKILL.md 6.2, 6.3 step 7, 6.7, and 6.8. Target: `repo`, and `branch` when the supervisor needs that branch's tip.
 
 ```bash
 git -C "<repo>" symbolic-ref --short refs/remotes/origin/HEAD
@@ -132,7 +154,9 @@ Run `gh pr view` when `pr` is given; otherwise run `gh pr list`, with `<owner/na
 
 ### pr-state
 
-Used by SKILL.md 6.4, only at the start of a turn that begins with the user's message, while a follow-up with `done: pr_closed` exists. Target: `urls`, the PR URLs of every such follow-up as a one-line JSON array, e.g. `urls: ["https://github.com/org/repo-a/pull/42", "https://github.com/org/repo-b/pull/7"]`. Result file: `<dir>/.supervisor/observations/pr-state-follow-ups.json`.
+Two modes, told apart by the target: the follow-ups mode (`urls`) and the branch mode (`repo` and `branch`).
+
+Follow-ups mode: used by SKILL.md 6.4, only at the start of a turn that begins with the user's message, while a follow-up with `done: pr_closed` exists. Target: `urls`, the PR URLs of every such follow-up as a one-line JSON array, e.g. `urls: ["https://github.com/org/repo-a/pull/42", "https://github.com/org/repo-b/pull/7"]`. Result file: `<dir>/.supervisor/observations/pr-state-follow-ups.json`.
 
 Run this once first, then one `gh pr view` per url:
 
@@ -147,6 +171,20 @@ gh pr view "<url>" --json url,state
 
 - `auth_ok`: `true` when `gh auth status` succeeded.
 - `prs`: one entry per target url, in target order. `state` is `OPEN`, `MERGED`, or `CLOSED` from `gh pr view`, or `null` when that command failed; the error goes into `errors`.
+
+Branch mode: used by SKILL.md 6.7 (the original branch of a follow-up, when its worker starts) and 6.3 step 7 (the `base_branch` of the worker that pushes). Target: `repo` (the `cwd`, an absolute repo root) and `branch` (a branch name without `origin/`). Result file: `<dir>/.supervisor/observations/pr-state-<worker id>.json`. Run one command in `<repo>` (read-only):
+
+```bash
+cd "<repo>" && gh pr view "<branch>" --json state,url,headRefName
+```
+
+```json
+{"purpose": "pr-state", "ok": true, "state": "OPEN", "url": "https://github.com/org/repo-a/pull/42", "head_ref_name": "fix-readme"}
+```
+
+- `ok: true` with `state` `OPEN`, `MERGED`, or `CLOSED`, and `url` / `head_ref_name` from the output, when the command succeeded.
+- `ok: true` with `state`, `url`, and `head_ref_name` `null` only when `gh pr view` failed with "no pull requests found".
+- `ok: false` with `state` `null` for any other failure (authentication, a base repository that cannot be determined, and so on); the error goes into `errors`. Never report such a failure as "no PR": the supervisor would open a duplicate PR against the default branch while an open one exists.
 
 ### question
 

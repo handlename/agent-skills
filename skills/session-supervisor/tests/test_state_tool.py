@@ -468,8 +468,8 @@ class NextStateTest(unittest.TestCase):
         new = st.next_state(self.current, cand, NOW)
         self.assertNotIn("T-0004", [t["id"] for t in new["tasks"]])
         self.assertNotIn("w-0007", [w["id"] for w in new["workers"]])
-        self.assertEqual(new["archived"][0], {"id": "T-0004", "title": "Tidy notes folder", "artifacts": [],
-                                              "archived_at": NOW, "cancelled": True, "reason": "no longer needed"})
+        self.assertEqual(new["archived"][0], {"id": "T-0004", "title": "Tidy notes folder", "request": "~/notes の重複ファイルを整理して",
+                                              "artifacts": [], "archived_at": NOW, "cancelled": True, "reason": "no longer needed"})
 
     def test_cancel_waits_for_archive_observed_without_artifact_or_push_checks(self):
         git_task(self.current, "T-0020", "w-0020", intended="running", observed="idle")
@@ -751,6 +751,212 @@ class NextStateTest(unittest.TestCase):
         state = st.next_state(state, cand, NOW)
         self.assertEqual(state["archived"][0]["id"], "T-0060")
 
+    def test_followups_shape(self):
+        cand = self.candidate()
+        find(cand["tasks"], "T-0004")["followups"] = [{"text": "重複は消さずに移動して", "at": NOW}]
+        cand["archived"][1]["followups"] = [{"text": "typo をもう 1 つ直して", "at": NOW}]
+        st.next_state(self.current, cand, NOW)
+        for bad in ("x", [1], [{"text": "", "at": NOW}], [{"text": "a"}], [{"text": "a", "at": 1}]):
+            for owner in ("task", "stub"):
+                with self.subTest(bad=bad, owner=owner):
+                    cand = self.candidate()
+                    (find(cand["tasks"], "T-0004") if owner == "task" else cand["archived"][0])["followups"] = bad
+                    self.assertRejected(cand, "followups must be a list of")
+        cand = self.candidate()
+        cand["archived"][0]["request"] = ["x"]
+        self.assertRejected(cand, "archived T-0002: request must be a string")
+
+    def test_request_change_rejected(self):
+        cand = self.candidate()
+        find(cand["tasks"], "T-0004")["request"] = "~/notes を整理して"
+        self.assertRejected(cand, "task T-0004: request is verbatim and must not change")
+        cand = self.candidate()
+        find(cand["tasks"], "T-0004")["followups"] = [{"text": "~/notes を整理して", "at": NOW}]
+        st.next_state(self.current, cand, NOW)
+
+    def stub(self, task_id="T-0019", request="fix the LICENSE year", **extra):
+        stub = {"id": task_id, "title": "old", "request": request, "archived_at": NOW, "artifacts": [
+            {"kind": "branch", "label": "a", "ref": "/repo/a#claude/license-old"},
+            {"kind": "commit", "label": "a", "ref": "old111"},
+            {"kind": "pr", "url": PR42},
+        ], "followups": [{"text": "年を 2026 にして", "at": NOW}]}
+        stub.update(extra)
+        return stub
+
+    def revived(self, state, followups=True):
+        git_task(state, "T-0019", "w-0019", intended="pending", observed="none")
+        find(state["workers"], "w-0019")["session_id"] = None
+        if followups:
+            find(state["tasks"], "T-0019")["followups"] = [{"text": "年を 2026 にして", "at": NOW}, {"text": "README も直して", "at": NOW}]
+        return find(state["tasks"], "T-0019")
+
+    def test_revive_stub_with_same_request(self):
+        self.current["archived"].insert(0, self.stub())
+        cand = self.candidate()
+        self.revived(cand)
+        new = st.next_state(self.current, cand, NOW)
+        self.assertEqual(find(new["tasks"], "T-0019")["status"], "waiting")
+        self.assertEqual(new["archived"][0]["id"], "T-0019")
+
+    def test_revive_rejected_unless_non_cancelled_stub_with_same_request(self):
+        no_request = self.stub()
+        del no_request["request"]
+        for stub in (self.stub(request="別の依頼"), no_request, self.stub(cancelled=True, reason="x")):
+            with self.subTest(stub=stub):
+                self.current = fixture_state()
+                self.current["archived"].insert(0, stub)
+                cand = self.candidate()
+                self.revived(cand)
+                self.assertRejected(cand, "T-0019: id is an archived stub; revive only a non-cancelled stub with the same request")
+
+    def test_rearchive_replaces_stub_and_concatenates_artifacts(self):
+        self.current["archived"].insert(0, self.stub())
+        task = self.revived(self.current)
+        find(self.current["workers"], "w-0019").update(session_id="sess_19", intended_state="archived", observed_state="idle")
+        task["artifacts"] = [{"kind": "branch", "label": "a", "ref": "/repo/a#claude/license-new"},
+                             {"kind": "commit", "label": "a", "ref": "new222"}]
+        cand = self.candidate()
+        find(cand["workers"], "w-0019")["observed_state"] = "archived"
+        new = st.next_state(self.current, cand, NOW)
+        self.assertNotIn("T-0019", [t["id"] for t in new["tasks"]])
+        stubs = [s for s in new["archived"] if s["id"] == "T-0019"]
+        self.assertEqual(len(stubs), 1)
+        self.assertIs(new["archived"][0], stubs[0])
+        refs = [a.get("ref") or a.get("url") for a in stubs[0]["artifacts"]]
+        self.assertEqual(refs, ["/repo/a#claude/license-old", "old111", PR42, "/repo/a#claude/license-new", "new222"])
+        self.assertEqual([a["ref"] for a in stubs[0]["artifacts"] if a["kind"] == "branch"][-1], "/repo/a#claude/license-new")
+        self.assertEqual(stubs[0]["request"], "fix the LICENSE year")
+        self.assertEqual([f["text"] for f in stubs[0]["followups"]], ["年を 2026 にして", "README も直して"])
+
+    def test_stub_without_followups_has_no_followups_key(self):
+        cand = self.candidate()
+        find(cand["tasks"], "T-0004")["cancel"] = {"at": NOW, "reason": "x"}
+        new = st.next_state(self.current, cand, NOW)
+        self.assertNotIn("followups", new["archived"][0])
+        cand = self.candidate()
+        find(cand["tasks"], "T-0004").update(cancel={"at": NOW, "reason": "x"}, followups=[{"text": "やっぱり不要", "at": NOW}])
+        new = st.next_state(self.current, cand, NOW)
+        self.assertEqual(new["archived"][0]["followups"], [{"text": "やっぱり不要", "at": NOW}])
+
+    def test_revived_task_new_pr_urls_returns_only_new_pr(self):
+        self.current["archived"].insert(0, self.stub())
+        cand = self.candidate()
+        self.revived(cand)["artifacts"] = [{"kind": "branch", "label": "a", "ref": "/repo/a#claude/license-new"},
+                                           {"kind": "commit", "label": "a", "ref": "new222"},
+                                           {"kind": "pr", "url": PR43}]
+        self.assertEqual(st.new_pr_urls(self.current, cand), [("T-0019", PR43)])
+        state = st.next_state(self.current, cand, NOW)
+        self.assertEqual(st.new_pr_urls(state, copy.deepcopy(state)), [])
+
+    def replace(self, cand, old_id, new_id, **successor):
+        old = find(cand["workers"], old_id)
+        fresh = dict(old, id=new_id, session_id=None, intended_state="pending", observed_state="none", observed_at=None,
+                     last_report=None)
+        fresh.update(successor)
+        old.update(intended_state="archived", replaced_by=new_id)
+        cand["workers"].append(fresh)
+        find(cand["tasks"], old["task_id"])["worker_ids"].append(new_id)
+        return fresh
+
+    def test_replace_missing_nongit_worker_gets_no_waiting_action(self):
+        nongit_task(self.current, "T-0030", "w-0030", "/data/x", "running", "missing")
+        cand = self.candidate()
+        self.replace(cand, "w-0030", "w-0031")
+        new = st.next_state(self.current, cand, NOW)
+        task = find(new["tasks"], "T-0030")
+        self.assertEqual(task["user_actions"], [])
+        self.assertEqual(task["status"], "waiting")
+
+    def test_replace_missing_git_worker_gets_no_waiting_action(self):
+        git_task(self.current, "T-0020", "w-0020", intended="running", observed="missing")
+        cand = self.candidate()
+        self.replace(cand, "w-0020", "w-0021")
+        new = st.next_state(self.current, cand, NOW)
+        self.assertEqual(find(new["tasks"], "T-0020")["user_actions"], [])
+        self.assertEqual(find(new["tasks"], "T-0020")["status"], "waiting")
+
+    def test_replace_external_archive_of_commit_worker_needs_no_push_decision_or_artifacts(self):
+        self.current["supervisor"]["archive_consent"] = None
+        git_task(self.current, "T-0020", "w-0020", intended="running", observed="archived")
+        cand = self.candidate()
+        self.replace(cand, "w-0020", "w-0021")
+        new = st.next_state(self.current, cand, NOW)
+        self.assertEqual(find(new["tasks"], "T-0020")["status"], "waiting")
+
+    def test_replace_still_requires_archive_consent_for_a_live_worker(self):
+        self.current["supervisor"]["archive_consent"] = None
+        git_task(self.current, "T-0020", "w-0020", intended="running", observed="idle")
+        cand = self.candidate()
+        self.replace(cand, "w-0020", "w-0021")
+        self.assertRejected(cand, "archive requested without supervisor.archive_consent")
+
+    def test_replace_push_only_worker(self):
+        self.pending_push()
+        state = st.next_state(self.current, self.push_worker_candidate(), NOW)
+        cand = copy.deepcopy(state)
+        find(cand["workers"], "w-0021").update(session_id="sess_21", intended_state="running", observed_state="running")
+        state = st.next_state(state, cand, NOW)
+        cand = copy.deepcopy(state)
+        find(cand["workers"], "w-0021")["observed_state"] = "archived"
+        fresh = self.replace(cand, "w-0021", "w-0022")
+        self.assertEqual((fresh["delivery"], fresh["branch"]), ("push_pr", "claude/license-x1"))
+        state = st.next_state(state, cand, NOW)
+        self.assertEqual(find(state["tasks"], "T-0020")["status"], "waiting")
+
+    def test_replacement_keeps_inherited_base_branch(self):
+        git_task(self.current, "T-0020", "w-0020", intended="running", observed="missing")
+        find(self.current["workers"], "w-0020")["base_branch"] = "origin/claude/license-x0"
+        cand = self.candidate()
+        self.replace(cand, "w-0020", "w-0021", branch=None, worktree_path=None)
+        new = st.next_state(self.current, cand, NOW)
+        self.assertEqual(find(new["workers"], "w-0021")["base_branch"], "origin/claude/license-x0")
+        self.assertEqual(find(new["workers"], "w-0020")["replaced_by"], "w-0021")
+
+    def test_invalid_replaced_by_rejected(self):
+        git_task(self.current, "T-0020", "w-0020", intended="running", observed="missing")
+        git_task(self.current, "T-0021", "w-0030", intended="running", observed="running")
+        cases = [
+            ("w-0030", "archived", "replaced_by w-0030 must name another worker of the same task"),
+            ("w-0020", "archived", "replaced_by w-0020 must name another worker of the same task"),
+            ("w-9999", "archived", "replaced_by w-9999 must name another worker of the same task"),
+            ("w-0021", "running", "w-0020: replaced_by requires intended_state archived"),
+            (7, "archived", "replaced_by must be a string"),
+        ]
+        for target, intended, pattern in cases:
+            with self.subTest(target=target, intended=intended):
+                cand = self.candidate()
+                self.replace(cand, "w-0020", "w-0021")
+                find(cand["workers"], "w-0020").update(replaced_by=target, intended_state=intended)
+                self.assertRejected(cand, pattern)
+
+    def test_replaced_by_cycle_rejected(self):
+        git_task(self.current, "T-0020", "w-0020", intended="running", observed="missing")
+        cand = self.candidate()
+        self.replace(cand, "w-0020", "w-0021")
+        find(cand["workers"], "w-0021").update(intended_state="archived", observed_state="missing", replaced_by="w-0020")
+        self.assertRejected(cand, "replaced_by chain loops")
+
+    def test_replaced_external_archive_and_given_up_successor_need_user(self):
+        git_task(self.current, "T-0020", "w-0020", intended="running", observed="archived")
+        cand = self.candidate()
+        self.replace(cand, "w-0020", "w-0021", session_id="sess_21", intended_state="archived", observed_state="missing")
+        new = st.next_state(self.current, cand, NOW)
+        self.assertEqual(find(new["tasks"], "T-0020")["status"], "needs_user")
+        self.assertNotIn("T-0020", [s["id"] for s in new["archived"]])
+
+    def test_reappeared_replaced_nongit_worker_must_stay_missing(self):
+        nongit_task(self.current, "T-0030", "w-0030", "/data/x", "running", "missing")
+        cand = self.candidate()
+        self.replace(cand, "w-0030", "w-0031", session_id="sess_31", intended_state="running", observed_state="running")
+        state = st.next_state(self.current, cand, NOW)
+        cand = copy.deepcopy(state)
+        find(cand["workers"], "w-0030")["observed_state"] = "idle"
+        with self.assertRaisesRegex(st.StateError, "held by more than one worker"):
+            st.next_state(state, cand, NOW)
+        cand = copy.deepcopy(state)
+        find(cand["tasks"], "T-0030")["next_action"] = "w-0030 reappeared; archive it"
+        st.next_state(state, cand, NOW)
+
 
 GUARD_TAIL = "The supervisor does not change repositories"
 
@@ -864,6 +1070,15 @@ class GuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(st.bash_violations(command), [])
                 self.assertIsNone(self.decide("Bash", command))
+
+    def test_prepare_dir_commands_are_allowed(self):
+        script = self.dir / ".supervisor" / "state_tool.py"
+        for url in ("https://github.com/org/repo-a", "git@github.com:org/repo-a.git", "https://github.com/org/git"):
+            command = f"python3 {script} prepare-dir --claude-md {self.dir}/CLAUDE.md --clone {url}"
+            with self.subTest(command=command):
+                self.assertEqual(st.bash_violations(command), [])
+                self.assertIsNone(self.decide("Bash", command))
+        self.assertIsNone(self.decide("Bash", f"python3 {script} prepare-dir --claude-md {self.dir}/CLAUDE.md --work T-0001-notes"))
 
     def test_block_message_names_the_subcommand(self):
         self.assertIn("blocked: git push (", self.decide("Bash", "git -C /repo push origin b"))
@@ -1442,6 +1657,57 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 2, proc.stderr)
         self.assertIn("outside the supervisor directory", proc.stderr)
 
+    def test_new_claude_md_has_default_locations(self):
+        target = self.root / "sup"
+        self.assertEqual(self.setup_dir(target).returncode, 0)
+        text = (target / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertEqual(st.parse_locations(text), ({"clone_root": "~/src", "work_root": str(self.root / "sup-work")}, []))
+        self.assertIn("prepare-dir` is the only command that writes outside this directory", text)
+        self.assertIn("The one allowed exception is `state_tool.py prepare-dir`", text)
+
+    def test_appends_locations_to_existing_claude_md(self):
+        target = self.root / "sup"
+        target.mkdir()
+        body = "# My supervisor\n\nKeep this text.\n"
+        (target / "CLAUDE.md").write_text(body, encoding="utf-8")
+        proc = self.setup_dir(target)
+        self.assertIn(f"updated: {target / 'CLAUDE.md'}", proc.stdout)
+        text = (target / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertTrue(text.startswith(body + "\n## Locations\n"), text)
+        self.assertEqual(st.parse_locations(text)[0], {"clone_root": "~/src", "work_root": str(self.root / "sup-work")})
+
+    def test_keeps_custom_values_and_adds_only_missing_keys(self):
+        target = self.root / "sup"
+        target.mkdir()
+        body = "# Mine\n\n## Locations\n\n- clone_root: /code\n\n## Follow-ups\n"
+        (target / "CLAUDE.md").write_text(body, encoding="utf-8")
+        self.assertEqual(self.setup_dir(target).returncode, 0)
+        text = (target / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertEqual(text, f"# Mine\n\n## Locations\n\n- clone_root: /code\n- work_root: {self.root / 'sup-work'}\n\n## Follow-ups\n")
+        (target / "CLAUDE.md").write_text("## Locations\n- work_root: ~/work\n- clone_root: ~/code\n", encoding="utf-8")
+        proc = self.setup_dir(target)
+        self.assertIn(f"exists: {target / 'CLAUDE.md'}", proc.stdout)
+        self.assertEqual((target / "CLAUDE.md").read_text(encoding="utf-8"), "## Locations\n- work_root: ~/work\n- clone_root: ~/code\n")
+
+    def test_second_run_keeps_claude_md_bytes(self):
+        target = self.root / "sup"
+        target.mkdir()
+        (target / "CLAUDE.md").write_text("# Mine\n", encoding="utf-8")
+        self.setup_dir(target)
+        before = (target / "CLAUDE.md").read_bytes()
+        proc = self.setup_dir(target)
+        self.assertIn(f"exists: {target / 'CLAUDE.md'}", proc.stdout)
+        self.assertEqual((target / "CLAUDE.md").read_bytes(), before)
+
+    def test_invalid_locations_abort(self):
+        target = self.root / "sup"
+        target.mkdir()
+        (target / "CLAUDE.md").write_text("## Locations\n- clone_root: src\n", encoding="utf-8")
+        proc = self.setup_dir(target)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("error: CLAUDE.md:2: clone_root must be an absolute path or start with ~", proc.stderr)
+        self.assertFalse((target / "state.json").exists())
+
     def test_version_matches_copy(self):
         target = self.root / "sup"
         self.setup_dir(target)
@@ -1449,6 +1715,268 @@ class SetupTest(unittest.TestCase):
         copied = subprocess.run([sys.executable, str(target / ".supervisor" / "state_tool.py"), "version"], capture_output=True, text=True).stdout
         self.assertRegex(bundled.strip(), r"^[0-9a-f]{12}$")
         self.assertEqual(bundled, copied)
+
+
+class LocationsTest(unittest.TestCase):
+    def test_parse(self):
+        text = "# T\n\n## Locations\n\nprose line\n- clone_root: ~/code\n- work_root: /w <!-- x -->\n\n## Other\n- clone_root: x\n"
+        self.assertEqual(st.parse_locations(text), ({"clone_root": "~/code", "work_root": "/w"}, []))
+        self.assertEqual(st.parse_locations("# T\n"), ({}, []))
+        self.assertEqual(st.parse_locations("```\n## Locations\n- clone_root: x\n```\n"), ({}, []))
+
+    def test_errors_carry_line_numbers(self):
+        cases = [
+            ("## Locations\n- clone_root: src\n", "CLAUDE.md:2: clone_root must be an absolute path or start with ~"),
+            ("## Locations\n- work_root: ~user/w\n", "CLAUDE.md:2: work_root must be an absolute path or start with ~"),
+            ("## Locations\n- clone_root: /a\n- clone_root: /b\n", "CLAUDE.md:3: duplicate key 'clone_root'"),
+            ("## Locations\n- cache_root: /a\n", "CLAUDE.md:2: unknown key 'cache_root'"),
+            ("## Locations\n## Locations\n", "CLAUDE.md:2: duplicate '## Locations' heading"),
+        ]
+        for text, expected in cases:
+            with self.subTest(expected=expected):
+                values, errors = st.parse_locations(text)
+                self.assertEqual(values, {})
+                self.assertTrue(any(e.startswith(expected) for e in errors), errors)
+
+    def test_defaults(self):
+        self.assertEqual(st.default_locations("/Users/me/supervisor/"),
+                         {"clone_root": "~/src", "work_root": "/Users/me/supervisor-work"})
+
+    def test_add_missing_locations_is_idempotent(self):
+        once = st.add_missing_locations(st.CLAUDE_MD, "/x/sup")
+        self.assertEqual(st.add_missing_locations(once, "/x/sup"), once)
+        self.assertTrue(once.startswith(st.CLAUDE_MD))
+
+    def test_clone_url_parts(self):
+        ok = {
+            "https://github.com/org/repo": ("github.com", "org", "repo"),
+            "https://github.com/org/repo.git": ("github.com", "org", "repo"),
+            "https://github.com/org/repo/": ("github.com", "org", "repo"),
+            "git@github.com:org/repo.git": ("github.com", "org", "repo"),
+            "git@ghe.example.com:team/my.repo": ("ghe.example.com", "team", "my.repo"),
+        }
+        for url, parts in ok.items():
+            self.assertEqual(st.clone_url_parts(url), parts, url)
+        for url in ("file:///tmp/repo", "http://github.com/o/r", "ssh://git@github.com/o/r", "https://github.com/../r",
+                    "https://github.com/o/..", "https://github.com/o/r/extra", "https://u@github.com/o/r", "git@github.com:o/-r",
+                    "https://github.com/o/.git", "-u https://github.com/o/r", "https://github.com/o/r?x=1"):
+            self.assertIsNone(st.clone_url_parts(url), url)
+
+
+def fake_git(responses, clone=None):
+    """subprocess.run stand-in: responses maps an argv prefix tuple (after "git") to (returncode, stdout)."""
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[:2] == ["git", "clone"]:
+            if clone is not None:
+                return clone(argv, **kwargs)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        for prefix, (code, out) in responses.items():
+            if tuple(a for a in argv[1:] if a != "-C" and not a.startswith("/"))[:len(prefix)] == prefix:
+                return subprocess.CompletedProcess(argv, code, out, "")
+        return subprocess.CompletedProcess(argv, 1, "", "")
+    return run, calls
+
+
+class PrepareDirTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.sup = self.root / "sup"
+        self.sup.mkdir()
+        self.md = self.sup / "CLAUDE.md"
+        self.clones = self.root / "clones"
+        self.work = self.root / "work"
+        self.write_locations(f"- clone_root: {self.clones}\n- work_root: {self.work}\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_locations(self, body):
+        self.md.write_text("# Supervisor\n\n## Locations\n\n" + body, encoding="utf-8")
+
+    def run_cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = st.main(["prepare-dir", "--claude-md", str(self.md), *argv])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_show_expands_and_marks_defaults(self):
+        self.assertEqual(self.run_cli("--show"), (0, f"clone_root: {self.clones}\nwork_root: {self.work}\n", ""))
+        home = self.root / "home"
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            self.write_locations("- clone_root: ~/code\n")
+            self.assertEqual(self.run_cli("--show")[1], f"clone_root: {home / 'code'}\nwork_root: {self.root / 'sup-work'} (default)\n")
+            self.md.write_text("# Supervisor\n", encoding="utf-8")
+            self.assertEqual(self.run_cli("--show")[1], f"clone_root: {home / 'src'} (default)\nwork_root: {self.root / 'sup-work'} (default)\n")
+            self.md.unlink()
+            self.assertEqual(self.run_cli("--show")[0], 0)
+
+    def test_work_creates_directory(self):
+        code, out, _ = self.run_cli("--work", "T-0012-notes-tidy")
+        self.assertEqual((code, out), (0, f"created: {self.work / 'T-0012-notes-tidy'}\n"))
+        self.assertTrue((self.work / "T-0012-notes-tidy").is_dir())
+        self.assertEqual(self.run_cli("--work", "T-0012-notes-tidy")[1], f"exists: {self.work / 'T-0012-notes-tidy'}\n")
+
+    def test_work_rejects_bad_name(self):
+        for name in ("notes", "T-12-x", "T-0012-Notes", "T-0012-../x", "T-0012-" + "a" * 41, "../T-0012-x"):
+            with self.subTest(name=name):
+                code, _, err = self.run_cli("--work", name)
+                self.assertEqual(code, 1)
+                self.assertIn("must match T-<number>-<slug>", err)
+        self.assertFalse(self.work.exists())
+
+    def test_rejects_roots_inside_supervisor_git_or_each_other(self):
+        repo = self.root / "repo"
+        (repo / ".git").mkdir(parents=True)
+        cases = [
+            (f"- clone_root: {self.clones}\n- work_root: {self.sup / 'work'}\n", "work_root .* is inside the supervisor directory"),
+            (f"- clone_root: {self.sup}\n- work_root: {self.work}\n", "clone_root .* is inside the supervisor directory"),
+            (f"- clone_root: {self.clones}\n- work_root: {repo / 'work'}\n", "work_root .* is inside a git repository"),
+            (f"- clone_root: {self.clones}\n- work_root: {self.clones / 'work'}\n", "are nested"),
+            (f"- clone_root: {self.work / 'src'}\n- work_root: {self.work}\n", "are nested"),
+        ]
+        for body, pattern in cases:
+            with self.subTest(pattern=pattern):
+                self.write_locations(body)
+                for argv in (("--show",), ("--work", "T-0001-x"), ("--clone", "https://github.com/o/r")):
+                    code, _, err = self.run_cli(*argv)
+                    self.assertEqual(code, 1)
+                    self.assertRegex(err, pattern)
+        self.assertFalse((self.sup / "work").exists())
+        self.assertFalse((repo / "work").exists())
+
+    def test_work_rejects_symlink_out_of_root(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        self.work.mkdir()
+        (self.work / "T-0001-x").symlink_to(outside, target_is_directory=True)
+        code, _, err = self.run_cli("--work", "T-0001-x")
+        self.assertEqual(code, 1)
+        self.assertIn("resolves outside", err)
+
+    def test_clone_paths(self):
+        for url, dest in (("https://github.com/org/repo-a", "github.com/org/repo-a"),
+                          ("git@github.com:org/repo-b.git", "github.com/org/repo-b")):
+            with self.subTest(url=url):
+                run, calls = fake_git({})
+                with mock.patch.object(st.subprocess, "run", run):
+                    code, out, err = self.run_cli("--clone", url)
+                self.assertEqual((code, out), (0, f"cloned: {self.clones / dest}\n"), err)
+                clone = [c for c in calls if c[0][:2] == ["git", "clone"]]
+                self.assertEqual(clone[0][0], ["git", "clone", "--", url, str(self.clones / dest)])
+
+    def test_clone_rejects_unsafe_urls(self):
+        run, calls = fake_git({})
+        for url in ("file:///etc", "https://github.com/../x", "https://github.com/o/..", "ext::sh -c touch% /tmp/x", "--upload-pack=x"):
+            with self.subTest(url=url), mock.patch.object(st.subprocess, "run", run):
+                code, _, err = self.run_cli(f"--clone={url}")
+                self.assertEqual(code, 1)
+                self.assertIn("must be https://<host>/<owner>/<repo>", err)
+        self.assertEqual(calls, [])
+
+    def test_clone_rejects_symlinked_destination(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.clones / "github.com").mkdir(parents=True)
+        (self.clones / "github.com" / "org").symlink_to(outside, target_is_directory=True)
+        run, calls = fake_git({})
+        with mock.patch.object(st.subprocess, "run", run):
+            code, _, err = self.run_cli("--clone", "https://github.com/org/repo")
+        self.assertEqual(code, 1)
+        self.assertIn("resolves outside", err)
+        self.assertEqual(calls, [])
+
+    def existing_repo(self):
+        dest = self.clones / "github.com" / "org" / "repo"
+        (dest / ".git").mkdir(parents=True)
+        return dest
+
+    def test_existing_clone_with_matching_origin_and_head(self):
+        dest = self.existing_repo()
+        run, calls = fake_git({("remote", "get-url", "origin"): (0, "git@github.com:Org/repo.git\n"),
+                               ("rev-parse", "--verify", "HEAD"): (0, "abc\n")})
+        with mock.patch.object(st.subprocess, "run", run):
+            self.assertEqual(self.run_cli("--clone", "https://github.com/org/repo")[:2], (0, f"exists: {dest}\n"))
+        self.assertFalse(any(c[0][:2] == ["git", "clone"] for c in calls))
+
+    def test_existing_clone_with_other_origin_or_no_head(self):
+        self.existing_repo()
+        cases = [
+            ({("remote", "get-url", "origin"): (0, "https://github.com/fork/repo\n"), ("rev-parse", "--verify", "HEAD"): (0, "abc")},
+             "already exists with origin 'https://github.com/fork/repo'"),
+            ({("rev-parse", "--verify", "HEAD"): (0, "abc")}, "already exists with origin None"),
+            ({("remote", "get-url", "origin"): (0, "https://github.com/org/repo")}, "has no HEAD"),
+        ]
+        for responses, pattern in cases:
+            with self.subTest(pattern=pattern):
+                run, calls = fake_git(responses)
+                with mock.patch.object(st.subprocess, "run", run):
+                    code, _, err = self.run_cli("--clone", "https://github.com/org/repo")
+                self.assertEqual(code, 1)
+                self.assertIn(pattern, err)
+                self.assertFalse(any(c[0][:2] == ["git", "clone"] for c in calls))
+        self.assertTrue((self.clones / "github.com" / "org" / "repo" / ".git").is_dir())
+
+    def test_non_empty_non_repo_destination_rejected(self):
+        dest = self.clones / "github.com" / "org" / "repo"
+        dest.mkdir(parents=True)
+        (dest / "file.txt").write_text("x", encoding="utf-8")
+        run, calls = fake_git({})
+        with mock.patch.object(st.subprocess, "run", run):
+            code, _, err = self.run_cli("--clone", "https://github.com/org/repo")
+        self.assertEqual(code, 1)
+        self.assertIn("is neither an empty directory nor a clone", err)
+        self.assertTrue((dest / "file.txt").exists())
+
+    def failing_clone(self, exc=None):
+        def clone(argv, **kwargs):
+            os.makedirs(os.path.join(argv[-1], ".git"))
+            if exc:
+                raise exc
+            return subprocess.CompletedProcess(argv, 128, "", "fatal: could not read Username")
+        return clone
+
+    def test_failed_or_timed_out_clone_removes_destination(self):
+        dest = self.clones / "github.com" / "org" / "repo"
+        for exc, pattern in ((None, "git clone exited with 128: fatal: could not read Username"),
+                             (subprocess.TimeoutExpired(["git"], 300), "git clone timed out after 300 seconds")):
+            with self.subTest(pattern=pattern):
+                run, _ = fake_git({}, clone=self.failing_clone(exc))
+                with mock.patch.object(st.subprocess, "run", run):
+                    code, out, err = self.run_cli("--clone", "https://github.com/org/repo")
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(f"error: {pattern}", err)
+                self.assertFalse(dest.exists())
+
+    def test_failed_clone_keeps_preexisting_empty_destination(self):
+        dest = self.clones / "github.com" / "org" / "repo"
+        dest.mkdir(parents=True)
+        run, _ = fake_git({}, clone=lambda argv, **kw: subprocess.CompletedProcess(argv, 128, "", "fatal"))
+        with mock.patch.object(st.subprocess, "run", run):
+            self.assertEqual(self.run_cli("--clone", "https://github.com/org/repo")[0], 1)
+        self.assertTrue(dest.is_dir())
+
+    def clone_kwargs(self, responses, environ):
+        run, calls = fake_git(responses)
+        with mock.patch.object(st.subprocess, "run", run), mock.patch.dict(os.environ, environ, clear=False):
+            if "GIT_SSH_COMMAND" not in environ:
+                os.environ.pop("GIT_SSH_COMMAND", None)
+            self.assertEqual(self.run_cli("--clone", "git@github.com:org/repo.git")[0], 0)
+        return next(kw for argv, kw in calls if argv[:2] == ["git", "clone"])
+
+    def test_clone_is_non_interactive_and_keeps_ssh_settings(self):
+        kwargs = self.clone_kwargs({}, {})
+        self.assertEqual(kwargs["timeout"], 300)
+        self.assertEqual(kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(kwargs["env"]["GIT_SSH_COMMAND"], "ssh -o BatchMode=yes")
+        kwargs = self.clone_kwargs({("config", "--get", "core.sshCommand"): (0, "ssh -i ~/.ssh/work\n")}, {})
+        self.assertEqual(kwargs["env"]["GIT_SSH_COMMAND"], "ssh -i ~/.ssh/work -o BatchMode=yes")
+        kwargs = self.clone_kwargs({("config", "--get", "core.sshCommand"): (0, "ssh -i ~/.ssh/work\n")},
+                                   {"GIT_SSH_COMMAND": "ssh -F /etc/sv"})
+        self.assertEqual(kwargs["env"]["GIT_SSH_COMMAND"], "ssh -F /etc/sv -o BatchMode=yes")
 
 
 RULES_MD = """# Session supervisor directory
@@ -1497,7 +2025,7 @@ class ParseFollowUpsTest(unittest.TestCase):
         self.assertEqual(st.parse_follow_ups("# Title\n\n## Sources\n"), ([], []))
 
     def test_setup_claude_md_has_no_rules(self):
-        self.assertEqual(st.parse_follow_ups(st.CLAUDE_MD), ([], []))
+        self.assertEqual(st.parse_follow_ups(st.add_missing_locations(st.CLAUDE_MD, "/x/sup")), ([], []))
 
     def test_fenced_block_and_comment_are_ignored(self):
         text = ("# T\n\n```markdown\n## Follow-ups\n### x\n- on: ci\n```\n"
