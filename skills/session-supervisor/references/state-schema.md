@@ -33,7 +33,8 @@ Field names are agent-neutral:
       "status": "running",
       "next_action": "w-0004 / w-0005 の完了待ち",
       "user_actions": [
-        { "id": "UA-0002", "description": "repo-b の PR をレビュー", "since": "2026-10-17T10:30:00+09:00" }
+        { "id": "UA-0002", "description": "repo-b の PR をレビュー", "since": "2026-10-17T10:30:00+09:00" },
+        { "id": "UA-0003", "description": "Review repo-a#42", "since": "2026-10-17T10:45:00+09:00", "follow_up": { "rule": "review-pr", "url": "https://github.com/org/repo-a/pull/42", "done": "pr_closed" } }
       ],
       "artifacts": [
         { "kind": "branch", "label": "repo-a hn/uploader-retry-x1", "ref": "/Users/handlename/src/github.com/org/repo-a#hn/uploader-retry-x1" },
@@ -124,7 +125,7 @@ The example is a snapshot for illustration: `w-0005` and `w-0006` are elided, so
 | `push_consent` | `null`, or `{text, at, message?}` where `text` is the exact phrase that grants push / PR. Without `message`, `text` comes from `request`. `message` is a later user message verbatim (including a consent given while the worker was still running, applied once the push-decision user action exists) and holds `text`; it may be set or changed only in a candidate that resolves a pending push-decision user action of the task (enforced by `commit`, the only path that accepts it). Its content is an audit record. Each push decision covers only the branch its user action names; a later consent overwrites `message`. |
 | `status` | Derived by `commit`. Never write it yourself (see Derivation). |
 | `next_action` | What the supervisor will do next for this task. |
-| `user_actions[]` | `{id, description, since}`: things the user must do. A non-empty list makes the task `needs_user`. The supervisor removes each one in the candidate that records its resolution (SKILL.md section 5). |
+| `user_actions[]` | `{id, description, since, follow_up?}`: things the user must do. A non-empty list makes the task `needs_user`. The supervisor removes each one in the candidate that records its resolution (SKILL.md section 5). `follow_up`, when present, is `{rule, url, done}`: the action is remaining work for the user (e.g. reviewing a PR) created from a `## Follow-ups` rule by `state_tool.py follow-ups` ([follow-ups-format.md](follow-ups-format.md)). `rule` is the rule id, `url` the PR URL it is about, and `done` is `pr_closed` (also removed once the PR is merged or closed) or `manual` (removed only when the user says it is done). Never write it by hand. |
 | `artifacts[]` | Results recorded from values the supervisor observed (see Artifacts). |
 | `worker_ids[]` | Workers that belong to this task. |
 | `created_at` | ISO 8601 timestamp with offset. |
@@ -196,6 +197,8 @@ Consequences:
 
 - A worker with `intended_state: archived` and `observed_state: idle` keeps its task in `running`; the task moves only after the archive is observed.
 - A `commit`-delivery task carries the push-decision user action, so it stays `needs_user` after its workers are archived, until the user decides.
+- A follow-up user action makes its task `needs_user` like any other, even before the archive is observed and even while another worker of the task is `running`.
+- A task whose only remaining user actions are follow-ups stays in `tasks`, together with its archived workers, until the last follow-up is removed; then `commit` moves it to an `archived` stub.
 
 ## Cancellation
 
@@ -214,12 +217,13 @@ The source of truth is `supervisor_errors` in the secretary skill's `state_tool.
 - `schema_version` equal to `1`, and `rev` an integer.
 - `supervisor` an object with `session_ids` a list of strings (checked only) and `dashboard` an object or `null` (optional).
 - `tasks` and `workers` lists (may be empty).
-- Each task: `id`, plus `title` and `status` (checked only), all strings; `user_actions` optional, each entry with string `id`, `description`, and `since`.
+- Each task: `id`, plus `title` and `status` (checked only), all strings; `user_actions` optional, each entry with string `id`, `description`, and `since`, and optionally `follow_up` with string `rule`, `url`, and `done`.
 - Each worker: string `kind`, `cwd`, `intended_state`, and `observed_state`.
 
 ### Meaning
 
 - **User-action wording.** The secretary decides how the user answers a decision (in the app, or by pasting text into this supervisor's chat) from the wording of `user_actions[].description`. That wording comes from the User actions table and the quoted user actions in SKILL.md, the automatic waiting-task action, and free-text report blockers.
+- **Follow-ups.** A user action with `follow_up` is remaining work, not a decision: the secretary lists it under "Your tasks" with a link to `follow_up.url`, and its paste text reports completion, e.g. `T-0003 UA-0003 ("Review repo-a#42"): done`. Every user action without `follow_up` is a pending decision.
 - **Identity.** `(task.id, user_actions[].id, since)` identifies a decision. Because user-action numbers are reused, `since` is the time the action was added and is never rewritten.
 - **Occupancy.** The secretary copies the occupy rule of the non-git worker invariant (see Invariants) to decide whether a directory is busy before it relays to an external source.
 - **Dashboard.** `supervisor.dashboard.url` is optional and used only when it is an http(s) URL.
@@ -250,6 +254,11 @@ Single-state checks (`validate`):
 - `continues`, when present, is an integer >= 0.
 - A `file` artifact's `path` lies under the `cwd` of a worker of that task.
 - URLs are http or https only.
+- A user action's `follow_up`, when present, is an object whose `rule` matches `^[a-z0-9][a-z0-9-]{0,31}$`, whose `done` is `pr_closed` or `manual`, and whose `url` is http(s).
+- That `url` equals the `url` of one of the task's `pr` artifacts. A candidate that replaces or removes a `pr` artifact must remove the follow-ups of the old url in the same candidate.
+- Within one task, no two follow-ups share the same `(rule, url)`.
+- A user action with `follow_up` has a non-empty string `since`.
+- None of these checks reads `CLAUDE.md`: `commit` does not know the rules, only the shape.
 
 Checks against the current state (`next_state`):
 
@@ -259,7 +268,7 @@ Checks against the current state (`next_state`):
   - if its delivery is `commit` and the task is not cancelled, the candidate task must contain the push-decision user action
   - `supervisor.archive_consent` must not be null, unless the worker is already observed `archived` or `missing` (no archive call follows)
 - Removing the push-decision user action from a candidate whose workers are already `archived` (or whose archive was refused and the worker remains) is accepted: the transition checks apply only to workers that newly become archived.
-- Push consent from a later message: for each candidate task whose `push_consent.message` is new or differs from the current task's, the task must exist in current, current must hold a push-decision user action for it (naming the branch of one of its git workers), and the candidate must no longer hold that user action. Otherwise: `task T-xxxx: push_consent.message may be set only while resolving a pending push decision`.
+- Push consent from a later message: for each candidate task whose `push_consent.message` is new or differs from the current task's, the task must exist in current, current must hold a push-decision user action for it (naming the branch of one of its git workers; a user action with `follow_up` is never a push decision), and the candidate must no longer hold that user action. Otherwise: `task T-xxxx: push_consent.message may be set only while resolving a pending push decision`.
 
 ## Report to artifacts
 

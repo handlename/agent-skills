@@ -22,10 +22,11 @@ Reference files:
 - [references/state-schema.md](references/state-schema.md): `state.json` fields, value ranges, status derivation, invariants, report-to-artifact mapping, example
 - [references/worker-prompt.md](references/worker-prompt.md): the two-part worker brief (`prompt` and `background`), the push-only worker, and the `supervisor-report` block
 - [references/observer-brief.md](references/observer-brief.md): the observer subagent brief and the facts it writes per purpose
+- [references/follow-ups-format.md](references/follow-ups-format.md): the `## Follow-ups` rules in `<dir>/CLAUDE.md` that turn verified PRs into follow-up user actions
 
 In the commands below, `<skill-dir>` is the directory containing this SKILL.md and `<dir>` is the supervisor directory.
 
-The secretary skill may read this supervisor's `state.json` read-only and show each `tasks[].user_actions[]` entry as a pending decision. The supervisor never responds to or coordinates with the secretary. Before changing `state.json` fields or user-action wording, check [Read by the secretary](references/state-schema.md#read-by-the-secretary). How the two skills split responsibilities: [Session orchestration: supervisor and secretary](https://github.com/handlename/agent-skills#session-orchestration-supervisor-and-secretary).
+The secretary skill may read this supervisor's `state.json` read-only and show each `tasks[].user_actions[]` entry: one with `follow_up` under "Your tasks", every other one as a pending decision. The supervisor never responds to or coordinates with the secretary. Before changing `state.json` fields or user-action wording, check [Read by the secretary](references/state-schema.md#read-by-the-secretary). How the two skills split responsibilities: [Session orchestration: supervisor and secretary](https://github.com/handlename/agent-skills#session-orchestration-supervisor-and-secretary).
 
 ## When to Use
 
@@ -94,6 +95,13 @@ Run at the start of every supervisor session and after every recovery (section 7
    ```
 
    If the two outputs differ, re-run setup (section 3). Also read `<dir>/.claude/settings.json`: if no PreToolUse entry has a command that contains both `state_tool.py` and ` guard --dir`, ask the user once whether they removed it on purpose; re-run setup only if they did not, and otherwise leave it removed for this supervisor directory. Ask the user to start a new supervisor session (or to review hooks in `/hooks`) only when setup printed `created:` or `updated:` for `settings.json`, because hooks are loaded at session start; a run that printed only `exists:` needs no restart.
+6. Check the follow-up rules. This runs after step 5 so that a stale installed copy has already been replaced by one that knows the subcommand. It only reads `<dir>/CLAUDE.md` and runs no `gh`:
+
+   ```bash
+   python3 "<dir>/.supervisor/state_tool.py" validate-follow-ups --claude-md "<dir>/CLAUDE.md"
+   ```
+
+   `ok: N rules` means the rules are usable (`ok: 0 rules` when there is no `## Follow-ups`). On exit 1, tell the user the `error: CLAUDE.md:<line>: ...` lines once and continue: with an invalid section no follow-up is created, and everything else works as usual.
 
 Facts the procedures rely on (observed in the desktop app):
 
@@ -112,7 +120,7 @@ Run from the Entry (section 0) for a new directory, and again whenever the versi
 python3 "<skill-dir>/scripts/state_tool.py" setup --dir "$HOME/supervisor"
 ```
 
-`setup` is idempotent. It creates the directory (aborts inside a git repository), copies `state_tool.py` and `dashboard.template.html` to `<dir>/.supervisor/`, adds a SessionStart hook (matcher `startup|resume|clear|compact`) and a PreToolUse guard to `<dir>/.claude/settings.json` unless already present (aborts on invalid JSON or a malformed `hooks.SessionStart` / `hooks.PreToolUse`, before writing `state.json`; existing entries are kept), creates `state.json` and `CLAUDE.md` if missing, and prints what it created, kept, or updated.
+`setup` is idempotent. It creates the directory (aborts inside a git repository), copies `state_tool.py` and `dashboard.template.html` to `<dir>/.supervisor/`, adds a SessionStart hook (matcher `startup|resume|clear|compact`) and a PreToolUse guard to `<dir>/.claude/settings.json` unless already present (aborts on invalid JSON or a malformed `hooks.SessionStart` / `hooks.PreToolUse`, before writing `state.json`; existing entries are kept), creates `state.json` and `CLAUDE.md` if missing, and prints what it created, kept, or updated. The created `CLAUDE.md` contains a commented-out `## Follow-ups` example; the user enables follow-ups by writing that section ([references/follow-ups-format.md](references/follow-ups-format.md)).
 
 The guard (matcher `Edit|MultiEdit|Write|NotebookEdit|Bash`) runs `state_tool.py guard --dir <dir>` before each such tool call of the supervisor and its subagents:
 
@@ -120,6 +128,7 @@ The guard (matcher `Edit|MultiEdit|Write|NotebookEdit|Bash`) runs `state_tool.py
 - Bash commands are blocked when they run a mutating git / jj / gh command (the deny-list described in section 1), including inside `sh -c` and command substitution. Read-only forms pass.
 - A block exits 2 with a message starting `[session-supervisor guard] blocked:` that names the matched command. Any other failure of the guard (missing or stale script, malformed input) lets the call through, which is why the Capability check looks for the guard entry.
 - Worker sessions run in repository worktrees or their own directories and never load `<dir>/.claude/settings.json`, so the guard does not affect them.
+- `state_tool.py follow-ups` writes only the candidate under `<dir>` (it refuses `state.json` and any path outside a supervisor directory itself, because the guard does not see writes made from Python). The `pr-state` observer (6.4) runs only read-only `gh` commands (`gh auth status`, `gh pr view`), which the guard lets through.
 - Manual recovery: if the guard misbehaves, the user removes its PreToolUse entry from `<dir>/.claude/settings.json` by hand and starts a new session. The Capability check then asks before restoring it, so a deliberate removal sticks.
 
 When telling the user to open the new session, also explain that the dashboard is a private artifact republished on every visible change, and that periodic reconciliation (about every 5 minutes while workers run) uses some usage even when nothing changes.
@@ -143,6 +152,18 @@ Every state change runs this set. Never skip it, never batch unrelated edits acr
 
 4. Exit 0 means the state was committed; it prints `{"rev": n, "dashboard_changed": bool}`. If `dashboard_changed` is true, republish the dashboard (6.5). If the output also has `dashboard_error`, the HTML was not updated (a warning is on stderr); the next commit rewrites it, so continue and skip republishing until then.
 5. Non-zero exit means nothing was written: the `error:` lines on stderr name each violated invariant or malformed field, and `state.json` and `dashboard.html` are unchanged. Copy `state.json` again (never reuse the rejected candidate), redo the edit correctly, and commit again. Never bypass the invariants.
+6. Follow-ups: in every candidate that records a newly verified `pr` artifact (6.3 step 6, 6.3 step 7 "Verification", and 6.4 for an external archive or a missing worker that reappeared), run this once, after all Edits and right before step 3:
+
+   ```bash
+   python3 "<dir>/.supervisor/state_tool.py" follow-ups --state "<dir>/state.json" --candidate "<dir>/state.next.json"
+   ```
+
+   - It adds a follow-up user action for each `## Follow-ups` rule to each `pr` url that the candidate has and `state.json` does not, and prints the added actions as JSON. Already recorded PRs never get one again, so a completed follow-up does not come back.
+   - Pass `--closed <url>` (repeatable) only for urls whose `pr.state` the observer of that same verification (`verify-git` or `repo-side`, the "Merged PR" path of 6.3 step 5) reported as `MERGED` or `CLOSED`; `pr_closed` rules are skipped for them. Never launch an extra observer just to decide `--closed`. Omit it otherwise.
+   - When a candidate replaces a `pr` artifact, remove the follow-up user actions of the old url in the same candidate; `commit` rejects a follow-up whose url is not a `pr` artifact of its task.
+   - If you edit the candidate afterwards, read the file again first: the command rewrote it.
+   - **Exit 1 is not a failure of the state-change set** (step 5 does not apply): the candidate is unchanged. Tell the user the `error:` lines once and commit the candidate as it is.
+   - To add a missed follow-up by hand (only when the user asks), run `follow-ups --candidate "<dir>/state.next.json" --task T-xxxx --url <pr-url>` instead. It does not compare with `state.json`, so it also re-adds a follow-up the user already finished.
 
 ### 5. User actions
 
@@ -160,17 +181,18 @@ The secretary classifies user actions by their wording (this table and the user-
 | "Answer the pending approval of w-xxxx in the app" | 6.4 | Reconciliation observing the worker no longer `needs_input` |
 | Missing worker, unverifiable external archive | 6.4 | The user's instruction carried out (new worker, recorded result, or cancel) |
 | "Tell w-xxxx in the app: ..." (send unavailable) | Degraded modes | The user confirming it |
+| Follow-up (has `follow_up`; wording from a `## Follow-ups` rule, e.g. "Review repo-a#42") | Section 4 step 6 (6.3 step 6, 6.3 step 7 "Verification", 6.4) | `done: pr_closed` only: the `pr-state` observer of 6.4 reporting `MERGED` or `CLOSED` for its url. Any follow-up: the user naming it as done, e.g. `T-0003 UA-0003 ("Review repo-a#42"): done` (the secretary's paste text; other wording such as "完了" counts too). Check that the named user action exists in that task and has `follow_up`, and that a quoted description matches the start of its description; if not, ask the user which one they mean |
 | Any action of a task | any | Cancelling the task (6.6) |
 
 ### 6. Procedures
 
 #### 6.0 Observation and investigation
 
-Every fact from outside `<dir>` reaches the supervisor as a result file written by an observer subagent: repository kind (6.1), base branch (6.2), verification (6.3), repo-side checks (6.4), and answers to the user's questions about repositories or files.
+Every fact from outside `<dir>` reaches the supervisor as a result file written by an observer subagent: repository kind (6.1), base branch (6.2), verification (6.3), repo-side checks (6.4), PR states of follow-ups (`pr-state`, 6.4), and answers to the user's questions about repositories or files.
 
 1. Fill the brief in [references/observer-brief.md](references/observer-brief.md) with the purpose, the target, and the result path, and run it with the subagent capability.
-2. Result path: `<dir>/.supervisor/observations/<purpose>-<id>.json`, where `<id>` is the worker id (the task id for `kind`). The name is fixed per purpose and worker or task, and each run overwrites it. A user question uses `<dir>/.supervisor/observations/question-<UTC timestamp>.md`.
-3. The subagent returns only the path. Read the file and decide yourself: the observer reports facts, the calling procedure holds the rules. A missing file, a malformed file, or a `target` that does not match counts as not observed: run the observer once more, and if that fails too, do not verify or archive and tell the user.
+2. Result path: `<dir>/.supervisor/observations/<purpose>-<id>.json`, where `<id>` is the worker id (the task id for `kind`, the fixed value `follow-ups` for `pr-state`). The name is fixed per purpose and worker or task, and each run overwrites it. A user question uses `<dir>/.supervisor/observations/question-<UTC timestamp>.md`.
+3. The subagent returns only the path. Read the file and decide yourself: the observer reports facts, the calling procedure holds the rules. A missing file, a malformed file, or a `target` that does not match counts as not observed: run the observer once more, and if that fails too, do not verify or archive and tell the user. Exception for `pr-state` (6.4): if the subagent cannot be launched, defer to the next user turn without telling the user; if it was launched but the result is still missing or malformed after the second run, change no user action and tell the user once per conversation.
 4. Questions and investigations about code or files go to an observer with purpose `question`; relay its answer from the result file. Never read target files yourself, not even as a fallback.
 5. If a subagent cannot be launched in the current turn, defer (section 8).
 
@@ -251,6 +273,12 @@ Call list with `include_archived: true` and `limit: 100`. Do not use `linked`. M
 - Listed as active: update `observed_state` (`running` while running, otherwise `idle`) and `observed_at`. If the worker's latest events (event-reading capability) end in a pending permission request or an auto-mode classifier stop, set `needs_input` and add the user action "Answer the pending approval of w-xxxx in the app". Hand a non-running worker to 6.3.
 - `intended_state: archived`, not yet observed archived, and not running: call archive again with the same `reason` and the refusal branching of 6.3 step 6. Do this regardless of `message_ref`, since a worker can finish background work without a new message.
 - Listed as archived while `intended_state` is not `archived` (the user or the app archived it, e.g. after a PR merge): set `observed_state: archived`; the task derives `needs_user`. Verify the result on the repo side through an observer (6.0, purpose `repo-side` in `cwd`, since the worktree may be gone; non-git: `verify-files`). A merged PR whose head equals the recorded commit is enough (6.3 step 5, "Merged PR"). Otherwise `branch_exists` is true, `commit_count` (`base_branch..branch`) is 1 or more, and the PR / remote rules of 6.3 step 5 hold for `branch_head`; non-git: the reported files exist. If verified, record the artifacts (and the push-decision user action for `commit` delivery) and set `intended_state: archived` in one candidate; `archive_consent` is not needed for a worker already observed archived. Otherwise add a user action that names the branch or directory and asks whether to start a new worker or cancel the task.
+- Follow-ups with `done: pr_closed`: **only in the 6.4 at the start of a turn that begins with the user's message**, after matching the list, and only when at least one such user action exists. Never try this in an automatic continuation or a `/loop` turn; the `/loop` rule above does not change.
+  - If `<dir>/.supervisor/observations/pr-state-follow-ups.json` has an `observed_at` within about 5 minutes and its `target.urls` is the same set as the current `pr_closed` follow-up urls, use it as is. Otherwise run one observer (6.0, purpose `pr-state`, target `urls` = all those urls).
+  - Apply the result only to urls that are in its `target.urls` and still belong to a `pr_closed` follow-up; a different set alone is not a target mismatch and does not trigger a rerun. Remove every follow-up reported `MERGED` or `CLOSED` in one candidate.
+  - `auth_ok: false`: tell the user once in this conversation that `gh` is not authenticated, and do not repeat it in later turns (nothing is recorded in the state).
+  - A url whose `state` is `null` for another reason: mention it in one line of this turn's reply.
+  - A missing or malformed result: follow 6.0 step 3 and its `pr-state` exception.
 - Not listed: call get for that session. If still not found, set `missing` and add a user action asking whether to start a new worker or cancel the task. Never treat it as done. A `missing` worker still intended `running` keeps its task active, so either answer sets it to `intended_state: archived`, which counts it as finished (no archive call, no `archive_consent` needed): for a new worker, do this in the candidate that adds the new worker; for cancel, see 6.6. If a worker you gave up as `missing` (intended archived) shows up in the list again, do not just update its observed state: either set it back to `intended_state: running` and handle it as a live worker, or verify its deliverables through an observer (`repo-side` or `verify-files`) and archive it as in 6.3 step 6.
 
 Run the state-change set only when something differs.
@@ -263,6 +291,7 @@ Run the state-change set only when something differs.
 4. The displayed rev may lag behind `state.json`; that is acceptable.
 5. If Artifacts are unavailable, give the user the local path `<dir>/dashboard.html` instead.
 6. Each task card header and archived entry shows the task ID as a click-to-copy button (label `Copy T-0007`, keyboard-focusable, briefly shows `Copied`; falls back to selecting the ID when the clipboard is refused) that copies exactly the ID, so the user can paste it into chat. There are no separate Copy buttons.
+7. A task whose only remaining user actions are follow-ups stays on the dashboard, together with its archived workers, until the last follow-up is removed.
 
 #### 6.6 Cancel
 
@@ -275,7 +304,7 @@ When the user says a task should stop (e.g. "stop", "cancel", "やめて", "不�
 
 ### 7. Recovery (compact / resume / clear / re-creation)
 
-The SessionStart hook runs `state_tool.py digest` and injects at most 10,000 characters: the state and dashboard paths, `rev`, the dashboard URL, `session_ids`, whether `archive_consent` exists, user actions, one line per task, and the instruction to run the Capability check and reconciliation before acting. If the digest is missing (hook did not fire), run it yourself:
+The SessionStart hook runs `state_tool.py digest` and injects at most 10,000 characters: the state and dashboard paths, `rev`, the dashboard URL, `session_ids`, whether `archive_consent` exists, user actions (a follow-up ends with `[follow-up <rule> <done>]` and its PR url when the description does not contain it), one line per task, and the instruction to run the Capability check and reconciliation before acting. If the digest is missing (hook did not fire), run it yourself:
 
 ```bash
 python3 "<dir>/.supervisor/state_tool.py" digest --state "<dir>/state.json"
@@ -297,7 +326,7 @@ Then:
 | send does not reach the worker | Replace nudges and relays with the user action "Tell w-xxxx in the app: ...". |
 | Latest message unreadable or the fence is mangled | Ask the worker to resend the report as single-line JSON in the same fence. If that also fails, ask the user to paste the worker's final message. Never parse the turn-end note. |
 | Neither `sourceBranch` nor `origin/HEAD` is available | Run `verify-git` with an empty `base_branch`; the observer then counts commits not on any remote (`commit_count_basis: not-remotes`), which must be 1 or more. |
-| Subagent cannot be launched (for example refused in an automatic continuation or a `/loop` turn) | Do not verify and do not archive; never observe yourself. Set `next_action` to `verify w-xxxx on the next user message` and verify in the next turn that carries the user's words. |
+| Subagent cannot be launched (for example refused in an automatic continuation or a `/loop` turn) | Do not verify and do not archive; never observe yourself. Set `next_action` to `verify w-xxxx on the next user message` and verify in the next turn that carries the user's words. For `pr-state`, defer to the start of the next user turn, leave `next_action` unchanged, and do not tell the user. |
 
 ### 9. Uninstall
 
@@ -323,3 +352,5 @@ Then:
 - The delete capability was never called, and the branches of archived workers still exist (`branch_exists` from a `repo-side` observer).
 - The dashboard URL in `supervisor.dashboard.url` is unchanged after republishes and recoveries.
 - While any worker is `running`, `idle`, or `needs_input`, periodic reconciliation is active; with none, it is stopped.
+- Every `pr` artifact recorded in this session has the follow-up user actions its `## Follow-ups` rules require (none when the section is absent or invalid).
+- A `pr_closed` follow-up whose PR was merged or closed is gone after the first user turn that followed the merge or close.

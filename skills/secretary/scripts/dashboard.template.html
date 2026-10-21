@@ -56,14 +56,17 @@ ul { list-style: none; margin: 0; padding: 0; }
 .top__eyebrow { font: 700 0.72rem/1.2 var(--font-print); letter-spacing: 0.3em; text-transform: uppercase; color: var(--g-print); }
 .top h1 { font: 400 1.4rem/1.2 var(--font-hand); }
 .top__asof { font: 400 0.75rem/1.2 var(--font-mono); color: var(--g-soft); }
-main { display: grid; gap: 28px; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); grid-template-areas: "hero hero" "dec side"; column-gap: 28px; align-items: start; }
+/* The last row takes the side column's extra height, so Your tasks and Decisions stay stacked without a gap. */
+main { display: grid; gap: 28px; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); grid-template-areas: "hero hero" "tasks side" "dec side"; grid-template-rows: auto auto 1fr; column-gap: 28px; align-items: start; }
+main[data-no-tasks] { grid-template-areas: "hero hero" "dec side"; grid-template-rows: auto 1fr; }
 main > * { min-width: 0; }
 .hero { grid-area: hero; }
+.your-tasks { grid-area: tasks; }
 .decisions { grid-area: dec; }
 .side { grid-area: side; display: grid; gap: 28px; min-width: 0; }
 
 .section-label { display: flex; align-items: baseline; gap: 8px; font: 700 0.8rem/1.2 var(--font-print); letter-spacing: 0.2em; text-transform: uppercase; color: var(--print); padding-bottom: 6px; margin-bottom: 14px; border-bottom: 3px double var(--print); }
-.decisions > .section-label { color: var(--g-print); border-bottom-color: var(--g-print); }
+.decisions > .section-label, .your-tasks > .section-label { color: var(--g-print); border-bottom-color: var(--g-print); }
 .count { font: 700 0.8rem/1 var(--font-mono); letter-spacing: 0; font-variant-numeric: tabular-nums; }
 .label { display: block; font-size: 0.78rem; color: var(--ink-soft); }
 .empty { color: var(--g-soft); font-family: var(--font-hand); font-size: 1.05rem; }
@@ -109,6 +112,21 @@ main > * { min-width: 0; }
 .paste { font: 400 0.76rem/1.45 var(--font-mono); background: var(--paper-2); color: var(--ink); padding: 6px 8px; white-space: pre-wrap; }
 .paste:hover { background: var(--hover-bg); }
 
+/* your tasks: one to-do sheet from the same pad; only an overdue due date turns red */
+.task-list { background: var(--paper); color: var(--ink); padding: 6px 16px 10px; box-shadow: 0 1px 2px var(--shadow); }
+.task { display: grid; gap: 6px; padding: 12px 0 12px 1.6em; border-bottom: 1px solid var(--rule); position: relative; }
+.task:last-child { border-bottom: 0; }
+.task::before { content: ""; position: absolute; left: 0; top: 1.05em; width: 0.9em; height: 0.9em; border: 1.5px solid var(--print); }
+.task__head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.task__head .id { font: 700 0.78rem/1 var(--font-mono); color: var(--print); }
+.task__text { flex: 1 1 14rem; font: 400 1.1rem/1.5 var(--font-hand); }
+.task__meta { font: 500 0.8rem/1.6 var(--font-print); color: var(--print); }
+.task__meta b { font: 400 1rem/1 var(--font-hand); color: var(--ink); }
+.task[data-overdue] .task__meta b { color: var(--red); }
+.task[data-overdue] .task__meta b::after { content: " overdue"; }
+.task__hint { font-size: 0.78rem; color: var(--ink-soft); }
+.task__done { font-size: 0.8rem; color: var(--ink-soft); display: grid; gap: 4px; }
+
 /* rubber stamps */
 .badge {
   justify-self: start; display: inline-block; white-space: nowrap;
@@ -146,10 +164,11 @@ main > * { min-width: 0; }
 }
 button.copyable { font: inherit; letter-spacing: inherit; color: inherit; text-align: inherit; background: none; border: 0; padding: 0; margin: 0; }
 button.paste.copyable { font: 400 0.76rem/1.45 var(--font-mono); background: var(--paper-2); padding: 6px 8px; }
-.dec__head .id.copyable { font: 700 0.78rem/1 var(--font-mono); }
+.dec__head .id.copyable, .task__head .id.copyable { font: 700 0.78rem/1 var(--font-mono); }
 
 @media (max-width: 760px) {
-  main { grid-template-columns: minmax(0, 1fr); grid-template-areas: "hero" "dec" "side"; }
+  main { grid-template-columns: minmax(0, 1fr); grid-template-areas: "hero" "tasks" "dec" "side"; grid-template-rows: none; }
+  main[data-no-tasks] { grid-template-areas: "hero" "dec" "side"; grid-template-rows: none; }
 }
 @media (max-width: 560px) {
   .hero__num { font-size: 2.4rem; }
@@ -164,8 +183,9 @@ button.paste.copyable { font: 400 0.76rem/1.45 var(--font-mono); background: var
 <div class="top__title"><p class="top__eyebrow">Secretary</p><h1>Dashboard</h1></div>
 <p class="top__asof" data-asof></p>
 </header>
-<main>
+<main{{MAIN_ATTRS}}>
 {{HERO}}
+{{YOUR_TASKS}}
 {{DECISIONS}}
 <div class="side">
 {{TODAY}}

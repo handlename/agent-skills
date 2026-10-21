@@ -9,15 +9,16 @@ description: Run a resident secretary session in the Claude desktop app that col
 
 One secretary session, opened in a dedicated non-git directory (the secretary directory, default `~/secretary`), gathers information from two kinds of sources:
 
-1. the session-supervisor's `state.json`, read-only: every `tasks[].user_actions[]` entry becomes a pending decision, and
-2. external agents listed under `## Sources` in `<dir>/CLAUDE.md`: for each source whose interval has expired, the secretary starts a fresh query session in that source's directory and ingests its `secretary-report` block.
+1. the session-supervisor's `state.json`, read-only: every `tasks[].user_actions[]` entry becomes an item. One with `follow_up` is a follow-up (remaining work for the user, e.g. reviewing a PR the supervisor verified); every other one is a pending decision, and
+2. external agents listed under `## Sources` in `<dir>/CLAUDE.md`: for each source whose interval has expired, the secretary starts a fresh query session in that source's directory and ingests its `secretary-report` block. Their items are always pending decisions.
 
-It merges them into "today" items and "decisions" (pending decisions with optional due dates), publishes one dashboard artifact, and relays the user's answers:
+It merges them into "today" items and `decisions[]` (pending decisions and follow-ups, each with an optional due date), publishes one dashboard artifact, and relays the user's answers:
 
-- supervisor decisions are never sent to the supervisor. The secretary prepares paste text with the user's verbatim words (`paste`), or tells the user which app operation to perform (`app`);
+- the dashboard shows follow-ups under "Your tasks" and every other item under "Decisions", each ordered by due date;
+- supervisor items are never sent to the supervisor. The secretary prepares paste text with the user's verbatim words (`paste`, which every follow-up uses to report completion), or tells the user which app operation to perform (`app`);
 - external decisions from a `relay: yes` source are relayed by starting a relay session in that source's directory (`start`); `relay: no` sources are display-only (`none`).
 
-An item leaves the dashboard only when its source stops reporting it. The secretary adds due dates and relay records, nothing else.
+An item leaves the dashboard only when its source stops reporting it; a follow-up leaves when the supervisor removes its user action. The secretary adds due dates and relay records, nothing else.
 
 Determinism lives in `scripts/state_tool.py` (Python 3 stdlib): `## Sources` parsing, validated atomic commits, merging, classification, due checks, dashboard rendering, the recovery digest, and report parsing. The secretary (the LLM) only operates session tools and interprets the user's words.
 
@@ -243,9 +244,9 @@ Run the state-change set only when something differs.
 
 ### 7. Due dates
 
-When the user sets a due date (e.g. "D-0011 の期限は金曜"):
+When the user sets a due date (e.g. "D-0011 の期限は金曜"), for a pending decision or a follow-up alike:
 
-1. Identify the decision by `D-NNNN` or by its description.
+1. Identify the item by `D-NNNN` or by its description.
 2. Resolve the date to `YYYY-MM-DD` (the end of that local day) or an ISO 8601 date-time with offset. If it is ambiguous, ask the user.
 3. Set `decisions[].due` with the state-change set; `commit` validates the format. Use `null` to clear it.
 
@@ -257,7 +258,7 @@ When the user states a decision (e.g. "D-0011 は push して PR を作ってよ
 
 1. Identify the decision by `D-NNNN` or by its content. Repeat its `description` in the same reply (the user may be looking at an old dashboard), without waiting for confirmation. Only when the id is not found, or the user's words contradict the `description`, ask before relaying. Copy into `words` the user's first message that stated the decision, verbatim (line breaks kept); if you had to ask, still use that original message, not the "yes".
 2. Branch on `relay_mode`:
-   - `paste` (supervisor): show the paste text `{task_id} {ua_id} ("{first 60 characters of description}"): {words}` in the chat; the dashboard shows it as click-to-copy. In one candidate, add `{id: R-NNNN, decision_id, decision_key, mode: paste, target: {kind: supervisor}, words, at, status: awaiting_user, session_closed_at: null}` and set the decision's `relay_id`. Do not send anything. Tell the user to paste it into the supervisor chat.
+   - `paste` (supervisor): show the paste text `{task_id} {ua_id} ("{first 60 characters of description}"): {words}` in the chat; the dashboard shows it as click-to-copy. In one candidate, add `{id: R-NNNN, decision_id, decision_key, mode: paste, target: {kind: supervisor}, words, at, status: awaiting_user, session_closed_at: null}` and set the decision's `relay_id`. Do not send anything. Tell the user to paste it into the supervisor chat. A follow-up is relayed the same way when the user says it is done (e.g. "D-0012 終わった"); the relay record and the badge are the same as for a decision.
    - `app` (supervisor): create no relay. Tell the user which operation to perform in the app (e.g. close or unpin the session, archive it, open the repo once).
    - `start` (external source with `relay: yes`):
      1. Check that the source directory exists and does not overlap the supervisor's running non-git workers:
@@ -271,7 +272,7 @@ When the user states a decision (e.g. "D-0011 は push して PR を作ってよ
      3. Start the relay session from the relay brief in [references/agent-prompt.md](references/agent-prompt.md), with the same start options as 6.1 step 3.
      4. On success, record `session_id` and set the session `running`; that commit moves the relay from `pending` to `sent`. If start is refused, set the relay `failed` and remove the session entry.
    - `none` (external source with `relay: no`): do not relay. Tell the user to handle it at the source.
-3. Badges are rendered by the script (Relay badges in [references/state-schema.md](references/state-schema.md)). A relayed item stays in the decisions list until its source stops reporting it, which marks the relay `confirmed`.
+3. Badges are rendered by the script (Relay badges in [references/state-schema.md](references/state-schema.md)). A relayed item stays in its list until its source stops reporting it, which marks the relay `confirmed`. For a follow-up, that is when the supervisor removes the user action after the user pastes the completion, or, for `done: pr_closed`, after its PR is merged or closed.
 
 ### 9. Dashboard
 
@@ -279,10 +280,11 @@ When the user states a decision (e.g. "D-0011 は push して PR を作ってよ
 2. Within the same conversation, republish the same file path whenever `dashboard_changed` is true.
 3. After a recovery or a new secretary session, read the artifact by `secretary.dashboard.url`, then publish to that `url` so the link stays the same.
 4. Decision ids (`D-NNNN`) and paste texts are click-to-copy so the user can paste them into a chat.
+5. The hero counts overdue items (follow-ups included), decisions, and your tasks. "Your tasks" sits above "Decisions" and lists each follow-up by due date with its PR link, its due date or "Tell me a due date to set one", and its completion paste text (`... ("Review repo-a#42"): done`, or the user's words once a relay awaits the paste). With no follow-ups, the section is not rendered and `<main>` gets `data-no-tasks` (filled into the template's `{{MAIN_ATTRS}}`).
 
 ### 10. Recovery (compact / resume / clear / re-creation)
 
-The SessionStart hook runs `state_tool.py digest` and injects at most 10,000 characters: the state and dashboard paths, `rev`, the dashboard URL, `session_ids`, whether `archive_consent` exists, `sources_error`, the supervisor read status, each source's last fetch and whether it is stale, `sessions[]`, requests to the user (pending approvals, archive and unpin requests), overdue decisions (judged at hook time), the top 20 decisions by due date, unconfirmed relays, and the instruction to run the Capability check and Refresh before acting. If the digest is missing, run it yourself:
+The SessionStart hook runs `state_tool.py digest` and injects at most 10,000 characters: the state and dashboard paths, `rev`, the dashboard URL, `session_ids`, whether `archive_consent` exists, `sources_error`, the supervisor read status, each source's last fetch and whether it is stale, `sessions[]`, requests to the user (pending approvals, archive and unpin requests), overdue items (judged at hook time; follow-ups are marked `[your task]`), the top 20 decisions by due date, the top 20 follow-ups by due date (your tasks, each with its PR url), unconfirmed relays, and the instruction to run the Capability check and Refresh before acting. If the digest is missing, run it yourself:
 
 ```bash
 python3 "<dir>/.secretary/state_tool.py" digest --state "<dir>/state.json"

@@ -25,7 +25,7 @@ A personal collection of custom AI Agent Skills compatible with `gh skill instal
 ## Session orchestration: supervisor and secretary
 
 `session-supervisor` and `secretary` both run as resident sessions in the Claude desktop app, each in its own non-git directory.
-They split work by ownership: **the supervisor owns the tasks the user gives it directly (running and verifying them); the secretary owns the collection and due dates of decisions that other agents (the supervisor and external agents) are waiting on.**
+They split work by ownership: **the supervisor owns the tasks the user gives it directly (running and verifying them, and the follow-up tasks left for the user once they are verified); the secretary owns the collection and due dates of decisions that other agents (the supervisor and external agents) are waiting on, and of the supervisor's follow-up tasks.**
 A relay only delivers the user's answer; it never moves ownership of the work.
 
 <!-- Source: docs/session-orchestration.mmd (mermaid). Regenerate the SVG with the mermaid-to-svg skill after editing it. -->
@@ -33,16 +33,17 @@ A relay only delivers the user's answer; it never moves ownership of the work.
 
 | | `session-supervisor` | `secretary` |
 | :--- | :--- | :--- |
-| Owns | Splitting the user's tasks by directory, starting workers, verifying (through subagents) committed branches or recorded files, archiving workers, its own `state.json` and dashboard | Merging pending decisions from the supervisor and external sources, their due dates, relaying the user's verbatim answers, its own `state.json` and dashboard |
+| Owns | Splitting the user's tasks by directory, starting workers, verifying (through subagents) committed branches or recorded files, archiving workers, follow-up tasks for the user (created by `## Follow-ups` rules, removed on the observed PR state or the user's report), its own `state.json` and dashboard | Merging pending decisions and follow-up tasks from the supervisor and external sources, their due dates, relaying the user's verbatim answers, its own `state.json` and dashboard |
 | Never does | Responding to or coordinating with the secretary | Writing the supervisor's `state.json` or directory, messaging the supervisor, owning the work behind a decision |
 
 ### Interaction rules
 
 - The dependency is one-way: the secretary depends on the supervisor, and the supervisor works the same with or without a secretary.
-- The secretary opens the supervisor's `state.json` read-only and turns each `tasks[].user_actions[]` entry into a pending decision.
+- The secretary opens the supervisor's `state.json` read-only and turns each `tasks[].user_actions[]` entry into a pending decision, or into an entry under "Your tasks" when it carries `follow_up`.
 - The secretary never messages the supervisor. A supervisor decision is answered by pasting the secretary's paste text into the supervisor chat, or by an operation in the app.
 - Before starting a relay session in a source directory, the secretary checks that the directory does not overlap a running non-git worker of the supervisor (busy check).
 - The secretary directory must not be, contain, or sit inside the supervisor directory.
+- Follow-ups: the supervisor adds a follow-up user action (e.g. "Review repo-a#42") for each newly verified PR by the `## Follow-ups` rules in its `CLAUDE.md`, and removes it when an observer reports the PR merged or closed (`done: pr_closed`) or when the user reports it done. The secretary lists follow-ups under "Your tasks" by due date; completion goes back as paste text, e.g. `T-0003 UA-0003 ("Review repo-a#42"): done`.
 - The supervisor's `state.json` fields and user-action wording are the secretary's input contract; see [Read by the secretary](skills/session-supervisor/references/state-schema.md#read-by-the-secretary).
 
 ### Which one to ask
@@ -62,6 +63,7 @@ A relay only delivers the user's answer; it never moves ownership of the work.
 | Reminders for decisions close to their due date | Secretary: due-date management |
 | A new kind of external source | Secretary: collecting decisions |
 | Watching CI of a PR a worker opened, before archiving the worker | Supervisor: verifying the task's result |
+| A new kind of follow-up (e.g. after a merged PR, or a new `done` condition) | Supervisor: the `## Follow-ups` rules; the secretary only shows them under "Your tasks" |
 
 
 ## Plugins

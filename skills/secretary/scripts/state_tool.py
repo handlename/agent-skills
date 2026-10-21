@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """State tool for the secretary skill.
 
-Functional core: parse_sources, due_sources, classify_supervisor_ua, worker_overlap, validate, next_state,
+Functional core: parse_sources, due_sources, classify_supervisor_ua, is_follow_up, worker_overlap, validate, next_state,
 merge_supervisor, merge_source, apply_report, relay_badges, parse_report, sort_decisions, render, digest, serialize.
 Imperative shell: the argparse subcommands at the bottom of this file.
 """
@@ -320,9 +320,19 @@ def classify_supervisor_ua(description):
     return next((mode for mode, pattern in SUPERVISOR_UA_RULES if pattern.search(text)), "paste")
 
 
+def is_follow_up(decision):
+    """A supervisor user action that carries `follow_up` is the user's own task, shown under Your tasks; a missing key means null."""
+    return decision.get("follow_up") is not None
+
+
+def _supervisor_relay_mode(decision):
+    # A follow-up is closed by pasting a completion report, whatever its wording says.
+    return "paste" if is_follow_up(decision) else classify_supervisor_ua(decision["description"])
+
+
 def _expected_relay_mode(decision, defs):
     if decision["source"] == RESERVED_SOURCE:
-        return classify_supervisor_ua(decision["description"])
+        return _supervisor_relay_mode(decision)
     src = defs.get(decision["source"])
     return "start" if src and src["relay"] else "none"
 
@@ -337,6 +347,10 @@ def _occupies_cwd(worker):
 
 def worker_overlap(sv_state, directory):
     return any(_occupies_cwd(w) and _overlap(w["cwd"], directory) for w in sv_state.get("workers", []))
+
+
+def _follow_up_ok(value):
+    return isinstance(value, dict) and all(isinstance(value.get(k), str) for k in ("rule", "url", "done"))
 
 
 def supervisor_errors(sv):
@@ -366,6 +380,10 @@ def supervisor_errors(sv):
         uas = t.get("user_actions", [])
         if not isinstance(uas, list) or not all(isinstance(ua, dict) and all(isinstance(ua.get(k), str) for k in ("id", "description", "since")) for ua in uas):
             errors.append(f"supervisor task {t['id']}: user_actions must be {{id, description, since}} strings")
+            continue
+        for ua in uas:
+            if ua.get("follow_up") is not None and not _follow_up_ok(ua["follow_up"]):
+                errors.append(f"supervisor task {t['id']} {ua['id']}: follow_up must be {{rule, url, done}} strings or null")
     for i, w in enumerate(workers):
         if not isinstance(w, dict) or not all(isinstance(w.get(k), str) for k in ("kind", "cwd", "intended_state", "observed_state")):
             errors.append(f"supervisor workers[{i}] needs string kind, cwd, intended_state and observed_state")
@@ -424,6 +442,8 @@ def _shape_errors(state):
             errors.append(f"decision {d['id']}: due must be a string or null")
         elif d.get("relay_id") is not None and not isinstance(d.get("relay_id"), str):
             errors.append(f"decision {d['id']}: relay_id must be a string or null")
+        elif d.get("follow_up") is not None and not _follow_up_ok(d["follow_up"]):
+            errors.append(f"decision {d['id']}: follow_up must be {{rule, url, done}} strings or null")
     for r in state["relays"]:
         if not all(isinstance(r.get(k), str) for k in ("id", "decision_id", "mode", "status")):
             errors.append("relays[] needs string id, decision_id, mode and status")
@@ -668,17 +688,17 @@ def _confirm_relay(state, relay_id):
 
 
 def _merge_decisions(state, source, items, relay_mode_of):
-    """Upsert decisions of one source from (key, ref, description, since) and drop the keys the source no longer reports."""
+    """Upsert decisions of one source from (key, ref, description, since, follow_up) and drop the keys the source no longer reports."""
     existing = {d["key"]: d for d in state["decisions"] if d["source"] == source}
     seen = set()
-    for key, ref, description, since in items:
+    for key, ref, description, since, follow_up in items:
         seen.add(key)
         d = existing.get(key)
         if d is None:
             d = {"id": _next_id(state, "decision"), "key": key, "source": source, "ref": ref,
                  "description": description, "since": since, "due": None, "relay_mode": None, "relay_id": None}
             state["decisions"].append(d)
-        d.update(description=description, ref=ref, since=since)
+        d.update(description=description, ref=ref, since=since, follow_up=copy.deepcopy(follow_up))
         d["relay_mode"] = relay_mode_of(d)
     for key, d in existing.items():
         if key not in seen and d.get("relay_id"):
@@ -694,9 +714,10 @@ def merge_supervisor(state, sv_state, now):
     if errors:
         sup.update(error="; ".join(errors), read_at=now)
         return state
-    items = [(f"supervisor/{t['id']}/{ua['id']}@{ua['since']}", {"task_id": t["id"], "ua_id": ua["id"]}, ua["description"], ua["since"])
+    items = [(f"supervisor/{t['id']}/{ua['id']}@{ua['since']}", {"task_id": t["id"], "ua_id": ua["id"]}, ua["description"], ua["since"],
+              ua.get("follow_up"))
              for t in sv_state["tasks"] for ua in t.get("user_actions", [])]
-    _merge_decisions(state, RESERVED_SOURCE, items, lambda d: classify_supervisor_ua(d["description"]))
+    _merge_decisions(state, RESERVED_SOURCE, items, _supervisor_relay_mode)
     url = (sv_state["supervisor"].get("dashboard") or {}).get("url")
     sup.update(read_at=now, state_rev=sv_state["rev"], dashboard_url=url if _is_http_url(url) else None, error=None)
     return state
@@ -717,7 +738,7 @@ def merge_source(state, source_id, report, session, now, relay=None):
     state["today"] = [t for t in state["today"] if t["source"] != source_id] + [
         {"key": f"{source_id}/{t['id']}", "source": source_id, "title": t["title"], "link": t.get("link") or None}
         for t in report.get("today", [])]
-    items = [(f"{source_id}/{d['id']}", {"item_id": d["id"]}, d["description"], d.get("since") or None)
+    items = [(f"{source_id}/{d['id']}", {"item_id": d["id"]}, d["description"], d.get("since") or None, None)
              for d in report.get("decisions", [])]
 
     def mode_of(d):
@@ -948,15 +969,67 @@ def _session_requests(state):
 
 
 def _render_hero(state, now):
-    n = len(state["decisions"])
+    n = sum(1 for d in state["decisions"] if not is_follow_up(d))
+    tasks = len(state["decisions"]) - n
     overdue = sum(1 for d in state["decisions"] if is_overdue(d.get("due"), now))
     attr = f' data-overdue="{overdue}"' if overdue else ""
-    sub = f"{n} decision{'s' if n != 1 else ''} waiting on you" if n else "Nothing waits on your decision."
+    waiting = []
+    if n:
+        waiting.append(f"{n} decision{'s' if n != 1 else ''}")
+    if tasks:
+        waiting.append(f"{tasks} task{'s' if tasks != 1 else ''}")
+    sub = f"{' and '.join(waiting)} waiting on you" if waiting else "Nothing waits on you."
     return (f'<section class="hero" id="summary"{attr} aria-labelledby="hero-label">'
             f'<div class="hero__stat"><p class="hero__num" data-overdue-count>{overdue}</p><p class="hero__cap">overdue</p></div>'
             f'<div class="hero__stat"><p class="hero__num">{n}</p><p class="hero__cap">decisions</p></div>'
-            f'<div class="hero__words"><h2 class="hero__label" id="hero-label">{"Overdue" if overdue else ("Waiting" if n else "All clear")}</h2>'
+            f'<div class="hero__stat"><p class="hero__num">{tasks}</p><p class="hero__cap">your tasks</p></div>'
+            f'<div class="hero__words"><h2 class="hero__label" id="hero-label">{"Overdue" if overdue else ("Waiting" if waiting else "All clear")}</h2>'
             f'<p class="hero__sub">{sub}</p></div></section>')
+
+
+def _due_parts(d, now, tz):
+    """(row attributes, due text) shared by Decisions and Your tasks rows."""
+    overdue = " data-overdue" if is_overdue(d.get("due"), now) else ""
+    deadline = _deadline_iso(d.get("due"), tz)
+    due_attr = f' data-due="{_esc(deadline)}"' if deadline else ""
+    due = f'due <b>{_esc(d["due"])}</b>' if d.get("due") else '<span class="nodue">no due</span>'
+    return overdue + due_attr, due
+
+
+def _badge_html(badges, decision_id):
+    b = badges.get(decision_id)
+    if b is None:
+        return ""
+    blockers = "".join(f"<li>{_esc(x)}</li>" for x in b["blockers"]) if b["status"] == "failed" else ""
+    return (f'<span class="badge" data-relay="{_esc(b["status"])}">{_esc(b["label"])}</span>'
+            + (f'<ul class="dec__blockers">{blockers}</ul>' if blockers else ""))
+
+
+def _render_your_tasks(state, now):
+    """Supervisor follow-ups (e.g. reviewing a PR); empty string when there are none so the section is not shown."""
+    tasks = [d for d in state["decisions"] if is_follow_up(d)]
+    if not tasks:
+        return ""
+    tz = datetime.fromisoformat(now).tzinfo
+    relays = _by_id(state["relays"])
+    badges = relay_badges(state)
+    rows = []
+    for d in sort_decisions(tasks, now):
+        attrs, due = _due_parts(d, now, tz)
+        since = f' · since {_esc(d["since"])}' if d.get("since") else ""
+        hint = "" if d.get("due") else '<p class="task__hint">Tell me a due date to set one</p>'
+        relay = relays.get(d.get("relay_id"))
+        words = relay["words"] if relay and relay["status"] == "awaiting_user" else ""
+        label = "Paste into the supervisor chat" if words else "When it is done, tell me, or paste this into the supervisor chat"
+        url = d["follow_up"]["url"]
+        rows.append(
+            f'<li class="task"{attrs}>'
+            f'<p class="task__head">{_copy("id", d["id"])}<span class="task__text">{_esc(d["description"])}</span>{_badge_html(badges, d["id"])}</p>'
+            f'<p class="task__meta">{_link_or_text(url, url)} · {due}{since}</p>{hint}'
+            f'<div class="task__done" data-mode="paste"><span class="label">{label}</span>'
+            f'{_copy("paste", paste_text(d, words or "done"), "paste text for " + d["id"])}</div></li>')
+    return (f'<section class="your-tasks" id="your-tasks" aria-labelledby="your-tasks-label"><h2 class="section-label" id="your-tasks-label">'
+            f'Your tasks <span class="count">{len(rows)}</span></h2><ul class="task-list">{"".join(rows)}</ul></section>')
 
 
 def _relay_guide(d, relay):
@@ -978,21 +1051,12 @@ def _render_decisions(state, now):
     relays = _by_id(state["relays"])
     badges = relay_badges(state)
     rows = []
-    for d in sort_decisions(state["decisions"], now):
-        overdue = " data-overdue" if is_overdue(d.get("due"), now) else ""
-        deadline = _deadline_iso(d.get("due"), tz)
-        due_attr = f' data-due="{_esc(deadline)}"' if deadline else ""
-        due = f'due <b>{_esc(d["due"])}</b>' if d.get("due") else '<span class="nodue">no due</span>'
+    for d in sort_decisions([d for d in state["decisions"] if not is_follow_up(d)], now):
+        attrs, due = _due_parts(d, now, tz)
         since = f' · since {_esc(d["since"])}' if d.get("since") else ""
-        badge = ""
-        if d["id"] in badges:
-            b = badges[d["id"]]
-            blockers = "".join(f"<li>{_esc(x)}</li>" for x in b["blockers"]) if b["status"] == "failed" else ""
-            badge = (f'<span class="badge" data-relay="{_esc(b["status"])}">{_esc(b["label"])}</span>'
-                     + (f'<ul class="dec__blockers">{blockers}</ul>' if blockers else ""))
         rows.append(
-            f'<li class="dec" data-mode="{_esc(d["relay_mode"])}"{overdue}{due_attr}>'
-            f'<p class="dec__head">{_copy("id", d["id"])}<span class="dec__text">{_esc(d["description"])}</span>{badge}</p>'
+            f'<li class="dec" data-mode="{_esc(d["relay_mode"])}"{attrs}>'
+            f'<p class="dec__head">{_copy("id", d["id"])}<span class="dec__text">{_esc(d["description"])}</span>{_badge_html(badges, d["id"])}</p>'
             f'<p class="dec__meta"><span class="dec__src">{_esc(d["source"])}</span> · {due}{since}</p>'
             f'{_relay_guide(d, relays.get(d.get("relay_id")))}</li>')
     body = f'<ul class="dec-list">{"".join(rows)}</ul>' if rows else '<p class="empty">No decisions waiting.</p>'
@@ -1058,8 +1122,11 @@ def render(state, template, now, missing=frozenset()):
 
     `missing` holds the ids of sources whose directory does not exist.
     """
+    tasks = _render_your_tasks(state, now)
     body = (
-        template.replace("{{HERO}}", _render_hero(state, now))
+        template.replace("{{MAIN_ATTRS}}", "" if tasks else " data-no-tasks")
+        .replace("{{HERO}}", _render_hero(state, now))
+        .replace("{{YOUR_TASKS}}", tasks)
         .replace("{{DECISIONS}}", _render_decisions(state, now))
         .replace("{{TODAY}}", _render_today(state))
         .replace("{{SOURCES}}", _render_sources(state, now, missing))
@@ -1114,14 +1181,19 @@ def digest(state, state_path, now, limit=DIGEST_LIMIT):
     lines.append("requests to the user:")
     lines += [f"- {r}" for r in _session_requests(state)] or ["- (none)"]
     lines.append("overdue decisions:")
-    lines += [f"- {d.get('id')} due {d.get('due')}: {d.get('description')}" for d in decisions if is_overdue(d.get("due"), now)] or ["- (none)"]
-    lines.append(f"decisions by due (top {DIGEST_DECISIONS}):")
+    lines += [f"- {d.get('id')}{' [your task]' if is_follow_up(d) else ''} due {d.get('due')}: {d.get('description')}"
+              for d in decisions if is_overdue(d.get("due"), now)] or ["- (none)"]
     try:
         ordered = sort_decisions(decisions, now)
     except (KeyError, TypeError):
         ordered = decisions
+    lines.append(f"decisions by due (top {DIGEST_DECISIONS}):")
     lines += [f"- {d.get('id')} [{d.get('relay_mode')}] due {d.get('due') or '-'} {d.get('source')}: {d.get('description')}"
-              for d in ordered[:DIGEST_DECISIONS]] or ["- (none)"]
+              for d in [d for d in ordered if not is_follow_up(d)][:DIGEST_DECISIONS]] or ["- (none)"]
+    lines.append(f"your tasks by due (top {DIGEST_DECISIONS}):")
+    lines += [f"- {d.get('id')} due {d.get('due') or '-'}: {d.get('description')}"
+              + (f" <{d['follow_up'].get('url')}>" if isinstance(d["follow_up"], dict) else "")
+              for d in [d for d in ordered if is_follow_up(d)][:DIGEST_DECISIONS]] or ["- (none)"]
     lines.append("unconfirmed relays:")
     lines += [f"- {r.get('id')} {r.get('mode')} {r.get('status')} for {r.get('decision_id')}"
               for r in state.get("relays", []) if r.get("status") in ("pending", "sent", "awaiting_user", "failed", "unconfirmed")] or ["- (none)"]

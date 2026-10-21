@@ -49,7 +49,20 @@
       "since": "2026-10-17T10:30:00+09:00",
       "due": "2026-10-19",
       "relay_mode": "paste",
-      "relay_id": "R-0003"
+      "relay_id": "R-0003",
+      "follow_up": null
+    },
+    {
+      "id": "D-0012",
+      "key": "supervisor/T-0004/UA-0003@2026-10-17T10:45:00+09:00",
+      "source": "supervisor",
+      "ref": { "task_id": "T-0004", "ua_id": "UA-0003" },
+      "description": "Review repo-a#42",
+      "since": "2026-10-17T10:45:00+09:00",
+      "due": null,
+      "relay_mode": "paste",
+      "relay_id": null,
+      "follow_up": { "rule": "review-pr", "url": "https://github.com/org/repo-a/pull/42", "done": "pr_closed" }
     }
   ],
   "relays": [
@@ -125,6 +138,8 @@ Kept in step with `## Sources` by `commit` while it is valid. A new id is added 
 
 ### decisions[]
 
+Supervisor user actions and external decisions share this list. An entry whose `follow_up` is set is a follow-up: remaining work for the user (e.g. reviewing a PR), shown under "Your tasks" instead of "Decisions".
+
 | Field | Meaning |
 | :--- | :--- |
 | `id`, `key` | See Identifiers. |
@@ -135,6 +150,7 @@ Kept in step with `## Sources` by `commit` while it is valid. A new id is added 
 | `due` | `null`, `YYYY-MM-DD`, or ISO 8601 with offset. Set only on the user's instruction; merges keep it. |
 | `relay_mode` | `paste` \| `app` \| `start` \| `none`. Recomputed by the script on every merge (see relay_mode classification); `commit` rejects any other value. |
 | `relay_id` | The latest relay for this item, or `null`. |
+| `follow_up` | `null`, or `{rule, url, done}` (all strings) copied from the supervisor user action's `follow_up` on every merge. Always `null` for external items. A missing key is treated as `null`. `url` is the PR the task is about; `done` is `pr_closed` or `manual` (the supervisor decides when the follow-up is gone). Set by the merge; never edit it. |
 
 ### relays[]
 
@@ -173,7 +189,7 @@ An entry leaves `sessions[]` only when reconciliation observes it archived or `m
 ## Value ranges
 
 - `decisions[].relay_mode`:
-  - `paste`: supervisor item; the user pastes the prepared text into the supervisor chat.
+  - `paste`: supervisor item; the user pastes the prepared text into the supervisor chat. Every follow-up is `paste`.
   - `app`: supervisor item; the user performs an operation in the app. No relay can be created.
   - `start`: external item from a `relay: yes` source; relayed by a relay session.
   - `none`: external item from a `relay: no` source. No relay can be created.
@@ -184,10 +200,11 @@ An entry leaves `sessions[]` only when reconciliation observes it archived or `m
 
 ## relay_mode classification
 
-`classify_supervisor_ua(description)` decides `relay_mode` for supervisor items on every merge, so a changed `description` may change the mode. Matching is case-insensitive; rows are evaluated **from the top and the first match wins**. `start` and `restart` match on word boundaries.
+The script decides `relay_mode` for supervisor items on every merge, so a changed `description` may change the mode. A follow-up is always `paste` (order 0); for every other item `classify_supervisor_ua(description)` applies. Matching is case-insensitive; rows are evaluated **from the top and the first match wins**. `start` and `restart` match on word boundaries.
 
 | Order | Words | `relay_mode` | Origin in session-supervisor |
 | :--- | :--- | :--- | :--- |
+| 0 | `follow_up` is set (the wording is not looked at) | `paste` | Follow-ups created from a `## Follow-ups` rule (e.g. "Review repo-a#42"); the user reports completion by pasting |
 | 1 | `in the app`, `unpin`, `please archive`, `open repo` | `app` | App-operation user actions: open repo, close or unpin, please archive, answer the pending approval, tell a worker in the app (send unavailable) |
 | 2 | `waiting task`, `push`, `pull request`, `new worker`, `replace`, `restart`, `start`, `cancel`, `archive` | `paste` | The automatic waiting-task action, push decisions, missing-worker questions |
 | 3 | anything else (report blockers, unparsed summaries, `is not progressing`) | `paste` | Blocker answers; a relayed answer does not advance the supervisor's state |
@@ -205,7 +222,7 @@ External items get `start` when their source has `relay: yes` and `none` otherwi
 | `paste` | paste pending (never times out; nothing happens until the user pastes) | never | none |
 | `start` | relayed; checked at next refresh | the first query started after the relay session's archive was observed still reports the item | relay not reflected (no paste text; there is nowhere to paste) |
 
-A `failed` relay shows "relay failed" with its blockers. Paste text appears only for supervisor `paste` items: `{task_id} {ua_id} ("{first 60 characters of description}"): {words}`, or the same template with an empty `{words}` before the user answers.
+A `failed` relay shows "relay failed" with its blockers. Paste text appears only for supervisor `paste` items: `{task_id} {ua_id} ("{first 60 characters of description}"): {words}`, or the same template with an empty `{words}` before the user answers. A follow-up uses `done` as `{words}` until the user states something else (e.g. `T-0003 UA-0003 ("Review repo-a#42"): done`); a follow-up relay uses the same records and badges as a decision relay.
 
 ## Invariants
 

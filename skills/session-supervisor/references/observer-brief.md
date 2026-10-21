@@ -28,7 +28,7 @@ Write one JSON object with the fields of this purpose to the result file with th
 
 ## Result files
 
-- Path: `<dir>/.supervisor/observations/<purpose>-<id>.json`, where `<id>` is the worker id (the task id for `kind`). Each run overwrites the file.
+- Path: `<dir>/.supervisor/observations/<purpose>-<id>.json`, where `<id>` is the worker id (the task id for `kind`, the fixed value `follow-ups` for `pr-state`, which belongs to no worker or task). Each run overwrites the file.
 - User questions: `<dir>/.supervisor/observations/question-<UTC timestamp>.md`, e.g. `question-20261020T091500Z.md`.
 - Every JSON result has `purpose`, `target` (the target fields as given), `observed_at` (ISO 8601 with offset), and `errors` (a list of strings, empty when every command ran), plus the facts of its purpose.
 
@@ -129,6 +129,24 @@ Run `gh pr view` when `pr` is given; otherwise run `gh pr list`, with `<owner/na
 - `branch_exists` / `branch_head`: from `rev-parse --verify`; `branch_head` is `null` when the branch is gone.
 - `commit_count`: an integer, or `null` when the branch is gone.
 - `remote_sha` and `pr`: as in `verify-git`.
+
+### pr-state
+
+Used by SKILL.md 6.4, only at the start of a turn that begins with the user's message, while a follow-up with `done: pr_closed` exists. Target: `urls`, the PR URLs of every such follow-up as a one-line JSON array, e.g. `urls: ["https://github.com/org/repo-a/pull/42", "https://github.com/org/repo-b/pull/7"]`. Result file: `<dir>/.supervisor/observations/pr-state-follow-ups.json`.
+
+Run this once first, then one `gh pr view` per url:
+
+```bash
+gh auth status
+gh pr view "<url>" --json url,state
+```
+
+```json
+{"purpose": "pr-state", "auth_ok": true, "prs": [{"url": "https://github.com/org/repo-a/pull/42", "state": "MERGED"}]}
+```
+
+- `auth_ok`: `true` when `gh auth status` succeeded.
+- `prs`: one entry per target url, in target order. `state` is `OPEN`, `MERGED`, or `CLOSED` from `gh pr view`, or `null` when that command failed; the error goes into `errors`.
 
 ### question
 

@@ -13,6 +13,7 @@ SKILL = TESTS.parent
 SUPERVISOR = SKILL.parent / "session-supervisor"
 SV_FIXTURE = SUPERVISOR / "tests" / "fixtures" / "state_valid.json"
 SV_SKILL_MD = SUPERVISOR / "SKILL.md"
+TEMPLATE = (SKILL / "scripts" / "dashboard.template.html").read_text(encoding="utf-8")
 sys.path.insert(0, str(SKILL / "scripts"))
 
 import state_tool as st  # noqa: E402
@@ -58,6 +59,32 @@ class SupervisorContractTest(unittest.TestCase):
                 self.assertTrue(matches, f"no quoted user action containing {phrase!r} in the supervisor's SKILL.md")
                 for q in matches:
                     self.assertEqual(st.classify_supervisor_ua(q), mode, q)
+
+    def follow_up_decision(self):
+        merged = st.merge_supervisor(st.empty_state("/sec", "/sv"), self.sv, NOW)
+        ua = next(ua for t in self.sv["tasks"] for ua in t.get("user_actions", []) if ua["id"] == "UA-0003")
+        d = next(d for d in merged["decisions"] if d["ref"]["ua_id"] == "UA-0003")
+        return merged, ua, d
+
+    def test_follow_up_survives_merge_and_shows_under_your_tasks(self):
+        merged, ua, d = self.follow_up_decision()
+        self.assertIsNotNone(ua.get("follow_up"), "supervisor fixture UA-0003 should carry follow_up")
+        self.assertEqual(d["follow_up"], ua["follow_up"])
+        self.assertTrue(st.is_follow_up(d))
+        self.assertEqual(d["relay_mode"], "paste")
+        page = st.assemble(*st.render(merged, TEMPLATE, NOW))
+        tasks = re.search(r'<section class="your-tasks".*?</section>', page, re.S).group(0)
+        decisions = re.search(r'<section class="decisions".*?</section>', page, re.S).group(0)
+        self.assertIn(ua["description"], tasks)
+        self.assertIn(ua["follow_up"]["url"], tasks)
+        self.assertNotIn(ua["description"], decisions)
+
+    def test_follow_up_paste_text_is_quoted_in_supervisor_skill(self):
+        _, _, d = self.follow_up_decision()
+        text = st.paste_text(d, "done")
+        self.assertEqual(text, 'T-0003 UA-0003 ("Review repo-a#42"): done')
+        self.assertLessEqual(len(d["description"]), st.PASTE_DESC)
+        self.assertIn(text, SV_SKILL_MD.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

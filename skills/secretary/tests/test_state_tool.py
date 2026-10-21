@@ -94,6 +94,20 @@ def at(base, minutes):
     return (datetime.fromisoformat(base) + timedelta(minutes=minutes)).isoformat()
 
 
+PR_URL = "https://github.com/org/repo-a/pull/42"
+
+
+def follow_up_sv(description="Review org/repo-a#42", task_id="T-0003", ua_id="UA-0004", since="2026-10-18T09:25:00+09:00", url=PR_URL):
+    sv = fixture_sv()
+    find(sv["tasks"], task_id)["user_actions"].append(
+        {"id": ua_id, "description": description, "since": since, "follow_up": {"rule": "review-pr", "url": url, "done": "pr_closed"}})
+    return sv
+
+
+def by_ref(decisions, task_id, ua_id):
+    return next(d for d in decisions if d["ref"] == {"task_id": task_id, "ua_id": ua_id})
+
+
 class SourcesTest(unittest.TestCase):
     def test_sources_valid(self):
         sources = defs()
@@ -954,6 +968,157 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(overdue, "- D-0010 due 2026-10-17: 打ち合わせを今週やるか")
         earlier = st.digest(state, "/s", "2026-10-16T09:00:00+09:00").split("overdue decisions:\n")[1].split("\ndecisions by due")[0]
         self.assertEqual(earlier, "- (none)")
+
+
+class FollowUpTest(unittest.TestCase):
+    def page(self, state, now=NOW):
+        return st.assemble(*st.render(state, TEMPLATE, now))
+
+    def section(self, page, sid):
+        m = re.search(rf'<section class="[^"]*" id="{sid}".*?</section>', page, re.S)
+        return m.group(0) if m else ""
+
+    def merged(self, sv=None):
+        current = fixture_state()
+        return current, st.merge_supervisor(current, sv or follow_up_sv(), NOW)
+
+    def test_merge_carries_follow_up(self):
+        current, merged = self.merged()
+        d = by_ref(merged["decisions"], "T-0003", "UA-0004")
+        self.assertEqual(d["follow_up"], {"rule": "review-pr", "url": PR_URL, "done": "pr_closed"})
+        self.assertTrue(st.is_follow_up(d))
+        self.assertEqual(d["relay_mode"], "paste")
+        self.assertIsNone(by_ref(merged["decisions"], "T-0003", "UA-0002")["follow_up"])
+        self.assertEqual(commit(current, merged)["rev"], 8)
+
+    def test_follow_up_is_paste_whatever_its_wording(self):
+        current, merged = self.merged(follow_up_sv("Review org/repo-a#42 in the app, then archive it"))
+        d = by_ref(merged["decisions"], "T-0003", "UA-0004")
+        self.assertEqual(st.classify_supervisor_ua(d["description"]), "app")
+        self.assertEqual(d["relay_mode"], "paste")
+        new = commit(current, merged)
+        cand = copy.deepcopy(new)
+        find(cand["decisions"], d["id"])["relay_mode"] = "app"
+        with self.assertRaisesRegex(st.StateError, "relay_mode must be 'paste'"):
+            commit(new, cand)
+
+    def test_missing_key_is_null(self):
+        state = fixture_state()
+        self.assertNotIn("follow_up", find(state["decisions"], "D-0011"))
+        self.assertFalse(st.is_follow_up(find(state["decisions"], "D-0011")))
+        self.assertEqual(st.validate(state), [])
+        find(state["decisions"], "D-0011")["follow_up"] = None
+        self.assertEqual(st.validate(state), [])
+        for bad in ("x", {"rule": "review-pr", "url": PR_URL}, {"rule": "review-pr", "url": PR_URL, "done": 1}):
+            find(state["decisions"], "D-0011")["follow_up"] = bad
+            self.assertTrue(any("follow_up" in e for e in st.validate(state)), bad)
+
+    def test_merge_source_sets_null(self):
+        merged = st.merge_source(fixture_state(), "obsidian", query_report(decisions=[{"id": "inbox#12", "description": "x", "since": ""}]),
+                                 {"created_at": NOW}, NOW, True)
+        d = find(merged["decisions"], "D-0010")
+        self.assertIn("follow_up", d)
+        self.assertIsNone(d["follow_up"])
+
+    def test_supervisor_errors_check_follow_up_shape(self):
+        sv = follow_up_sv()
+        self.assertEqual(st.supervisor_errors(sv), [])
+        find(sv["tasks"], "T-0003")["user_actions"][1]["follow_up"] = None
+        self.assertEqual(st.supervisor_errors(sv), [])
+        for bad in ("x", [], {"rule": "review-pr", "url": PR_URL}, {"rule": "review-pr", "url": 42, "done": "manual"}):
+            find(sv["tasks"], "T-0003")["user_actions"][1]["follow_up"] = bad
+            errors = st.supervisor_errors(sv)
+            self.assertEqual(errors, ["supervisor task T-0003 UA-0004: follow_up must be {rule, url, done} strings or null"], bad)
+            state = fixture_state()
+            self.assertEqual(st.merge_supervisor(state, sv, NOW)["decisions"], state["decisions"])
+
+    def test_completion_relay_is_paste(self):
+        current, merged = self.merged()
+        new = commit(current, merged)
+        d = by_ref(new["decisions"], "T-0003", "UA-0004")
+        cand = copy.deepcopy(new)
+        add_relay(cand, d["id"], "paste", words="done")
+        relayed = commit(new, cand)
+        self.assertEqual(st.relay_badges(relayed)[d["id"]]["label"], "paste pending")
+
+    def test_your_tasks_section(self):
+        _, merged = self.merged()
+        d = by_ref(merged["decisions"], "T-0003", "UA-0004")
+        page = self.page(merged)
+        tasks, decisions = self.section(page, "your-tasks"), self.section(page, "decisions")
+        self.assertLess(page.index('id="summary"'), page.index('id="your-tasks"'))
+        self.assertLess(page.index('id="your-tasks"'), page.index('id="decisions"'))
+        self.assertIn(f'<a href="{PR_URL}">{PR_URL}</a>', tasks)
+        self.assertIn(f'aria-label="Copy paste text for {d["id"]}" title="クリックでコピー">T-0003 UA-0004 (&quot;Review org/repo-a#42&quot;): done</button>', tasks)
+        self.assertIn('<span class="nodue">no due</span>', tasks)
+        self.assertIn("Tell me a due date to set one", tasks)
+        self.assertIn('Your tasks <span class="count">1</span>', tasks)
+        self.assertNotIn(d["id"], decisions)
+        self.assertNotIn("Review org/repo-a#42", decisions)
+        self.assertIn('<main>', page)
+        self.assertNotIn("data-no-tasks", page.split("<main")[1].split(">")[0])
+        self.assertRegex(page, r'<p class="hero__num">1</p><p class="hero__cap">your tasks</p>')
+        self.assertIn("4 decisions and 1 task waiting on you", page)
+
+    def test_your_tasks_due_and_order(self):
+        sv = follow_up_sv("Review org/repo-b#7", task_id="T-0005", ua_id="UA-0005", url="https://github.com/org/repo-b/pull/7")
+        find(sv["tasks"], "T-0003")["user_actions"].append(
+            {"id": "UA-0004", "description": "Review org/repo-a#42", "since": "2026-10-18T09:25:00+09:00",
+             "follow_up": {"rule": "review-pr", "url": PR_URL, "done": "manual"}})
+        _, merged = self.merged(sv)
+        a = by_ref(merged["decisions"], "T-0003", "UA-0004")
+        b = by_ref(merged["decisions"], "T-0005", "UA-0005")
+        b["due"] = "2026-10-18"
+        page = self.page(merged)
+        tasks = self.section(page, "your-tasks")
+        self.assertLess(tasks.index(f'Copy {b["id"]}"'), tasks.index(f'Copy {a["id"]}"'))
+        self.assertIn('<li class="task" data-due="2026-10-18T23:59:59+09:00">', tasks)
+        self.assertIn("due <b>2026-10-18</b>", tasks)
+        a["due"] = "2026-10-17"
+        page = self.page(merged)
+        tasks = self.section(page, "your-tasks")
+        self.assertLess(tasks.index(f'Copy {a["id"]}"'), tasks.index(f'Copy {b["id"]}"'))
+        self.assertIn('<li class="task" data-overdue data-due="2026-10-17T23:59:59+09:00">', tasks)
+        self.assertIn('data-overdue="2"', page)
+
+    def test_your_tasks_relay_badge_and_words(self):
+        current, merged = self.merged()
+        new = commit(current, merged)
+        d = by_ref(new["decisions"], "T-0003", "UA-0004")
+        cand = copy.deepcopy(new)
+        add_relay(cand, d["id"], "paste", words="レビューした")
+        tasks = self.section(self.page(commit(new, cand)), "your-tasks")
+        self.assertIn('<span class="badge" data-relay="awaiting_user">paste pending</span>', tasks)
+        self.assertIn("T-0003 UA-0004 (&quot;Review org/repo-a#42&quot;): レビューした</button>", tasks)
+        self.assertIn("Paste into the supervisor chat", tasks)
+
+    def test_no_tasks_hides_section(self):
+        page = self.page(fixture_state())
+        self.assertIn("<main data-no-tasks>", page)
+        self.assertNotIn('id="your-tasks"', page)
+        self.assertNotIn("{{", page)
+        self.assertRegex(page, r'<p class="hero__num">0</p><p class="hero__cap">your tasks</p>')
+
+    def test_template_grid_has_tasks_area(self):
+        self.assertIn(".your-tasks { grid-area: tasks; }", TEMPLATE)
+        self.assertIn('grid-template-areas: "hero hero" "tasks side" "dec side"', TEMPLATE)
+        self.assertIn('main[data-no-tasks] { grid-template-areas: "hero hero" "dec side"', TEMPLATE)
+        self.assertIn('grid-template-areas: "hero" "tasks" "dec" "side"', TEMPLATE)
+        self.assertIn('main[data-no-tasks] { grid-template-areas: "hero" "dec" "side"', TEMPLATE)
+        self.assertLess(TEMPLATE.index("{{YOUR_TASKS}}"), TEMPLATE.index("{{DECISIONS}}"))
+
+    def test_digest_lists_your_tasks_separately(self):
+        _, merged = self.merged()
+        d = by_ref(merged["decisions"], "T-0003", "UA-0004")
+        text = st.digest(merged, "/s", NOW)
+        decisions = text.split("decisions by due (top 20):\n")[1].split("\nyour tasks by due")[0]
+        tasks = text.split("your tasks by due (top 20):\n")[1].split("\nunconfirmed relays:")[0]
+        self.assertNotIn(d["id"], decisions)
+        self.assertEqual(tasks, f"- {d['id']} due -: Review org/repo-a#42 <{PR_URL}>")
+        d["due"] = "2026-10-17"
+        overdue = st.digest(merged, "/s", NOW).split("overdue decisions:\n")[1].split("\ndecisions by due")[0]
+        self.assertIn(f"- {d['id']} [your task] due 2026-10-17: Review org/repo-a#42", overdue)
+        self.assertIn("your tasks by due (top 20):\n- (none)", st.digest(fixture_state(), "/s", NOW))
 
 
 class CliTest(unittest.TestCase):

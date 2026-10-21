@@ -157,6 +157,7 @@ class NextStateTest(unittest.TestCase):
         cand = self.candidate()
         task = find(cand["tasks"], "T-0003")
         task["artifacts"] = [a for a in task["artifacts"] if a["kind"] in ("branch", "commit")]
+        task["user_actions"] = [ua for ua in task["user_actions"] if not ua.get("follow_up")]
         task["artifacts"][0]["url"] = "https://github.com/org/repo-a/tree/hn/uploader-retry-x1"
         find(cand["workers"], "w-0004")["intended_state"] = "archived"
         st.next_state(self.current, cand, NOW)
@@ -298,7 +299,7 @@ class NextStateTest(unittest.TestCase):
         self.assertEqual(task["status"], "needs_user")
         self.assertEqual(len(task["user_actions"]), 1)
         ua = task["user_actions"][0]
-        self.assertEqual(ua["id"], "UA-0003")
+        self.assertEqual(ua["id"], "UA-0004")
         self.assertIn("send any message", ua["description"])
         again = st.next_state(new, copy.deepcopy(new), NOW)
         self.assertEqual(len(find(again["tasks"], "T-0004")["user_actions"]), 1)
@@ -1076,9 +1077,9 @@ class RenderTest(unittest.TestCase):
         state = fixture_state()
         find(state["workers"], "w-0004")["observed_state"] = "archived"
         hero = self.page(state).split('id="actions"', 1)[1].split('id="tasks"', 1)[0]
-        # UA-0002, w-0005 needs_input, w-0004 archived outside the supervisor
-        self.assertIn('data-pending="3"', hero)
-        self.assertIn('<p class="hero__count">3</p>', hero)
+        # UA-0002, UA-0003 (follow-up), w-0005 needs_input, w-0004 archived outside the supervisor
+        self.assertIn('data-pending="4"', hero)
+        self.assertIn('<p class="hero__count">4</p>', hero)
 
     def test_hero_has_no_pending_marker_when_clear(self):
         state = fixture_state()
@@ -1448,6 +1449,375 @@ class SetupTest(unittest.TestCase):
         copied = subprocess.run([sys.executable, str(target / ".supervisor" / "state_tool.py"), "version"], capture_output=True, text=True).stdout
         self.assertRegex(bundled.strip(), r"^[0-9a-f]{12}$")
         self.assertEqual(bundled, copied)
+
+
+RULES_MD = """# Session supervisor directory
+
+## Follow-ups
+
+### review-pr
+- on: pr
+- text: Review {label}
+- done: pr_closed
+
+### check-deploy
+- on: pr
+- text: Check the deploy of {url}
+- done: manual
+"""
+
+PR42 = "https://github.com/org/repo-a/pull/42"
+PR43 = "https://github.com/org/repo-a/pull/43"
+
+
+def follow_up_ua(ua_id, url, rule="review-pr", done="pr_closed", description="Review it"):
+    return {"id": ua_id, "description": description, "since": NOW, "follow_up": {"rule": rule, "url": url, "done": done}}
+
+
+def pr_task(state, task_id="T-0040", worker_id="w-0040", intended="archived", observed="archived"):
+    git_task(state, task_id, worker_id, delivery="push_pr", intended=intended, observed=observed)
+    task = find(state["tasks"], task_id)
+    task["request"] = "LICENSE の年を直して。push して PR を作ってよい"
+    task["push_consent"] = {"text": "push して PR を作ってよい", "at": NOW}
+    commit_artifacts(state, task_id)
+    task["artifacts"].append({"kind": "pr", "url": PR43})
+    return task
+
+
+class ParseFollowUpsTest(unittest.TestCase):
+    def test_valid(self):
+        rules, errors = st.parse_follow_ups(RULES_MD)
+        self.assertEqual(errors, [])
+        self.assertEqual(rules, [
+            {"id": "review-pr", "on": "pr", "text": "Review {label}", "done": "pr_closed"},
+            {"id": "check-deploy", "on": "pr", "text": "Check the deploy of {url}", "done": "manual"},
+        ])
+
+    def test_no_section(self):
+        self.assertEqual(st.parse_follow_ups("# Title\n\n## Sources\n"), ([], []))
+
+    def test_setup_claude_md_has_no_rules(self):
+        self.assertEqual(st.parse_follow_ups(st.CLAUDE_MD), ([], []))
+
+    def test_fenced_block_and_comment_are_ignored(self):
+        text = ("# T\n\n```markdown\n## Follow-ups\n### x\n- on: ci\n```\n"
+                "<!--\n## Follow-ups\n-->\n## Follow-ups\n\n### a\n- on: pr <!-- inline -->\n- text: Review {label}\n- done: manual\n")
+        rules, errors = st.parse_follow_ups(text)
+        self.assertEqual(errors, [])
+        self.assertEqual([r["id"] for r in rules], ["a"])
+
+    def test_section_ends_at_next_heading(self):
+        text = "## Follow-ups\n\n### a\n- on: pr\n- text: t\n- done: manual\n\n## Other\n\nfree text\n"
+        self.assertEqual(len(st.parse_follow_ups(text)[0]), 1)
+
+    def test_errors_carry_line_numbers(self):
+        cases = [
+            ("## Follow-ups\n## Follow-ups\n", "CLAUDE.md:2: duplicate '## Follow-ups' heading"),
+            ("## Follow-ups\n- on: pr\n", "CLAUDE.md:2: the first entry under '## Follow-ups' must be a '### <rule-id>' heading"),
+            ("## Follow-ups\n### Bad_Id\n- on: pr\n- text: t\n- done: manual\n", "CLAUDE.md:2: invalid rule id 'Bad_Id'"),
+            ("## Follow-ups\n### a\n- on: pr\n- text: t\n- done: manual\n### a\n- on: pr\n- text: t\n- done: manual\n", "CLAUDE.md:6: duplicate rule id 'a'"),
+            ("## Follow-ups\n### a\n- on: ci\n- text: t\n- done: manual\n", "CLAUDE.md:3: on must be one of ['pr']"),
+            ("## Follow-ups\n### a\n- on: pr\n- text: t\n- done: later\n", "CLAUDE.md:5: done must be one of ['pr_closed', 'manual']"),
+            ("## Follow-ups\n### a\n- on: pr\n- text:\n- done: manual\n", "CLAUDE.md:4: text must not be empty"),
+            ("## Follow-ups\n### a\n- on: pr\n- text: " + "x" * 201 + "\n- done: manual\n", "CLAUDE.md:4: text must be at most 200 characters"),
+            ("## Follow-ups\n### a\n- on: pr\n- text: Review {title}\n- done: manual\n", "CLAUDE.md:4: text may use only {label} and {url}"),
+            ("## Follow-ups\n### a\n- on: pr\n- on: pr\n- text: t\n- done: manual\n", "CLAUDE.md:4: duplicate key 'on'"),
+            ("## Follow-ups\n### a\n- on: pr\n- when: now\n- text: t\n- done: manual\n", "CLAUDE.md:4: unknown key 'when'"),
+            ("## Follow-ups\n### a\n- on: pr\n- text: t\n", "CLAUDE.md:2: rule 'a' is missing 'done'"),
+            ("## Follow-ups\n### a\n- on: pr\nfree text\n- text: t\n- done: manual\n", "CLAUDE.md:4: expected '- <key>: <value>'"),
+        ]
+        for text, expected in cases:
+            with self.subTest(expected=expected):
+                rules, errors = st.parse_follow_ups(text)
+                self.assertEqual(rules, [])
+                self.assertTrue(any(e.startswith(expected) for e in errors), errors)
+
+    def test_any_error_drops_every_rule(self):
+        text = RULES_MD + "\n### bad\n- on: ci\n"
+        rules, errors = st.parse_follow_ups(text)
+        self.assertEqual(rules, [])
+        self.assertEqual(len(errors), 3, errors)
+
+
+class FollowUpCoreTest(unittest.TestCase):
+    def setUp(self):
+        self.state = fixture_state()
+        self.rules = st.parse_follow_ups(RULES_MD)[0]
+
+    def test_new_pr_urls_returns_only_new_urls(self):
+        cand = copy.deepcopy(self.state)
+        find(cand["tasks"], "T-0003")["artifacts"].append({"kind": "pr", "url": PR43})
+        pr_task(cand, "T-0040", "w-0040")
+        self.assertEqual(st.new_pr_urls(self.state, cand), [("T-0003", PR43), ("T-0040", PR43)])
+        self.assertEqual(st.new_pr_urls(cand, cand), [])
+
+    def test_label_from_artifact_then_url_then_raw(self):
+        self.assertEqual(st.follow_up_label({"label": "repo-a#42"}, PR42), "repo-a#42")
+        self.assertEqual(st.follow_up_label({"label": ""}, PR42), "org/repo-a#42")
+        self.assertEqual(st.follow_up_label(None, "https://ghe.example.com/team/svc/pull/7/"), "team/svc#7")
+        self.assertEqual(st.follow_up_label(None, "https://example.com/review/7"), "https://example.com/review/7")
+
+    def test_actions_substitute_and_number(self):
+        find(self.state["tasks"], "T-0003")["artifacts"].append({"kind": "pr", "url": PR43})
+        actions = st.follow_up_actions(self.state, "T-0003", PR43, self.rules, NOW)
+        self.assertEqual(actions, [
+            {"id": "UA-0004", "description": "Review org/repo-a#43", "since": NOW,
+             "follow_up": {"rule": "review-pr", "url": PR43, "done": "pr_closed"}},
+            {"id": "UA-0005", "description": f"Check the deploy of {PR43}", "since": NOW,
+             "follow_up": {"rule": "check-deploy", "url": PR43, "done": "manual"}},
+        ])
+        self.assertEqual(len(find(self.state["tasks"], "T-0003")["user_actions"]), 2)
+
+    def test_actions_use_artifact_label(self):
+        find(self.state["tasks"], "T-0003")["user_actions"] = []
+        actions = st.follow_up_actions(self.state, "T-0003", PR42, self.rules[:1], NOW)
+        self.assertEqual(actions[0]["description"], "Review repo-a#42")
+        self.assertEqual(actions[0]["id"], "UA-0001")
+
+    def test_actions_skip_existing_pair(self):
+        actions = st.follow_up_actions(self.state, "T-0003", PR42, self.rules, NOW)
+        self.assertEqual([a["follow_up"]["rule"] for a in actions], ["check-deploy"])
+
+    def test_closed_skips_pr_closed_rules(self):
+        find(self.state["tasks"], "T-0003")["user_actions"] = []
+        actions = st.follow_up_actions(self.state, "T-0003", PR42, self.rules, NOW, closed=True)
+        self.assertEqual([a["follow_up"]["done"] for a in actions], ["manual"])
+
+    def test_no_rules_no_actions(self):
+        self.assertEqual(st.follow_up_actions(self.state, "T-0003", PR42, [], NOW), [])
+        self.assertEqual(st.follow_up_actions(self.state, "T-0003", PR42, self.rules[:1], NOW), [])
+
+    def test_unknown_task_raises(self):
+        with self.assertRaises(st.StateError):
+            st.follow_up_actions(self.state, "T-9999", PR42, self.rules, NOW)
+
+    def test_validate_rejects_bad_follow_ups(self):
+        cases = [
+            ({"rule": "Bad Rule", "url": PR42, "done": "manual"}, None, "follow_up.rule must be a rule id"),
+            ({"rule": "x", "url": PR42, "done": "later"}, None, "follow_up.done must be one of"),
+            ({"rule": "x", "url": "ftp://x/1", "done": "manual"}, None, "follow_up.url must be http"),
+            ({"rule": "x", "url": PR43, "done": "manual"}, None, "is not a pr artifact of the task"),
+            ({"rule": "review-pr", "url": PR42, "done": "manual"}, None, "duplicates rule 'review-pr'"),
+            ({"rule": "x", "url": PR42, "done": "manual"}, "", "requires a non-empty since"),
+            ("review-pr", None, "follow_up must be an object or absent"),
+        ]
+        for follow_up, since, pattern in cases:
+            with self.subTest(pattern=pattern):
+                state = fixture_state()
+                ua = {"id": "UA-0009", "description": "x", "since": NOW if since is None else since, "follow_up": follow_up}
+                find(state["tasks"], "T-0003")["user_actions"].append(ua)
+                self.assertTrue(any(re.search(pattern, e) for e in st.validate(state)), st.validate(state))
+
+    def test_is_push_decision_excludes_follow_ups(self):
+        worker = {"branch": "claude/license-x1"}
+        ua = {"id": "UA-1", "description": "Decide whether to push branch claude/license-x1"}
+        self.assertTrue(st._is_push_decision(ua, worker))
+        self.assertFalse(st._is_push_decision(dict(ua, follow_up={"rule": "r", "url": PR43, "done": "manual"}), worker))
+
+
+class FollowUpStateTest(unittest.TestCase):
+    def setUp(self):
+        self.current = fixture_state()
+
+    def test_follow_up_keeps_task_needs_user_then_archives(self):
+        task = pr_task(self.current)
+        task["user_actions"].append(follow_up_ua("UA-0040", PR43))
+        cand = copy.deepcopy(self.current)
+        state = st.next_state(self.current, cand, NOW)
+        self.assertEqual(find(state["tasks"], "T-0040")["status"], "needs_user")
+        self.assertIn("w-0040", [w["id"] for w in state["workers"]])
+        cand = copy.deepcopy(state)
+        find(cand["tasks"], "T-0040")["user_actions"] = []
+        state = st.next_state(state, cand, NOW)
+        self.assertNotIn("T-0040", [t["id"] for t in state["tasks"]])
+        self.assertEqual(state["archived"][0]["id"], "T-0040")
+
+    def test_follow_up_makes_idle_worker_task_needs_user(self):
+        task = pr_task(self.current, intended="running", observed="idle")
+        task["user_actions"].append(follow_up_ua("UA-0040", PR43))
+        state = st.next_state(self.current, copy.deepcopy(self.current), NOW)
+        self.assertEqual(find(state["tasks"], "T-0040")["status"], "needs_user")
+
+    def test_removing_follow_up_does_not_resolve_push_decision(self):
+        git_task(self.current, "T-0020", "w-0020", intended="archived", observed="archived")
+        commit_artifacts(self.current, "T-0020")
+        find(self.current["tasks"], "T-0020")["artifacts"].append({"kind": "pr", "url": PR43})
+        find(self.current["tasks"], "T-0020")["user_actions"].append(
+            follow_up_ua("UA-0100", PR43, description="Decide whether to push branch claude/license-x1 again"))
+        cand = copy.deepcopy(self.current)
+        task = find(cand["tasks"], "T-0020")
+        task["user_actions"] = []
+        task["push_consent"] = {"text": "push して", "at": NOW, "message": "claude/license-x1 を push して"}
+        with self.assertRaises(st.StateError) as ctx:
+            st.next_state(self.current, cand, NOW)
+        self.assertIn("only while resolving a pending push decision", str(ctx.exception))
+
+    def test_replacing_pr_artifact_requires_removing_old_follow_up(self):
+        cand = copy.deepcopy(self.current)
+        task = find(cand["tasks"], "T-0003")
+        task["artifacts"] = [a for a in task["artifacts"] if a["kind"] != "pr"] + [{"kind": "pr", "url": PR43}]
+        with self.assertRaises(st.StateError) as ctx:
+            st.next_state(self.current, cand, NOW)
+        self.assertIn("UA-0003", str(ctx.exception))
+        task["user_actions"] = [ua for ua in task["user_actions"] if not ua.get("follow_up")]
+        st.next_state(self.current, cand, NOW)
+
+    def test_digest_marks_follow_ups(self):
+        text = st.digest(fixture_state(), "/s/state.json")
+        self.assertIn(f"- T-0003 UA-0003: Review repo-a#42 [follow-up review-pr pr_closed] {PR42}", text)
+        self.assertIn("- T-0003 UA-0002: repo-b の PR をレビュー\n", text)
+        state = fixture_state()
+        find(state["tasks"], "T-0003")["user_actions"][1]["description"] = f"Review {PR42}"
+        self.assertIn(f"Review {PR42} [follow-up review-pr pr_closed]\n", st.digest(state, "/s/state.json"))
+
+
+class FollowUpsCliTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name).resolve()
+        (self.dir / ".supervisor").mkdir()
+        self.state = self.dir / "state.json"
+        self.cand = self.dir / "state.next.json"
+        self.md = self.dir / "CLAUDE.md"
+        self.state.write_text(st.serialize(fixture_state()), encoding="utf-8")
+        self.md.write_text(RULES_MD, encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = st.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def write_candidate(self, mutate=None):
+        cand = fixture_state()
+        if mutate:
+            mutate(cand)
+        self.cand.write_text(json.dumps(cand, ensure_ascii=False), encoding="utf-8")
+
+    def candidate(self):
+        return json.loads(self.cand.read_text(encoding="utf-8"))
+
+    def diff(self, *extra):
+        return self.run_cli("follow-ups", "--state", str(self.state), "--candidate", str(self.cand), *extra)
+
+    def add_pr43(self, cand):
+        find(cand["tasks"], "T-0003")["artifacts"].append({"kind": "pr", "url": PR43})
+
+    def drop_user_actions(self, cand):
+        find(cand["tasks"], "T-0003")["user_actions"] = []
+
+    def test_validate_follow_ups(self):
+        self.assertEqual(self.run_cli("validate-follow-ups", "--claude-md", str(self.md))[:2], (0, "ok: 2 rules\n"))
+        self.assertEqual(self.run_cli("validate-follow-ups", "--claude-md", str(self.dir / "none.md"))[:2], (0, "ok: 0 rules\n"))
+        self.md.write_text(RULES_MD + "\n### bad\n- on: ci\n", encoding="utf-8")
+        code, _, err = self.run_cli("validate-follow-ups", "--claude-md", str(self.md))
+        self.assertEqual(code, 1)
+        self.assertIn("error: CLAUDE.md:16: on must be one of", err)
+
+    def test_adds_for_new_pr_once_and_commits(self):
+        self.write_candidate(self.add_pr43)
+        code, out, _ = self.diff()
+        self.assertEqual(code, 0)
+        added = json.loads(out)
+        self.assertEqual([(a["task_id"], a["id"], a["description"]) for a in added],
+                         [("T-0003", "UA-0004", "Review org/repo-a#43"), ("T-0003", "UA-0005", f"Check the deploy of {PR43}")])
+        self.assertEqual(len(find(self.candidate()["tasks"], "T-0003")["user_actions"]), 4)
+        code, out, _ = self.diff()
+        self.assertEqual((code, json.loads(out)), (0, []))
+        self.assertEqual(len(find(self.candidate()["tasks"], "T-0003")["user_actions"]), 4)
+        code, _, err = self.run_cli("commit", "--state", str(self.state), "--candidate", str(self.cand))
+        self.assertEqual(code, 0, err)
+
+    def test_existing_pr_artifact_gets_nothing(self):
+        self.write_candidate(self.drop_user_actions)
+        before = self.cand.read_bytes()
+        code, out, _ = self.diff()
+        self.assertEqual((code, json.loads(out)), (0, []))
+        self.assertEqual(self.cand.read_bytes(), before)
+
+    def test_rule_errors_leave_candidate_unchanged(self):
+        self.write_candidate(self.add_pr43)
+        before = self.cand.read_bytes()
+        self.md.write_text(RULES_MD + "\n### bad\n- on: ci\n", encoding="utf-8")
+        code, out, err = self.diff()
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("error: CLAUDE.md:", err)
+        self.assertEqual(self.cand.read_bytes(), before)
+
+    def test_no_claude_md_or_section_is_a_no_op(self):
+        self.write_candidate(self.add_pr43)
+        before = self.cand.read_bytes()
+        self.md.unlink()
+        self.assertEqual(self.diff()[:2], (0, "[]\n"))
+        self.md.write_text("# Session supervisor directory\n", encoding="utf-8")
+        self.assertEqual(self.diff()[:2], (0, "[]\n"))
+        self.assertEqual(self.cand.read_bytes(), before)
+
+    def test_closed_skips_pr_closed_and_warns_on_old_url(self):
+        self.write_candidate(self.add_pr43)
+        code, out, err = self.diff("--closed", PR43, "--closed", PR42)
+        self.assertEqual(code, 0)
+        self.assertEqual([a["follow_up"]["rule"] for a in json.loads(out)], ["check-deploy"])
+        self.assertIn(f"warning: --closed {PR42} is not a newly recorded pr artifact", err)
+
+    def test_manual_mode_re_adds(self):
+        self.write_candidate(self.drop_user_actions)
+        code, out, _ = self.run_cli("follow-ups", "--candidate", str(self.cand), "--task", "T-0003", "--url", PR42)
+        self.assertEqual(code, 0)
+        self.assertEqual([a["description"] for a in json.loads(out)], ["Review repo-a#42", f"Check the deploy of {PR42}"])
+        self.write_candidate(self.drop_user_actions)
+        code, out, _ = self.run_cli("follow-ups", "--candidate", str(self.cand), "--task", "T-0003", "--url", PR42, "--closed")
+        self.assertEqual([a["follow_up"]["done"] for a in json.loads(out)], ["manual"])
+
+    def test_manual_mode_rejects_unknown_pr_and_mixed_flags(self):
+        self.write_candidate()
+        code, _, err = self.run_cli("follow-ups", "--candidate", str(self.cand), "--task", "T-0003", "--url", PR43)
+        self.assertEqual(code, 1)
+        self.assertIn("is not a pr artifact of task T-0003", err)
+        code, _, err = self.run_cli("follow-ups", "--state", str(self.state), "--candidate", str(self.cand), "--task", "T-0003", "--url", PR42)
+        self.assertEqual(code, 1)
+        self.assertIn("--state cannot be combined", err)
+        self.assertEqual(self.run_cli("follow-ups", "--candidate", str(self.cand))[0], 1)
+
+    def test_refuses_state_file_or_outside_candidate(self):
+        before = self.state.read_bytes()
+        code, _, err = self.run_cli("follow-ups", "--state", str(self.state), "--candidate", str(self.state))
+        self.assertEqual(code, 1)
+        self.assertIn("is the state file", err)
+        code, _, err = self.run_cli("follow-ups", "--candidate", str(self.state), "--task", "T-0003", "--url", PR42)
+        self.assertEqual(code, 1)
+        self.assertIn("is the state file", err)
+        self.assertEqual(self.state.read_bytes(), before)
+        with tempfile.TemporaryDirectory() as other:
+            outside = Path(other) / "state.next.json"
+            outside.write_text(json.dumps(fixture_state()), encoding="utf-8")
+            outside_before = outside.read_bytes()
+            code, _, err = self.run_cli("follow-ups", "--state", str(self.state), "--candidate", str(outside))
+            self.assertEqual(code, 1)
+            self.assertIn("is not in a supervisor directory", err)
+            self.assertEqual(outside.read_bytes(), outside_before)
+
+    def test_guard_allows_follow_ups_and_read_only_gh(self):
+        script = self.dir / ".supervisor" / "state_tool.py"
+        commands = [
+            f"python3 {script} follow-ups --state {self.state} --candidate {self.cand} --closed {PR42}",
+            f"python3 {script} validate-follow-ups --claude-md {self.md}",
+            f'gh pr view "{PR42}" --json url,state',
+            "gh auth status",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(self.dir)}
+                self.assertIsNone(st.guard_decision(payload, str(self.dir), {}))
+        payload = {"tool_name": "Write", "tool_input": {"file_path": str(self.dir / ".supervisor/observations/pr-state-follow-ups.json")},
+                   "cwd": str(self.dir)}
+        self.assertIsNone(st.guard_decision(payload, str(self.dir), {}))
+        payload = {"tool_name": "Bash", "tool_input": {"command": f"gh pr merge {PR42}"}, "cwd": str(self.dir)}
+        self.assertIsNotNone(st.guard_decision(payload, str(self.dir), {}))
 
 
 class CliSurfaceTest(unittest.TestCase):

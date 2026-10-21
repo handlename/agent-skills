@@ -2,7 +2,7 @@
 """State tool for the session-supervisor skill.
 
 Functional core: validate, next_state, render, digest, parse_report, cwd_busy, serialize,
-guard_decision (bash_violations, path_violation).
+guard_decision (bash_violations, path_violation), parse_follow_ups, new_pr_urls, follow_up_actions.
 Imperative shell: the argparse subcommands at the bottom of this file.
 """
 
@@ -41,6 +41,15 @@ REPORT_ARTIFACT_KEYS = ("branch", "commit", "pr", "ci")
 FOOTER_RE = re.compile(r"<!--sv-footer-->.*?<!--/sv-footer-->", re.S)
 REPORT_RE = re.compile(r"```supervisor-report[ \t]*\r?\n(.*?)\r?\n[ \t]*```", re.S)
 UA_ID_RE = re.compile(r"^UA-(\d+)$")
+
+FOLLOW_UP_HEADING = "## Follow-ups"
+FOLLOW_UP_RULE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+FOLLOW_UP_KEYS = ("on", "text", "done")
+FOLLOW_UP_ON = ("pr",)
+FOLLOW_UP_DONE = ("pr_closed", "manual")
+FOLLOW_UP_PLACEHOLDERS = ("{label}", "{url}")
+FOLLOW_UP_TEXT_MAX = 200
+PR_URL_RE = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)/?$", re.I)
 
 GUARD_MATCHER = "Edit|MultiEdit|Write|NotebookEdit|Bash"
 GUARD_INPUT_KEYS = {"Edit": "file_path", "MultiEdit": "file_path", "Write": "file_path", "NotebookEdit": "notebook_path", "Bash": "command"}
@@ -478,6 +487,36 @@ def _shape_errors(state):
         ua_ids = [ua.get("id") for t in state["tasks"] for ua in t.get("user_actions", [])]
         if not all(isinstance(i, str) for i in ua_ids):
             errors.append("user_action ids must be strings")
+        for t in state["tasks"]:
+            for ua in t.get("user_actions", []):
+                if ua.get("follow_up") is not None and not isinstance(ua["follow_up"], dict):
+                    errors.append(f"task {t['id']}: user_action {ua.get('id')} follow_up must be an object or absent")
+    return errors
+
+
+def _follow_up_errors(prefix, task):
+    errors, seen = [], set()
+    pr_urls = set(_pr_urls(task))
+    for ua in task.get("user_actions", []):
+        fu = ua.get("follow_up")
+        if fu is None:
+            continue
+        where = f"{prefix}: user_action {ua.get('id')} follow_up"
+        rule, url, done = fu.get("rule"), fu.get("url"), fu.get("done")
+        if not isinstance(rule, str) or not FOLLOW_UP_RULE_RE.match(rule):
+            errors.append(f"{where}.rule must be a rule id (lowercase letters, digits and '-', up to 32 characters)")
+        if done not in FOLLOW_UP_DONE:
+            errors.append(f"{where}.done must be one of {list(FOLLOW_UP_DONE)}")
+        if not _is_http_url(url):
+            errors.append(f"{where}.url must be http(s)")
+        elif url not in pr_urls:
+            errors.append(f"{where}.url {url} is not a pr artifact of the task (remove the follow-up when its pr artifact is replaced)")
+        if not isinstance(ua.get("since"), str) or not ua["since"]:
+            errors.append(f"{where} requires a non-empty since")
+        key = (rule, url)
+        if isinstance(rule, str) and isinstance(url, str) and key in seen:
+            errors.append(f"{where} duplicates rule {rule!r} for {url}")
+        seen.add(key)
     return errors
 
 
@@ -531,6 +570,7 @@ def validate(state):
         for ua in task.get("user_actions", []):
             if not ua.get("id") or not isinstance(ua.get("description"), str) or not ua["description"]:
                 errors.append(f"{prefix}: user_action requires id and a description string")
+        errors += _follow_up_errors(prefix, task)
         if task.get("cancel"):
             for wid in task.get("worker_ids", []):
                 if workers_by_id.get(wid, {}).get("intended_state") == "running":
@@ -587,6 +627,8 @@ def validate(state):
 
 
 def _is_push_decision(user_action, worker):
+    if user_action.get("follow_up") is not None:
+        return False
     desc = user_action.get("description", "")
     branch = worker.get("branch")
     return "push" in desc.lower() and (not isinstance(branch, str) or not branch or branch in desc)
@@ -898,6 +940,15 @@ def body_of(page):
     return FOOTER_RE.sub("{{FOOTER}}", page)
 
 
+def _digest_follow_up(ua):
+    fu = ua.get("follow_up")
+    if not isinstance(fu, dict):
+        return ""
+    url = fu.get("url")
+    tail = f" {url}" if url and url not in (ua.get("description") or "") else ""
+    return f" [follow-up {fu.get('rule')} {fu.get('done')}]{tail}"
+
+
 def digest(state, state_path, limit=DIGEST_LIMIT):
     sup = state.get("supervisor", {})
     dashboard = sup.get("dashboard") or {}
@@ -914,7 +965,8 @@ def digest(state, state_path, limit=DIGEST_LIMIT):
         f"archived tasks: {len(state.get('archived', []))}",
         "user actions:",
     ]
-    actions = [f"- {t.get('id')} {ua.get('id')}: {ua.get('description')}" for t in state.get("tasks", []) for ua in t.get("user_actions", [])]
+    actions = [f"- {t.get('id')} {ua.get('id')}: {ua.get('description')}{_digest_follow_up(ua)}"
+               for t in state.get("tasks", []) for ua in t.get("user_actions", [])]
     lines += actions or ["- (none)"]
     lines.append("tasks:")
     task_lines = []
@@ -968,6 +1020,174 @@ def parse_report(text, expect_task=None, expect_worker=None):
     if expect_worker is not None and report["worker_id"] != expect_worker:
         return {"ok": False, "error": f"worker_id {report['worker_id']!r} does not match {expect_worker!r}"}
     return {"ok": True, "report": report}
+
+
+def _strip_ignored(lines):
+    """Blank out fenced blocks and HTML comments, keeping line numbers. Copied from secretary's state_tool.py."""
+    out, fence, in_comment = [], None, False
+    for line in lines:
+        if fence is None and not in_comment:
+            m = re.match(r"^\s*(`{3,}|~{3,})", line)
+            if m:
+                fence = m.group(1)
+                out.append("")
+                continue
+        elif fence is not None:
+            if line.strip().startswith(fence) and not line.strip()[len(fence):].strip():
+                fence = None
+            out.append("")
+            continue
+        kept, rest = "", line
+        while rest:
+            if in_comment:
+                end = rest.find("-->")
+                if end < 0:
+                    rest = ""
+                else:
+                    rest, in_comment = rest[end + 3:], False
+            else:
+                start = rest.find("<!--")
+                if start < 0:
+                    kept, rest = kept + rest, ""
+                else:
+                    kept, rest, in_comment = kept + rest[:start], rest[start + 4:], True
+        out.append(kept)
+    return out
+
+
+def _follow_up_value_problem(key, value):
+    if key == "on" and value not in FOLLOW_UP_ON:
+        return f"on must be one of {list(FOLLOW_UP_ON)}, got {value!r}"
+    if key == "done" and value not in FOLLOW_UP_DONE:
+        return f"done must be one of {list(FOLLOW_UP_DONE)}, got {value!r}"
+    if key == "text":
+        if not value:
+            return "text must not be empty"
+        if len(value) > FOLLOW_UP_TEXT_MAX:
+            return f"text must be at most {FOLLOW_UP_TEXT_MAX} characters"
+        unknown = [p for p in re.findall(r"\{[^{}]*\}", value) if p not in FOLLOW_UP_PLACEHOLDERS]
+        if unknown:
+            return f"text may use only {{label}} and {{url}}, got {unknown}"
+    return None
+
+
+def parse_follow_ups(text):
+    """Parse the `## Follow-ups` section of CLAUDE.md. Returns (rules, errors); errors read `CLAUDE.md:<line>: <message>`.
+    Any error makes the rule list empty."""
+    lines = _strip_ignored(text.splitlines())
+    heads = [i for i, line in enumerate(lines) if line.rstrip() == FOLLOW_UP_HEADING]
+    if not heads:
+        return [], []
+    if len(heads) > 1:
+        return [], [f"CLAUDE.md:{i + 1}: duplicate '{FOLLOW_UP_HEADING}' heading" for i in heads[1:]]
+    errors, rules, current, seen = [], [], None, set()
+
+    def err(n, message):
+        errors.append(f"CLAUDE.md:{n}: {message}")
+
+    def finish(rule):
+        if rule is None or rule.get("_skip"):
+            return
+        for key in FOLLOW_UP_KEYS:
+            if key not in rule["lines"]:
+                err(rule["line"], f"rule {rule['id']!r} is missing '{key}'")
+        rules.append({"id": rule["id"], **{k: rule.get(k) for k in FOLLOW_UP_KEYS}})
+
+    for i in range(heads[0] + 1, len(lines)):
+        n, line = i + 1, lines[i].rstrip()
+        if re.match(r"^#{1,2} ", line):
+            break
+        if not line.strip():
+            continue
+        if line.startswith("### "):
+            finish(current)
+            rid = line[4:].strip()
+            current = {"id": rid, "line": n, "lines": {}}
+            if not FOLLOW_UP_RULE_RE.match(rid):
+                err(n, f"invalid rule id {rid!r} (use lowercase letters, digits and '-', up to 32 characters)")
+            elif rid in seen:
+                err(n, f"duplicate rule id {rid!r}")
+            seen.add(rid)
+            continue
+        if current is None:
+            err(n, f"the first entry under '{FOLLOW_UP_HEADING}' must be a '### <rule-id>' heading")
+            current = {"_skip": True}
+            continue
+        if current.get("_skip"):
+            continue
+        m = re.match(r"^- ([a-z]+):(.*)$", line)
+        if not m:
+            err(n, f"expected '- <key>: <value>', got {line.strip()!r}")
+            continue
+        key, value = m.group(1), m.group(2).strip()
+        if key not in FOLLOW_UP_KEYS:
+            err(n, f"unknown key {key!r}")
+            continue
+        if key in current["lines"]:
+            err(n, f"duplicate key {key!r}")
+            continue
+        current["lines"][key] = n
+        problem = _follow_up_value_problem(key, value)
+        if problem:
+            err(n, problem)
+        current[key] = value
+    finish(current)
+    if errors:
+        return [], errors
+    return rules, []
+
+
+def _pr_urls(task):
+    urls = []
+    for a in task.get("artifacts", []):
+        if a.get("kind") == "pr" and isinstance(a.get("url"), str) and a["url"] not in urls:
+            urls.append(a["url"])
+    return urls
+
+
+def new_pr_urls(current, candidate):
+    """(task_id, url) for every pr artifact url in the candidate that the same task does not have in current."""
+    cur_tasks = {t.get("id"): t for t in current.get("tasks", [])}
+    found = []
+    for task in candidate.get("tasks", []):
+        old = set(_pr_urls(cur_tasks.get(task.get("id"), {})))
+        found += [(task.get("id"), url) for url in _pr_urls(task) if url not in old]
+    return found
+
+
+def follow_up_label(artifact, url):
+    label = (artifact or {}).get("label")
+    if isinstance(label, str) and label.strip():
+        return label
+    m = PR_URL_RE.match(url)
+    return f"{m.group(1)}/{m.group(2)}#{m.group(3)}" if m else url
+
+
+def follow_up_actions(state, task_id, url, rules, now, closed=False):
+    """New follow-up user actions for one pr url of a task. Does not modify state.
+    A rule whose (rule, url) pair the task already has is skipped, and so is every pr_closed rule when closed."""
+    task = next((t for t in state.get("tasks", []) if t.get("id") == task_id), None)
+    if task is None:
+        raise StateError(f"task {task_id} not found")
+    artifact = next((a for a in task.get("artifacts", []) if a.get("kind") == "pr" and a.get("url") == url), None)
+    label = follow_up_label(artifact, url)
+    have = {(ua["follow_up"].get("rule"), ua["follow_up"].get("url"))
+            for ua in task.get("user_actions", []) if isinstance(ua.get("follow_up"), dict)}
+    used = [int(m.group(1)) for t in state.get("tasks", []) for ua in t.get("user_actions", [])
+            if isinstance(ua.get("id"), str) and (m := UA_ID_RE.match(ua["id"]))]
+    next_num = max(used, default=0) + 1
+    actions = []
+    for rule in rules:
+        if (rule["id"], url) in have or (closed and rule["done"] == "pr_closed"):
+            continue
+        actions.append({
+            "id": f"UA-{next_num:04d}",
+            "description": re.sub(r"\{(label|url)\}", lambda m: label if m.group(1) == "label" else url, rule["text"]),
+            "since": now,
+            "follow_up": {"rule": rule["id"], "url": url, "done": rule["done"]},
+        })
+        next_num += 1
+    return actions
 
 
 # ---------------------------------------------------------------- imperative shell
@@ -1083,6 +1303,16 @@ This directory belongs to the session-supervisor skill. It is not a project.
 - Never delete sessions.
 - The supervisor only operates sessions, changes state through commit, publishes the dashboard, and talks to the user. Workers edit, commit, push, and open PRs; observer subagents run read-only checks and investigations, write results under .supervisor/observations/, and return the path.
 - A PreToolUse hook (state_tool.py guard) blocks edits outside this directory and mutating git / jj / gh commands. To disable it, remove its entry from .claude/settings.json by hand; the supervisor asks before restoring a missing entry.
+- `## Follow-ups` (optional) turns each newly verified PR into a user action such as "Review org/repo#42". Format: references/follow-ups-format.md in the session-supervisor skill. Check it with `python3 .supervisor/state_tool.py validate-follow-ups --claude-md CLAUDE.md`.
+
+<!-- Example: remove the comment markers to enable it.
+## Follow-ups
+
+### review-pr
+- on: pr
+- text: Review {label}
+- done: pr_closed
+-->
 """
 
 
@@ -1170,6 +1400,68 @@ def cmd_guard(args):
         return 0
 
 
+def _read_follow_up_rules(claude_md):
+    if not os.path.exists(claude_md):
+        return []
+    rules, errors = parse_follow_ups(Path(claude_md).read_text(encoding="utf-8"))
+    if errors:
+        raise StateError(errors)
+    return rules
+
+
+def cmd_validate_follow_ups(args):
+    print(f"ok: {len(_read_follow_up_rules(args.claude_md))} rules")
+    return 0
+
+
+def _check_candidate_path(candidate, state):
+    # Python writes are not seen by the guard, so the subcommand itself keeps to the supervisor directory.
+    if _real(candidate) == _real(state):
+        raise StateError(f"--candidate {candidate} is the state file; write follow-ups only to a candidate")
+    directory = os.path.dirname(_real(candidate))
+    if not (os.path.isfile(os.path.join(directory, "state.json")) and os.path.isdir(os.path.join(directory, ".supervisor"))):
+        raise StateError(f"--candidate {candidate} is not in a supervisor directory (no state.json and .supervisor/ next to it)")
+
+
+def cmd_follow_ups(args):
+    manual = args.task is not None or args.url is not None
+    if manual and (args.task is None or args.url is None):
+        raise StateError("--task and --url go together")
+    if manual and args.state:
+        raise StateError("--state cannot be combined with --task / --url")
+    if not manual and not args.state:
+        raise StateError("--state is required unless --task and --url are given")
+    state_path = args.state or os.path.join(os.path.dirname(os.path.abspath(args.candidate)), "state.json")
+    _check_candidate_path(args.candidate, state_path)
+    candidate = _read_json(args.candidate)
+    closed = [url for group in args.closed for url in group]
+    claude_md = args.claude_md or os.path.join(os.path.dirname(os.path.abspath(state_path)), "CLAUDE.md")
+    rules = _read_follow_up_rules(claude_md)
+    if manual:
+        task = next((t for t in candidate.get("tasks", []) if t.get("id") == args.task), None)
+        if task is None or args.url not in _pr_urls(task):
+            raise StateError(f"{args.url} is not a pr artifact of task {args.task} in the candidate")
+        targets = [(args.task, args.url)]
+        closed_urls = {args.url} if args.closed and (not closed or args.url in closed) else set()
+    else:
+        targets = new_pr_urls(_read_json(state_path), candidate)
+        new_urls = {url for _, url in targets}
+        for url in closed:
+            if url not in new_urls:
+                print(f"warning: --closed {url} is not a newly recorded pr artifact; ignored", file=sys.stderr)
+        closed_urls = set(closed)
+    added = []
+    now = _now()
+    for task_id, url in targets:
+        actions = follow_up_actions(candidate, task_id, url, rules, now, closed=url in closed_urls)
+        next(t for t in candidate["tasks"] if t.get("id") == task_id).setdefault("user_actions", []).extend(actions)
+        added += [dict(a, task_id=task_id) for a in actions]
+    if added:
+        _write_atomic(args.candidate, serialize(candidate))
+    print(json.dumps(added, ensure_ascii=False))
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="state_tool.py", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1202,6 +1494,20 @@ def build_parser():
     p = sub.add_parser("guard", help="PreToolUse hook: exit 3 with a reason on stderr when the call is blocked, else 0")
     p.add_argument("--dir", required=True)
     p.set_defaults(func=cmd_guard)
+
+    p = sub.add_parser("validate-follow-ups", help="check the ## Follow-ups section of CLAUDE.md (exit 1 with error lines when invalid)")
+    p.add_argument("--claude-md", required=True)
+    p.set_defaults(func=cmd_validate_follow_ups)
+
+    p = sub.add_parser("follow-ups", help="add follow-up user actions for newly recorded pr artifacts to a candidate")
+    p.add_argument("--state", help="committed state.json; the candidate's new pr artifacts are found by comparing with it")
+    p.add_argument("--candidate", required=True)
+    p.add_argument("--closed", action="append", nargs="*", default=[],
+                   help="pr urls already merged or closed (pr_closed rules are skipped); a bare --closed in --task mode")
+    p.add_argument("--claude-md", help="default: CLAUDE.md next to the state")
+    p.add_argument("--task", help="manual mode: add follow-ups for --url of this task without comparing (re-adds removed ones)")
+    p.add_argument("--url")
+    p.set_defaults(func=cmd_follow_ups)
 
     p = sub.add_parser("check-cwd", help="print busy or free for a non-git cwd")
     p.add_argument("--state", required=True)
