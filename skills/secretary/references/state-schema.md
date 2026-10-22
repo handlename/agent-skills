@@ -10,6 +10,7 @@
   - External items: `<source-id>/<item id from the report>`.
 - `sessions[].session_id`: the runtime session id returned by start. Reconciliation matches on it. The start-time `name` is `sec-<S-id>` (e.g. `sec-S-0005`) and is used only to recover a `pending` entry.
 - `today[].key`: `<source-id>/<item id from the report>`.
+- External item ids must not change across queries or days. The query brief in [agent-prompt.md](agent-prompt.md) asks for the item's link URL without its query string, else the path of the linked file in the source directory, else `<file path>#<item text>`, one item per task-list line. When an id changes, the merge treats the item as a new decision: it gets a new `D-NNNN`, and the old item's `due` and relay records do not carry over.
 
 ## Example
 

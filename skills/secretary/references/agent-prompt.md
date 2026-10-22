@@ -20,7 +20,14 @@ Collect two lists from this directory, using its CLAUDE.md and files as context:
 - today: things the user should do today.
 - decisions: things that wait on the user's decision.
 
-Give every item an `id` that stays the same across queries, such as the file path plus the heading or line marker (for example `daily/2026-10-18.md#3`). Never use a running number or a position in the list.
+Report each line of a task list as exactly one item: never merge several lines into one item or split one line into several.
+
+Give every item an `id` that stays the same across queries and across days, chosen in this order:
+1. If the item has a link, that URL without its query string (for example `https://github.com/org/repo/pull/12`).
+2. Otherwise, if the item links to a file in this directory, that file's path (for example `projects/website.md`).
+3. Otherwise, the path of the file the item is written in, `#`, and the item's text without the list or checkbox marker (for example `inbox.md#打ち合わせを今週やるか`).
+
+When 1 or 2 applies, never use the path of a file whose name changes with the date (such as a daily note). Never use a running number, a line number, a position in the list, or a heading or label you made up.
 
 End your last message with exactly one `secretary-report` block, as specified in the background.
 ````
@@ -40,11 +47,11 @@ Rules:
 Report format: end your last message with one fenced block whose language tag is `secretary-report`, containing a single JSON object on one line:
 
 ```secretary-report
-{"source_id": "{source.id}", "mode": "query", "status": "done", "today": [{"id": "daily/2026-10-18.md#3", "title": "...", "link": ""}], "decisions": [{"id": "inbox.md#12", "description": "...", "link": "", "since": ""}], "summary": "", "blockers": []}
+{"source_id": "{source.id}", "mode": "query", "status": "done", "today": [{"id": "https://github.com/org/repo/pull/12", "title": "...", "link": "https://github.com/org/repo/pull/12"}], "decisions": [{"id": "inbox.md#打ち合わせを今週やるか", "description": "...", "link": "", "since": ""}], "summary": "", "blockers": []}
 ```
 
 - `status`: `done` | `failed` | `needs_input`. `failed` and `needs_input` require at least one entry in `blockers`.
-- `id`: a non-empty string, stable across queries. `title` and `description`: non-empty strings.
+- `id`: a non-empty string that stays the same across queries and days: the item's link URL without its query string; otherwise the path of a file in this directory that the item links to; otherwise `<file path>#<item text>`. Do not use a date-named file's path when a link or linked file exists. One task-list line is one item. `title` and `description`: non-empty strings.
 - `link`: an empty string or an http(s) URL of where the item comes from (e.g. the issue or pull request it is about); give one whenever the item names such a page. `since`: an empty string or a date (`YYYY-MM-DD`).
 - Use empty lists when there is nothing to report.
 ````
@@ -100,13 +107,13 @@ Report format: end your last message with one fenced block whose language tag is
 The session places one fenced JSON block tagged `secretary-report` at the end of its last message. If several blocks appear, the last one is used.
 
 ```secretary-report
-{"source_id": "obsidian", "mode": "query", "status": "done", "today": [{"id": "daily-2026-10-18#3", "title": "週次レポートを書く", "link": ""}], "decisions": [{"id": "inbox#12", "description": "打ち合わせを今週やるか", "link": "", "since": "2026-10-17"}], "summary": "", "blockers": []}
+{"source_id": "obsidian", "mode": "query", "status": "done", "today": [{"id": "projects/weekly-report.md", "title": "週次レポートを書く", "link": ""}], "decisions": [{"id": "inbox.md#打ち合わせを今週やるか", "description": "打ち合わせを今週やるか", "link": "", "since": "2026-10-17"}], "summary": "", "blockers": []}
 ```
 
 Rules:
 
 - `mode`: `query` | `relay`. `status`: `done` | `failed` | `needs_input`; `failed` and `needs_input` require at least one entry in `blockers`.
-- `mode: query`: every `today[]` and `decisions[]` entry has a non-empty, stable `id`; `title` / `description` are non-empty strings; `link` is empty or http(s); `since` is empty or a date.
+- `mode: query`: every `today[]` and `decisions[]` entry has a non-empty, stable `id` (chosen as in the query brief; `state_tool.py` checks only that it is a non-empty string); `title` / `description` are non-empty strings; `link` is empty or http(s); `since` is empty or a date.
 - `mode: relay`: `today` and `decisions` are ignored if present.
 - A single entry with a wrong type or value fails the whole report.
 - The secretary reads the block from the full latest message obtained with the event-reading capability, never from the turn-end note (the note is cut at about 400 characters and replaces `"` with `'`).
