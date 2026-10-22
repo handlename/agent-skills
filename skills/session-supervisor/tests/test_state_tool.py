@@ -1364,6 +1364,27 @@ class RenderTest(unittest.TestCase):
         self.assertNotIn('href="javascript:', page)
         self.assertNotIn("{{TASKS}}", page)
 
+    def test_user_action_description_renders_markdown(self):
+        state = fixture_state()
+        task = next(t for t in state["tasks"] if t.get("user_actions"))
+        task["user_actions"][0]["description"] = (
+            "Push `a/<b>` **now**: [PR](https://x.test/1?a=1&b=2)\n"
+            "- one `**x**`\n- two\n\n1. first\n2. [bad](javascript:alert(1))")
+        page = self.page(state)
+        actions = page[page.index('id="actions"'):page.index('id="tasks"')]
+        self.assertIn("<p>Push <code>a/&lt;b&gt;</code> <strong>now</strong>: "
+                      '<a href="https://x.test/1?a=1&amp;b=2">PR</a></p>', actions)
+        self.assertIn("<ul><li>one <code>**x**</code></li><li>two</li></ul>", actions)
+        self.assertIn("<ol><li>first</li><li>[bad](javascript:alert(1))</li></ol>", actions)
+        self.assertNotIn('href="javascript:', page)
+
+    def test_markdown_never_emits_raw_html_or_template_slots(self):
+        self.assertEqual(st._md("<img src=x onerror=1> `{{HERO}}` **{{TASKS}}**"),
+                         "<p>&lt;img src=x onerror=1&gt; <code>&#123;&#123;HERO&#125;&#125;</code> "
+                         "<strong>&#123;&#123;TASKS&#125;&#125;</strong></p>")
+        self.assertEqual(st._md('[x](https://a.test/"onmouseover=1)'),
+                         '<p><a href="https://a.test/&quot;onmouseover=1">x</a></p>')
+
     def test_file_artifact_is_not_a_link(self):
         state = fixture_state()
         find(state["tasks"], "T-0004")["artifacts"] = [{"kind": "file", "path": "/Users/handlename/notes/a.txt"}]

@@ -238,6 +238,13 @@ a { text-underline-offset: 2px; text-decoration-thickness: 1px; }
   grid-area: meta; color: var(--legend-muted); font: 400 0.74rem/1.4 var(--font-mono); gap: 2px 14px;
 }
 .act__meta code { font-size: 1em; }
+.md > * + * { margin-top: 6px; }
+.md ul, .md ol { margin: 0; padding-left: 1.4em; }
+.md ul { list-style: disc; }
+.md ol { list-style: decimal; }
+.md li + li { margin-top: 2px; }
+.md code { padding: 0 3px; border-radius: 2px; background: var(--glass); }
+.md strong { font-weight: 700; }
 
 /* pending pulse: the caution bezel flashes; static ring otherwise */
 .hero[data-pending]::after {

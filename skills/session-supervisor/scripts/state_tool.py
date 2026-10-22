@@ -821,6 +821,53 @@ def _esc(value):
     return html.escape("" if value is None else str(value)).replace("{", "&#123;").replace("}", "&#125;")
 
 
+_MD_CODE = re.compile(r"(`[^`\n]+`)")
+_MD_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+_MD_BOLD = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*")
+_MD_ITEM = re.compile(r"^\s*(?:([-*])|\d+[.)])\s+(.*)$")
+
+
+def _md_inline(text):
+    out = []
+    for part in _MD_CODE.split(text):
+        if len(part) > 2 and part.startswith("`") and part.endswith("`"):
+            out.append(f"<code>{_esc(part[1:-1])}</code>")
+            continue
+        part = _MD_LINK.sub(lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', _esc(part))
+        out.append(_MD_BOLD.sub(r"<strong>\1</strong>", part))
+    return "".join(out)
+
+
+def _md(value):
+    """Render a markdown subset (paragraphs, lists, `code`, **bold**, [text](http-url)) as escaped HTML."""
+    blocks, para, items, ordered = [], [], [], False
+
+    def flush():
+        nonlocal para, items
+        if para:
+            blocks.append(f'<p>{"<br>".join(_md_inline(line) for line in para)}</p>')
+        if items:
+            tag = "ol" if ordered else "ul"
+            blocks.append(f'<{tag}>{"".join(f"<li>{_md_inline(i)}</li>" for i in items)}</{tag}>')
+        para, items = [], []
+
+    for line in ("" if value is None else str(value)).splitlines():
+        item = _MD_ITEM.match(line)
+        if not line.strip():
+            flush()
+        elif item:
+            if para or (items and ordered != (item.group(1) is None)):
+                flush()
+            ordered = item.group(1) is None
+            items.append(item.group(2))
+        elif items:
+            items[-1] += " " + line.strip()
+        else:
+            para.append(line.strip())
+    flush()
+    return "".join(blocks)
+
+
 def _chip(state):
     return f'<span class="chip" data-state="{_esc(state)}">{_esc(state)}</span>'
 
@@ -882,7 +929,7 @@ def _render_hero(state):
         if kind == "user":
             rows.append(
                 f'<li class="act" data-kind="user" style="--i:{i}"><span class="act__kind">Action</span>'
-                f'<p class="act__text">{_esc(obj.get("description"))}</p>'
+                f'<div class="act__text md">{_md(obj.get("description"))}</div>'
                 f'<p class="act__meta"><span class="id">{_esc(task["id"])}</span><span class="id">{_esc(obj.get("id"))}</span>'
                 f'<span>since {_time(obj.get("since"))}</span></p></li>')
             continue
