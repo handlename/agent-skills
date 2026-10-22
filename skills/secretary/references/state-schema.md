@@ -50,7 +50,8 @@
       "due": "2026-10-19",
       "relay_mode": "paste",
       "relay_id": "R-0003",
-      "follow_up": null
+      "follow_up": null,
+      "link": null
     },
     {
       "id": "D-0012",
@@ -62,7 +63,8 @@
       "due": null,
       "relay_mode": "paste",
       "relay_id": null,
-      "follow_up": { "rule": "review-pr", "url": "https://github.com/org/repo-a/pull/42", "done": "pr_closed" }
+      "follow_up": { "rule": "review-pr", "url": "https://github.com/org/repo-a/pull/42", "done": "pr_closed" },
+      "link": null
     }
   ],
   "relays": [
@@ -151,6 +153,7 @@ Supervisor user actions and external decisions share this list. An entry whose `
 | `relay_mode` | `paste` \| `app` \| `start` \| `none`. Recomputed by the script on every merge (see relay_mode classification); `commit` rejects any other value. |
 | `relay_id` | The latest relay for this item, or `null`. |
 | `follow_up` | `null`, or `{rule, url, done}` (all strings) copied from the supervisor user action's `follow_up` on every merge. Always `null` for external items. A missing key is treated as `null`. `url` is the PR the task is about; `done` is `pr_closed` or `manual` (the supervisor decides when the follow-up is gone). Set by the merge; never edit it. |
+| `link` | An http(s) URL of the item's origin (e.g. the PR it is about), or `null`. Updated from the external report on every merge (`""` becomes `null`); the dashboard links the description to it. Always `null` for supervisor items. A missing key is treated as `null`. |
 
 ### relays[]
 
@@ -196,7 +199,7 @@ An entry leaves `sessions[]` only when reconciliation observes it archived or `m
 - `relays[].status`: `pending` (`start` before the start) \| `sent` (`start` relay session started; `commit` sets it once the relay session leaves `pending`) \| `awaiting_user` (`paste`) \| `failed` \| `confirmed` (the source no longer reports the item) \| `unconfirmed` (`start` relay whose item was still reported by the first query started after `session_closed_at`).
 - `sessions[].state`: `pending` \| `running` \| `closing`.
 - `decisions[].due`: `YYYY-MM-DD` means until 23:59:59 of that day in the script's local time zone.
-- URLs (`secretary.dashboard.url`, `supervisor.dashboard_url`, `today[].link`): http or https, or `null`.
+- URLs (`secretary.dashboard.url`, `supervisor.dashboard_url`, `today[].link`, `decisions[].link`): http or https, or `null`.
 
 ## relay_mode classification
 
@@ -234,6 +237,6 @@ A `failed` relay shows "relay failed" with its blockers. Paste text appears only
 4. A new `sessions[]` entry (either purpose) requires `## Sources` without errors, an existing source, and no other `pending` / `running` session (query or relay) for the same source; `closing` does not count. A `purpose: query` entry must also be in the result of `due_sources` at commit time (interval expired).
 5. A new `purpose: relay` entry requires its relay to be `pending`, and its directory must not overlap the `cwd` of a running non-git supervisor worker. `commit` reads the supervisor's `state.json` read-only for this check; if it is unreadable or malformed, only the new relay session is rejected.
 6. A change from `pending` to `running` comes with a `session_id`.
-7. `secretary.dashboard.url`, `supervisor.dashboard_url`, and `today[].link` are http(s) or `null`.
+7. `secretary.dashboard.url`, `supervisor.dashboard_url`, `today[].link`, and `decisions[].link` are http(s) or `null`.
 
 While `## Sources` has errors, every new query session and every new `start` relay is rejected. Due dates, supervisor merges, `paste` relays, and updates of existing sessions still pass.

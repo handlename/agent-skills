@@ -508,6 +508,7 @@ def validate(state):
     urls = [("secretary.dashboard.url", (state["secretary"].get("dashboard") or {}).get("url")),
             ("supervisor.dashboard_url", state["supervisor"].get("dashboard_url"))]
     urls += [(f"today {t['key']}: link", t.get("link")) for t in state["today"]]
+    urls += [(f"decision {d['id']}: link", d.get("link")) for d in state["decisions"]]
     for label, url in urls:
         if url is not None and not _is_http_url(url):
             errors.append(f"{label} must be http(s) or null")
@@ -688,17 +689,17 @@ def _confirm_relay(state, relay_id):
 
 
 def _merge_decisions(state, source, items, relay_mode_of):
-    """Upsert decisions of one source from (key, ref, description, since, follow_up) and drop the keys the source no longer reports."""
+    """Upsert decisions of one source from (key, ref, description, since, follow_up, link) and drop the keys the source no longer reports."""
     existing = {d["key"]: d for d in state["decisions"] if d["source"] == source}
     seen = set()
-    for key, ref, description, since, follow_up in items:
+    for key, ref, description, since, follow_up, link in items:
         seen.add(key)
         d = existing.get(key)
         if d is None:
             d = {"id": _next_id(state, "decision"), "key": key, "source": source, "ref": ref,
                  "description": description, "since": since, "due": None, "relay_mode": None, "relay_id": None}
             state["decisions"].append(d)
-        d.update(description=description, ref=ref, since=since, follow_up=copy.deepcopy(follow_up))
+        d.update(description=description, ref=ref, since=since, follow_up=copy.deepcopy(follow_up), link=link)
         d["relay_mode"] = relay_mode_of(d)
     for key, d in existing.items():
         if key not in seen and d.get("relay_id"):
@@ -715,7 +716,7 @@ def merge_supervisor(state, sv_state, now):
         sup.update(error="; ".join(errors), read_at=now)
         return state
     items = [(f"supervisor/{t['id']}/{ua['id']}@{ua['since']}", {"task_id": t["id"], "ua_id": ua["id"]}, ua["description"], ua["since"],
-              ua.get("follow_up"))
+              ua.get("follow_up"), None)
              for t in sv_state["tasks"] for ua in t.get("user_actions", [])]
     _merge_decisions(state, RESERVED_SOURCE, items, _supervisor_relay_mode)
     url = (sv_state["supervisor"].get("dashboard") or {}).get("url")
@@ -738,7 +739,7 @@ def merge_source(state, source_id, report, session, now, relay=None):
     state["today"] = [t for t in state["today"] if t["source"] != source_id] + [
         {"key": f"{source_id}/{t['id']}", "source": source_id, "title": t["title"], "link": t.get("link") or None}
         for t in report.get("today", [])]
-    items = [(f"{source_id}/{d['id']}", {"item_id": d["id"]}, d["description"], d.get("since") or None, None)
+    items = [(f"{source_id}/{d['id']}", {"item_id": d["id"]}, d["description"], d.get("since") or None, None, d.get("link") or None)
              for d in report.get("decisions", [])]
 
     def mode_of(d):
@@ -851,10 +852,11 @@ def _report_items_error(report):
             ids.append(i["id"])
         if len(ids) != len(set(ids)):
             return f"{key}[].id must be unique"
-    for t in report["today"]:
-        link = t.get("link", "")
-        if link != "" and not _is_http_url(link):
-            return "today[].link must be empty or http(s)"
+    for key in ("today", "decisions"):
+        for i in report[key]:
+            link = i.get("link", "")
+            if link != "" and not _is_http_url(link):
+                return f"{key}[].link must be empty or http(s)"
     for d in report["decisions"]:
         if not _valid_since(d.get("since", "")):
             return "decisions[].since must be empty or a date"
@@ -1056,7 +1058,7 @@ def _render_decisions(state, now):
         since = f' · since {_esc(d["since"])}' if d.get("since") else ""
         rows.append(
             f'<li class="dec" data-mode="{_esc(d["relay_mode"])}"{attrs}>'
-            f'<p class="dec__head">{_copy("id", d["id"])}<span class="dec__text">{_esc(d["description"])}</span>{_badge_html(badges, d["id"])}</p>'
+            f'<p class="dec__head">{_copy("id", d["id"])}<span class="dec__text">{_link_or_text(d.get("link"), d["description"])}</span>{_badge_html(badges, d["id"])}</p>'
             f'<p class="dec__meta"><span class="dec__src">{_esc(d["source"])}</span> · {due}{since}</p>'
             f'{_relay_guide(d, relays.get(d.get("relay_id")))}</li>')
     body = f'<ul class="dec-list">{"".join(rows)}</ul>' if rows else '<p class="empty">No decisions waiting.</p>'

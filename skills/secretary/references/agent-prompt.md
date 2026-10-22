@@ -40,12 +40,12 @@ Rules:
 Report format: end your last message with one fenced block whose language tag is `secretary-report`, containing a single JSON object on one line:
 
 ```secretary-report
-{"source_id": "{source.id}", "mode": "query", "status": "done", "today": [{"id": "daily/2026-10-18.md#3", "title": "...", "link": ""}], "decisions": [{"id": "inbox.md#12", "description": "...", "since": ""}], "summary": "", "blockers": []}
+{"source_id": "{source.id}", "mode": "query", "status": "done", "today": [{"id": "daily/2026-10-18.md#3", "title": "...", "link": ""}], "decisions": [{"id": "inbox.md#12", "description": "...", "link": "", "since": ""}], "summary": "", "blockers": []}
 ```
 
 - `status`: `done` | `failed` | `needs_input`. `failed` and `needs_input` require at least one entry in `blockers`.
 - `id`: a non-empty string, stable across queries. `title` and `description`: non-empty strings.
-- `link`: an empty string or an http(s) URL. `since`: an empty string or a date (`YYYY-MM-DD`).
+- `link`: an empty string or an http(s) URL of where the item comes from (e.g. the issue or pull request it is about); give one whenever the item names such a page. `since`: an empty string or a date (`YYYY-MM-DD`).
 - Use empty lists when there is nothing to report.
 ````
 
@@ -100,7 +100,7 @@ Report format: end your last message with one fenced block whose language tag is
 The session places one fenced JSON block tagged `secretary-report` at the end of its last message. If several blocks appear, the last one is used.
 
 ```secretary-report
-{"source_id": "obsidian", "mode": "query", "status": "done", "today": [{"id": "daily-2026-10-18#3", "title": "週次レポートを書く", "link": ""}], "decisions": [{"id": "inbox#12", "description": "打ち合わせを今週やるか", "since": "2026-10-17"}], "summary": "", "blockers": []}
+{"source_id": "obsidian", "mode": "query", "status": "done", "today": [{"id": "daily-2026-10-18#3", "title": "週次レポートを書く", "link": ""}], "decisions": [{"id": "inbox#12", "description": "打ち合わせを今週やるか", "link": "", "since": "2026-10-17"}], "summary": "", "blockers": []}
 ```
 
 Rules:

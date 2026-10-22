@@ -7,5 +7,5 @@ I read the daily note.
 Corrected report:
 
 ```secretary-report
-{"source_id": "obsidian", "mode": "query", "status": "done", "today": [{"id": "daily-2026-10-18#5", "title": "歯医者を予約する", "link": "https://example.com/dentist"}, {"id": "daily-2026-10-18#6", "title": "請求書を払う", "link": ""}], "decisions": [{"id": "inbox#12", "description": "打ち合わせを今週やるか(更新)", "since": "2026-10-16"}, {"id": "inbox#13", "description": "旅行の日程を決める", "since": ""}], "summary": "2 tasks, 2 decisions", "blockers": []}
+{"source_id": "obsidian", "mode": "query", "status": "done", "today": [{"id": "daily-2026-10-18#5", "title": "歯医者を予約する", "link": "https://example.com/dentist"}, {"id": "daily-2026-10-18#6", "title": "請求書を払う", "link": ""}], "decisions": [{"id": "inbox#12", "description": "打ち合わせを今週やるか(更新)", "link": "https://github.com/org/repo/pull/12", "since": "2026-10-16"}, {"id": "inbox#13", "description": "旅行の日程を決める", "since": ""}], "summary": "2 tasks, 2 decisions", "blockers": []}
 ```

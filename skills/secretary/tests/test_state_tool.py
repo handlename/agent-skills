@@ -242,7 +242,7 @@ class SupervisorMergeTest(unittest.TestCase):
         self.assertEqual((d11["due"], d11["relay_id"]), ("2026-10-19", "R-0003"))
         new = find(merged["decisions"], "D-0013")
         self.assertEqual(new["key"], "supervisor/T-0005/UA-0003@2026-10-18T09:20:00+09:00")
-        self.assertEqual((new["ref"], new["relay_mode"], new["due"]), ({"task_id": "T-0005", "ua_id": "UA-0003"}, "paste", None))
+        self.assertEqual((new["ref"], new["relay_mode"], new["due"], new["link"]), ({"task_id": "T-0005", "ua_id": "UA-0003"}, "paste", None, None))
         self.assertEqual(merged["counters"]["decision"], 13)
         self.assertEqual(merged["supervisor"]["state_rev"], 42)
         self.assertEqual(merged["supervisor"]["read_at"], NOW)
@@ -365,9 +365,10 @@ class SourceMergeTest(unittest.TestCase):
         self.assertEqual(find(merged["sources"], "obsidian")["last_fetched_at"], NOW)
         self.assertIsNone([t for t in merged["today"] if t["key"].endswith("#6")][0]["link"])
         d10 = find(merged["decisions"], "D-0010")
-        self.assertEqual((d10["description"], d10["relay_mode"]), ("打ち合わせを今週やるか(更新)", "start"))
+        self.assertEqual((d10["description"], d10["relay_mode"], d10["link"]),
+                         ("打ち合わせを今週やるか(更新)", "start", "https://github.com/org/repo/pull/12"))
         d13 = find(merged["decisions"], "D-0013")
-        self.assertEqual((d13["key"], d13["since"], d13["relay_mode"]), ("obsidian/inbox#13", None, "start"))
+        self.assertEqual((d13["key"], d13["since"], d13["relay_mode"], d13["link"]), ("obsidian/inbox#13", None, "start", None))
         self.assertEqual(commit(state, merged)["rev"], 8)
 
     def test_item_removed_when_source_drops_it(self):
@@ -699,6 +700,7 @@ class ValidationTest(unittest.TestCase):
             commit(current, cand)
         for mutate in (lambda s: s.update(decisions="x"), lambda s: s["decisions"].append(1),
                        lambda s: s["decisions"][0].update(relay_mode="send"), lambda s: s["today"][0].update(link="javascript:x"),
+                       lambda s: s["decisions"][0].update(link="javascript:x"),
                        lambda s: s["secretary"]["dashboard"].update(url="ftp://x"), lambda s: s["counters"].update(relay=-1)):
             cand = copy.deepcopy(current)
             mutate(cand)
@@ -759,6 +761,7 @@ class ReportTest(unittest.TestCase):
             ('{"source_id": "o", "mode": "query", "status": "failed", "today": [], "decisions": [], "summary": "", "blockers": []}', "requires at least one blocker"),
             ('{"source_id": "o", "mode": "query", "status": "done", "today": [{"id": "", "title": "t"}], "decisions": [], "summary": "", "blockers": []}', "id must be"),
             ('{"source_id": "o", "mode": "query", "status": "done", "today": [], "decisions": [{"id": "a", "description": "d", "since": "soon"}], "summary": "", "blockers": []}', "since"),
+            ('{"source_id": "o", "mode": "query", "status": "done", "today": [], "decisions": [{"id": "a", "description": "d", "link": "ftp://x"}], "summary": "", "blockers": []}', "decisions[].link"),
             ('{"source_id": "o", "mode": "query", "status": "done", "today": [{"id": "a", "title": "t"}, {"id": "a", "title": "u"}], "decisions": [], "summary": "", "blockers": []}', "unique"),
             ('{"source_id": "o", "mode": "send", "status": "done", "summary": "", "blockers": []}', "invalid mode"),
             ('[1]', "JSON object"),
@@ -909,6 +912,14 @@ class RenderTest(unittest.TestCase):
         self.assertNotIn("{{HERO}}", page)
         self.assertIn("&#123;&#123;HERO&#125;&#125;", page)
         self.assertIn('href="https://mail.example.com/t/77"', page)
+
+    def test_decision_link_wraps_description(self):
+        state = fixture_state()
+        find(state["decisions"], "D-0010")["link"] = "https://github.com/org/repo/pull/12"
+        find(state["decisions"], "D-0011")["link"] = "javascript:alert(1)"
+        page = self.page(state)
+        self.assertIn('<span class="dec__text"><a href="https://github.com/org/repo/pull/12">', page)
+        self.assertNotIn('href="javascript:', page)
 
     def test_external_resources_are_google_fonts_only(self):
         page = self.page(fixture_state())
