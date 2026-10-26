@@ -142,7 +142,7 @@ The example is a snapshot for illustration: `w-0005` and `w-0006` are elided, so
 | :--- | :--- |
 | `id`, `task_id` | Worker id and owning task. |
 | `session_id`, `started_by` | Runtime session id and the supervisor session that started it (`null` while pending). |
-| `handle`, `title` | Start-time name (`[a-z0-9-]`, 24 characters or fewer) and display title. |
+| `handle`, `title` | Start-time name (`[a-z0-9-]`, 24 characters or fewer) and display title (52 characters or fewer, always set; the session's sidebar title is `<task id> <title>`, SKILL.md 6.2.2). |
 | `cwd` | Repo root (git) or target directory (non-git), absolute. |
 | `kind` | `git` or `non-git`. |
 | `delivery` | `push_pr`, `commit`, or `files` (see Value ranges). |
