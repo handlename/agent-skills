@@ -33,6 +33,8 @@ KINDS = ("git", "non-git")
 DELIVERIES = ("push_pr", "commit", "files")
 INTENDED_STATES = ("pending", "running", "archived")
 OBSERVED_STATES = ("none", "running", "idle", "needs_input", "archived", "missing")
+MODELS = ("opus", "sonnet", "haiku")
+SUPERVISOR_MODEL = "opus"
 ACTIVE_OBSERVED = ("running", "idle", "needs_input", "missing")
 TASK_STATUSES = ("needs_user", "running", "waiting", "done")
 ARTIFACT_KINDS = ("branch", "commit", "pr", "ci", "file")
@@ -505,6 +507,8 @@ def _shape_errors(state):
                 errors.append(f"worker {w['id']}: {key} must be a string")
         if w.get("replaced_by") is not None and not isinstance(w["replaced_by"], str):
             errors.append(f"worker {w['id']}: replaced_by must be a string")
+        if w.get("model") is not None and w["model"] not in MODELS:
+            errors.append(f"worker {w['id']}: model must be one of {', '.join(MODELS)}")
         continues = w.get("continues", 0)
         if not isinstance(continues, int) or isinstance(continues, bool) or continues < 0:
             errors.append(f"worker {w['id']}: continues must be a non-negative integer")
@@ -974,10 +978,11 @@ def _copy_id(cls, text):
 def _render_worker(w):
     seg = _segment_state(w)
     branch = f' · <code>{_esc(w.get("branch"))}</code>' if w.get("branch") else ""
+    model = f' · {_esc(w.get("model"))}' if w.get("model") else ""
     return (
         f'<li class="wk" data-state="{_esc(seg)}"><span class="dot" data-state="{_esc(seg)}" aria-hidden="true"></span>'
         f'<div class="wk__body"><p class="wk__title"><span class="id">{_esc(w.get("id"))}</span> {_esc(w.get("title"))} {_chip(w.get("observed_state"))}</p>'
-        f'<p class="wk__meta"><code>{_esc(w.get("cwd"))}</code>{branch} · {_esc(w.get("delivery"))}</p>'
+        f'<p class="wk__meta"><code>{_esc(w.get("cwd"))}</code>{branch} · {_esc(w.get("delivery"))}{model}</p>'
         f'{_render_report(w.get("last_report"))}</div></li>')
 
 
@@ -1539,13 +1544,17 @@ def cmd_setup(args):
         ("SessionStart", "startup|resume|clear|compact", f"python3 {script} digest --state {shlex.quote(str(state_path))}"),
         ("PreToolUse", GUARD_MATCHER, f"python3 {script} guard --dir {shlex.quote(str(target))}; [ $? -eq 3 ] && exit 2; exit 0"),
     )
-    added = False
+    changed = False
     for event, matcher, command in wanted:
         entries = settings.setdefault("hooks", {}).setdefault(event, [])
         if not any(h.get("command") == command for e in entries for h in e.get("hooks", [])):
             entries.append({"matcher": matcher, "hooks": [{"type": "command", "command": command}]})
-            added = True
-    if not added:
+            changed = True
+    # A model the user already chose is kept; the Capability check reports a non-opus supervisor.
+    if "model" not in settings:
+        settings["model"] = SUPERVISOR_MODEL
+        changed = True
+    if not changed:
         report.append(("exists", settings_path))
     else:
         existed = settings_path.exists()

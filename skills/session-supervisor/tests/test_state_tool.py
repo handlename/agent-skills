@@ -1645,6 +1645,35 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(settings["permissions"], {"allow": ["Bash(ls)"]})
         self.assertEqual(len(settings["hooks"]["SessionStart"]), 2)
 
+    def settings(self, target):
+        return json.loads((target / ".claude" / "settings.json").read_text(encoding="utf-8"))
+
+    def test_new_setup_runs_supervisor_on_opus(self):
+        target = self.root / "sup"
+        self.assertEqual(self.setup_dir(target).returncode, 0)
+        self.assertEqual(self.settings(target)["model"], "opus")
+
+    def test_adds_model_to_existing_setup(self):
+        target = self.root / "sup"
+        self.setup_dir(target)
+        settings_path = target / ".claude" / "settings.json"
+        settings = self.settings(target)
+        del settings["model"]
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+        proc = self.setup_dir(target)
+        self.assertIn(f"updated: {settings_path}", proc.stdout)
+        self.assertEqual(self.settings(target)["model"], "opus")
+        self.assertEqual(len(self.hooks(target)), 1)
+
+    def test_keeps_model_chosen_by_user(self):
+        target = self.root / "sup"
+        (target / ".claude").mkdir(parents=True)
+        (target / ".claude" / "settings.json").write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+        self.assertEqual(self.setup_dir(target).returncode, 0)
+        self.assertEqual(self.settings(target)["model"], "sonnet")
+        proc = self.setup_dir(target)
+        self.assertTrue(all(line.startswith("exists:") for line in proc.stdout.splitlines()), proc.stdout)
+
     def test_invalid_settings_json_aborts(self):
         target = self.root / "sup"
         (target / ".claude").mkdir(parents=True)
@@ -2378,6 +2407,37 @@ class FollowUpsCliTest(unittest.TestCase):
         self.assertIsNone(st.guard_decision(payload, str(self.dir), {}))
         payload = {"tool_name": "Bash", "tool_input": {"command": f"gh pr merge {PR42}"}, "cwd": str(self.dir)}
         self.assertIsNotNone(st.guard_decision(payload, str(self.dir), {}))
+
+
+class WorkerModelTest(unittest.TestCase):
+    def state_with(self, **fields):
+        state = fixture_state()
+        find(state["workers"], "w-0005").update(fields)
+        return state
+
+    def test_model_is_optional(self):
+        state = fixture_state()
+        self.assertNotIn("model", find(state["workers"], "w-0005"))
+        self.assertEqual(st.validate(state), [])
+        self.assertEqual(st.validate(self.state_with(model=None)), [])
+
+    def test_accepts_each_family(self):
+        for model in st.MODELS:
+            with self.subTest(model=model):
+                self.assertEqual(st.validate(self.state_with(model=model)), [])
+
+    def test_rejects_unknown_model(self):
+        for model in ("gpt", "claude-sonnet-5-5", 3, True):
+            with self.subTest(model=model):
+                errors = st.validate(self.state_with(model=model))
+                self.assertTrue(any("w-0005: model must be one of" in e for e in errors), errors)
+
+    def test_dashboard_shows_model(self):
+        page = st.assemble(*st.render(fixture_state(), TEMPLATE))
+        worker = page[page.index('<span class="id">w-0004</span>'):]
+        self.assertIn("· sonnet</p>", worker[:worker.index("</li>")])
+        other = page[page.index('<span class="id">w-0005</span>'):]
+        self.assertNotIn("sonnet", other[:other.index("</li>")])
 
 
 class CliSurfaceTest(unittest.TestCase):

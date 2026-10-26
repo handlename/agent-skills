@@ -78,6 +78,7 @@ Field names are agent-neutral:
       "intended_state": "running",
       "observed_state": "idle",
       "observed_at": "2026-10-17T10:41:00+09:00",
+      "model": "sonnet",
       "continues": 1,
       "last_report": { "message_ref": "msg_01HXYZ", "status": "in_progress", "summary": "retry 実装中", "next_action": "テストを追加" }
     },
@@ -146,6 +147,7 @@ The example is a snapshot for illustration: `w-0005` and `w-0006` are elided, so
 | `kind` | `git` or `non-git`. |
 | `delivery` | `push_pr`, `commit`, or `files` (see Value ranges). |
 | `branch`, `base_branch`, `worktree_path` | git only, filled after start. `branch` and `worktree_path` come from get; `base_branch` is get's `sourceBranch`, else the remote default branch (`refs/remotes/origin/HEAD`, e.g. `origin/main`), observed by a subagent. A push-only worker (SKILL.md 6.3 step 7) keeps `branch` = the pushed branch instead of the app branch from get, and copies the original worker's `base_branch`; a replacement worker (`replaced_by`, SKILL.md 6.8) likewise inherits the old worker's `base_branch` and does not use get's `sourceBranch`; one started from an archived stub (or from the fallback when the stub expired or lacks a `commit` artifact) uses the observed remote default branch, never get's `sourceBranch` (the pushed branch). |
+| `model` | Optional: `opus`, `sonnet`, or `haiku`, the family named in the `model` that get returned after the start (SKILL.md 6.2.1), not the family the supervisor chose. Absent while `pending` and when get named none of the three. |
 | `intended_state` | What the supervisor wants. |
 | `observed_state`, `observed_at` | What the supervisor last observed, and when. |
 | `last_report` | Last processed report (see last_report). |
@@ -177,6 +179,7 @@ Revival (SKILL.md 6.7 (c)):
   - `files`: kind is `non-git`
 - `worker.intended_state`: `pending` | `running` | `archived`
 - `worker.observed_state`: `none` | `running` | `idle` | `needs_input` | `archived` | `missing`
+- `worker.model` (optional): `opus` | `sonnet` | `haiku`, or absent / null
 - `task.artifacts[].kind`: `branch` | `commit` | `pr` | `ci` | `file`
   - `pr` / `ci`: `url` (http or https) is required
   - `file`: `path` (absolute) is required; `url` is forbidden

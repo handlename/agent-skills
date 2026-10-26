@@ -60,6 +60,7 @@
       "intended_state": "running",
       "observed_state": "idle",
       "observed_at": "2026-10-17T10:41:00+09:00",
+      "model": "sonnet",
       "last_report": { "message_ref": "msg_01HXYZ", "status": "in_progress", "summary": "retry 実装中", "next_action": "テストを追加" }
     },
     {

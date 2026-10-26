@@ -4,6 +4,8 @@ The supervisor never observes repositories or reads target files itself (SKILL.m
 
 Fill every `{...}` field before running the subagent; never run it with an unfilled field.
 
+Run the subagent on model `haiku` for every purpose (without a model when the subagent capability takes none).
+
 ## Brief
 
 ````markdown
