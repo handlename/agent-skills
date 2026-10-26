@@ -262,17 +262,16 @@ Start only in a turn that carries the user's own words. A start refused in an ev
 
 #### 6.2.1 Worker model
 
-Choose the family from the work in the brief of the worker being started. Every start through 6.2 chooses again, including push-only (6.3 step 7), follow-up (6.7), and replacement (6.8) workers.
+Choose the family from the brief type of the worker being started. Every worker starts on opus, whatever its work looks like at the start, because work that looks simple can grow complex as the worker digs into it. The only exception is the push-only worker, whose work stays routine.
 
-| Family | Work |
+| Family | Worker |
 | :--- | :--- |
-| `opus` | Implementation that needs design decisions, or a change across multiple files |
-| `sonnet` | Implementation with a clear scope, or investigation |
-| `haiku` | Routine operations such as a push-only worker (6.3 step 7) |
+| `opus` | Every worker except push-only: normal, follow-up (6.7), and replacement (6.8) workers whose inherited brief type is not push-only |
+| `haiku` | Push-only worker (6.3 step 7), including a replacement (6.8) of one |
 
-- **Passing it**: for `opus`, omit `model`; the worker inherits this supervisor's model. For `sonnet` or `haiku`, pass a model id of that family, taken from the first that applies: an id the user gave in this supervisor session (see Mismatch); a model id of that family stated in your own environment information; else the family name itself.
+- **Passing it**: for `opus`, omit `model`; the worker inherits this supervisor's model. For `haiku`, pass a model id of that family, taken from the first that applies: an id the user gave in this supervisor session (see Mismatch); a model id of that family stated in your own environment information; else the family name itself.
 - **Recording it**: in 6.2 step 5, set `model` to the family (`opus`, `sonnet`, or `haiku`) named in the `model` that get returns, not the one you chose. If get returns no `model`, or it names none of the three, leave `model` unset.
-- **Mismatch** (only when you passed `sonnet` or `haiku`): if get reports another family, the start ignored the id. Let the worker continue; do not restart it or change its model. Tell the user once per family per supervisor session: "Could not start a `<family>` worker; tell me the `<family>` model id shown in the app's model picker." Until the user answers, omit `model` for that family in this supervisor session.
+- **Mismatch** (only when you passed `haiku`): if get reports another family, the start ignored the id. Let the worker continue; do not restart it or change its model. Tell the user once per supervisor session: "Could not start a `haiku` worker; tell me the `haiku` model id shown in the app's model picker." Until the user answers, omit `model` for `haiku` in this supervisor session.
 
 #### 6.2.2 Worker title
 
@@ -395,7 +394,7 @@ With no original branch for the target `cwd`, do not pass `source_branch`.
 Route the follow-up by where the task is:
 
 - **(a) A running worker** (observed `running`, `idle`, or `needs_input`) in the target directory: append the follow-up and send the Follow-up message ([references/worker-prompt.md](references/worker-prompt.md)). If the worker is `intended_state: archived` and its archive is not yet observed, set it back to `intended_state: running` with `continues: 0` in the same candidate, and remove its push-decision and archive-refused user actions (as for "Reuse" in 6.3 step 7). An existing PR of its branch is updated as it is. Its `model` stays as it is (nothing is started). If its purpose changes, retitle it (6.2.2).
-- **(b) The task is in `tasks` and its workers have finished**: add a worker to the same task with the target directory's `kind` and `cwd`, `delivery: commit` for git (even when the original was `push_pr`) or `files` for non-git, `intended_state: pending`, `observed_state: none`, and start it with the table above and the follow-up brief; 6.2.1 chooses its model from the follow-up brief. Leave the task's remaining follow-up user actions (e.g. "Review repo-a#42") as they are.
+- **(b) The task is in `tasks` and its workers have finished**: add a worker to the same task with the target directory's `kind` and `cwd`, `delivery: commit` for git (even when the original was `push_pr`) or `files` for non-git, `intended_state: pending`, `observed_state: none`, and start it with the table above and the follow-up brief; 6.2.1 starts it on opus. Leave the task's remaining follow-up user actions (e.g. "Review repo-a#42") as they are.
 - **(c) An archived stub**: create a task with the same id, copying `title`, `request`, and `followups` from the stub and appending the new follow-up; `artifacts` empty and `push_consent` null. Add workers as in (b). Keep the stub; `commit` replaces it on the next archive. Make a new task (6.1) instead for a cancelled stub, a stub without `request`, or a stub no longer in `archived` (only the 20 newest are kept).
 
 A follow-up that asks for work and also consents to push: never record that consent in `push_consent` directly (`commit` rejects it). Resolve it at the push decision after verification, with that message verbatim as `message`, as in "Consent while the worker is still running" (6.3 step 7). If the message was lost, wait for the user's answer.
@@ -407,7 +406,7 @@ A worker that went missing (6.4 "Not listed") or was archived outside the superv
 1. Count `n` before marking the failed worker: the workers of the same task with the same `cwd` that have `replaced_by`.
 2. `n` < 3: in one candidate,
    - set the old worker to `intended_state: archived` with `replaced_by: <new worker id>`;
-   - add a new worker with `intended_state: pending`, `observed_state: none`, copying from the old worker `kind`, `cwd`, `delivery`, `base_branch`, `title`, and its brief type (normal, push-only, or follow-up); a push-only worker also copies `branch` (the pushed branch) and `{commit}`. Do not copy `model`: 6.2.1 chooses it again when the worker is launched;
+   - add a new worker with `intended_state: pending`, `observed_state: none`, copying from the old worker `kind`, `cwd`, `delivery`, `base_branch`, `title`, and its brief type (normal, push-only, or follow-up); a push-only worker also copies `branch` (the pushed branch) and `{commit}`. Do not copy `model`: 6.2.1 chooses it again from the inherited brief type when the worker is launched;
    - its `source_branch`, decided when it is launched (6.2): the pushed branch for a push-only worker; otherwise the old worker's app branch when the `base` observer reports it exists (`branch_head`), else the same start condition as the old worker;
    - set the task's `next_action` to `start w-xxxx on the next user message` and add no user action.
 
