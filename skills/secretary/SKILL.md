@@ -15,7 +15,7 @@ One secretary session, opened in a dedicated non-git directory (the secretary di
 It merges them into "today" items and `decisions[]` (pending decisions and follow-ups, each with an optional due date), publishes one dashboard artifact, and relays the user's answers:
 
 - the dashboard shows follow-ups under "Your tasks" and every other item under "Decisions", each ordered by due date;
-- supervisor items are never sent to the supervisor. The secretary prepares paste text with the user's verbatim words (`paste`, which every follow-up uses to report completion), or tells the user which app operation to perform (`app`);
+- supervisor items are never sent to the supervisor. The secretary prepares paste text with the user's verbatim words (`paste`, which every follow-up uses to report completion), or tells the user which app operation to perform (`app`, which includes answering a worker's question in that worker's session);
 - external decisions from a `relay: yes` source are relayed by starting a relay session in that source's directory (`start`); `relay: no` sources are display-only (`none`).
 
 An item leaves the dashboard only when its source stops reporting it; a follow-up leaves when the supervisor removes its user action. The secretary adds due dates and relay records, nothing else.
@@ -259,7 +259,7 @@ When the user states a decision (e.g. "D-0011 は push して PR を作ってよ
 1. Identify the decision by `D-NNNN` or by its content. Repeat its `description` in the same reply (the user may be looking at an old dashboard), without waiting for confirmation. Only when the id is not found, or the user's words contradict the `description`, ask before relaying. Copy into `words` the user's first message that stated the decision, verbatim (line breaks kept); if you had to ask, still use that original message, not the "yes".
 2. Branch on `relay_mode`:
    - `paste` (supervisor): show the paste text `{task_id} {ua_id} ("{first 60 characters of description}"): {words}` in the chat; the dashboard shows it as click-to-copy. In one candidate, add `{id: R-NNNN, decision_id, decision_key, mode: paste, target: {kind: supervisor}, words, at, status: awaiting_user, session_closed_at: null}` and set the decision's `relay_id`. Do not send anything. Tell the user to paste it into the supervisor chat. A follow-up is relayed the same way when the user says it is done (e.g. "D-0012 終わった"); the relay record and the badge are the same as for a decision.
-   - `app` (supervisor): create no relay. Tell the user which operation to perform in the app (e.g. close or unpin the session, archive it, open the repo once).
+   - `app` (supervisor): create no relay. Tell the user which operation to perform in the app (e.g. close or unpin the session, archive it, open the repo once, answer a worker's question in that worker's session).
    - `start` (external source with `relay: yes`):
      1. Check that the source directory exists and does not overlap the supervisor's running non-git workers:
 

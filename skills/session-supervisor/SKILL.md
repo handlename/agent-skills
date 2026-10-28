@@ -7,7 +7,7 @@ description: Run a single supervisor session in the Claude desktop app that acce
 
 ## Overview
 
-One supervisor session, opened in a dedicated non-git directory (the supervisor directory, default `~/supervisor`), is the user's only point of contact. For each task the user gives it, the supervisor:
+One supervisor session, opened in a dedicated non-git directory (the supervisor directory, default `~/supervisor`), is the user's point of contact for tasks; the user answers a worker's questions in that worker's session (6.3 step 4). For each task the user gives it, the supervisor:
 
 1. splits the task by directory and starts one worker session per directory (git: inside an app worktree; non-git: at most one running worker per directory tree),
 2. detects when a worker's turn ends (the app's automatic continuation, plus periodic reconciliation),
@@ -79,7 +79,7 @@ Run at the start of every supervisor session and after every recovery (section 7
    | List sessions (`limit`, `include_archived`, rows with `startedBy`, `name`, running / archived flags) | Reconciliation | `list_sessions` |
    | Get one session (branch, worktree path, `sourceBranch`, parent session, `model`); `self` returns this session | Filling branch / worktree / base branch / model after start; learning your own session id and model | `get_session`, e.g. `get_session("self")` |
    | Read a session's latest events in full | Reading the report block, detecting pending approvals | `list_events` |
-   | Send a message to a session | Continue nudges, relaying answers | `send_message` |
+   | Send a message to a session | Continue nudges, report resubmission requests, follow-up and push messages, relaying answers other than report blockers | `send_message` |
    | Rename a session (`title`) | Retitling a reused worker; optional, see 6.2.2 Rename outcome | `set_session_title` |
    | Archive a session | Finishing workers | `archive_session` |
    | Recurring self-paced turns | Periodic reconciliation | `/loop` |
@@ -181,11 +181,13 @@ Every state change runs this set. Never skip it, never batch unrelated edits acr
 
 Any user action keeps its task `needs_user`, so a resolved one left behind blocks the task forever. Rule: **remove a user action in the same candidate that records its resolution.** The only exception is the automatic "Waiting task T-xxxx can start now ..." action, which `commit` adds and removes by itself; never touch it.
 
-The secretary classifies user actions by their wording (this table and the user-action wording quoted elsewhere in this file). Before changing that wording, check [Read by the secretary](references/state-schema.md#read-by-the-secretary).
+The secretary classifies user actions by their wording (this table and the user-action wording quoted elsewhere in this file). Before changing that wording, check [Read by the secretary](references/state-schema.md#read-by-the-secretary). The prefix `Answer w-NNNN (` is reserved for report-blocker guidance (6.3 step 4); never start another user action with it.
 
 | User action | Added in | Resolved by (remove it in that candidate) |
 | :--- | :--- | :--- |
-| Report blockers (`needs_input` / `blocked` / `failed`), unparsed report summary, "w-xxxx is not progressing" | 6.3 | Relaying the user's answer with send |
+| Report-blocker guidance "Answer w-xxxx (T-xxxx <worker title>) in the app: <blocker>" | 6.3 step 4, 6.4 (a worker brought back) | The worker's next report processed in 6.3 (step 4 updates the guidance by difference), or the candidate that sets the worker `intended_state: archived`, `missing`, or replaced (6.3 step 6, 6.4, 6.8, 6.9) |
+| Unparsed report summary, "w-xxxx is not progressing" | 6.3 | Relaying the user's answer with send |
+| Report blockers recorded as free text before session-supervisor 0.27.0 | 6.3 (old wording) | The user mentioning it in this chat (the secretary's paste text `T-xxxx UA-xxxx (...): ...` included); see "Old blocker wording" below |
 | Failed verification of a `done` report | 6.3 step 5 | Relaying the user's instruction, or a later report that verifies |
 | Push decision | 6.3 step 6, 6.4 | The user's decision in 6.3 step 7: push worker assigned (reused or started), new task created, or no push |
 | "Open repo `<path>` once in the app, then tell me" | 6.2 | The worker starting successfully |
@@ -195,6 +197,12 @@ The secretary classifies user actions by their wording (this table and the user-
 | "Tell w-xxxx in the app: ..." (send unavailable) | Degraded modes | The user confirming it |
 | Follow-up (has `follow_up`; wording from a `## Follow-ups` rule, e.g. "Review repo-a#42") | Section 4 step 6 (6.3 step 6, 6.3 step 7 "Verification", 6.4) | `done: pr_closed` only: the `pr-state` observer of 6.4 reporting `MERGED` or `CLOSED` for its url. Any follow-up: the user naming it as done, e.g. `T-0003 UA-0003 ("Review repo-a#42"): done` (the secretary's paste text; other wording such as "完了" counts too). Check that the named user action exists in that task and has `follow_up`, and that a quoted description matches the start of its description; if not, ask the user which one they mean |
 | Any action of a task | any | Cancelling the task (6.6) |
+
+Old blocker wording: when the user mentions a user action of a task in this chat and it may be a free-text report blocker recorded before 0.27.0, take the task's live workers (`intended_state` not `archived`, `observed_state` neither `archived` nor `missing`) whose `last_report.status` is `needs_input`, `blocked`, or `failed`. Read each one's message `last_report.message_ref` again and run `parse-report` on it. The user action is an old blocker only when its description equals one of those `blockers`; otherwise it belongs to another row (an unparsed summary, a failed verification).
+
+- One matching worker: in one candidate, replace the user action with that worker's guidance (6.3 step 4; a new id). Send nothing. Reply with the user's words quoted and point them to that worker's session.
+- No live worker: remove the user action and tell the user.
+- Two or more matching workers: ask the user which worker the question came from.
 
 ### 6. Procedures
 
@@ -290,9 +298,17 @@ Called only with workers that reconciliation (6.4) found changed; on an automati
    python3 "<dir>/.supervisor/state_tool.py" parse-report --file "<dir>/.supervisor/last-message.txt" --expect-task T-0003 --expect-worker w-0004
    ```
 
+   Whatever the result, the candidate that records the new `last_report` also removes this worker's guidance user actions (those starting with `Answer <worker id> (`); step 4 updates them by difference instead. This holds when verification of a `done` report is deferred (section 8) too.
+
 2. Parse failure (`"ok": false`, including a field of the wrong type): set `last_report` to `{message_ref, status: "unparsed", error, at}`. If the previous `last_report.status` was not `unparsed`, send the worker one request to resubmit the report block. If it was already `unparsed`, read the message yourself, summarize it into a user action, and do not archive.
 3. `in_progress`: if `summary` and `next_action` differ from the previous `last_report`, set `worker.continues` to 0. If `continues` is below 3, send "continue" and increment it; otherwise add the user action "w-xxxx is not progressing" and send nothing. A worker that is not progressing is never replaced automatically (6.8 is only for missing and unverified workers). Update `last_report`. Do not let rewording defeat the cap: once you have sent 3 nudges in total while the worker is on the same step of the task, add that user action even if the wording changed.
-4. `needs_input` / `blocked` / `failed`: copy `blockers` into user actions. When the user answers in this chat, relay the answer with send.
+4. `needs_input` / `blocked` / `failed`: the worker asked the user in its own session, and the user answers there. The supervisor only points the user to that session and never relays the answer.
+   - Guidance: for each entry of `blockers`, the user action "Answer w-xxxx (T-xxxx <worker title>) in the app: <blocker>", with `<worker title>` = `workers[].title`. A `failed` report with empty `blockers` gets one guidance built from `summary`.
+   - Update by difference: compare the worker's existing guidance (description starting with `Answer <worker id> (`) with the guidance built from this report. Keep each one whose description is identical, so its id and `since` stay (the secretary keys a decision and its due date on them). Remove the other existing ones and add only the new ones.
+   - Send the worker nothing about its blockers. In this turn's reply, link the session as `[T-xxxx <title>](#local_<session_id>)`, add its sidebar title `T-xxxx <title>` (6.2.2) in case the link does not render, and tell the user to answer there.
+   - When the user answers a blocker in this chat, do not send it either: reply with the same link and title only.
+   - The answer reaches the supervisor only through the worker's next report, found by an automatic continuation or by periodic reconciliation (about 5 minutes). Guidance and "Answer the pending approval of w-xxxx in the app" may exist for the same worker at once; each resolves by its own rule, so do not fix them by hand.
+   - The guidance of a worker on a push brief (title `push <branch>`) contains `push` and its branch, so `commit` also treats it as a push decision. This is harmless: a push decision is resolved only with a consent `message`, which only 6.3 step 7 writes.
 5. `done`: verify through an observer (6.0): purpose `verify-git` for a git worker (target: `worktree_path`, `branch`, `base_branch`, the reported `pr`, and for a push worker of 6.3 step 7 `expected_sha` = `{commit}`), purpose `verify-files` for a non-git worker (target: `cwd` and the reported files). Apply these rules to its facts:
    - `porcelain_empty` is true (untracked files included).
    - `commit_count` (`base_branch..HEAD`) is 1 or more.
@@ -301,7 +317,7 @@ Called only with workers that reconciliation (6.4) found changed; on an automati
    - Merged PR: if `pr.state` is `MERGED` and `pr.headRefOid` equals the recorded `commit` artifact (or `head`), the result is verified; ignore `remote_sha` and `commit_count`, since the head branch may have been auto-deleted and the count against an updated base may be 0. This rule does not apply to a follow-up worker (6.7) or to a replacement worker started with `source_branch` (6.8): their branch starts at a branch that may already carry a merged PR.
    - non-git: every entry of `files_exist` is true.
    - Any failed check becomes a user action with the reason; do not archive.
-6. Request the archive: record artifacts from observed values (mapping in [references/state-schema.md](references/state-schema.md)). For each git worker other than a push worker (whose artifacts are recorded in "Verification" of step 7), append one group before its archive: its own branch as `branch`, followed by its verified head as `commit`. A worker brought back by 6.7 (a) already has a group; replace that group in place instead of appending a second one. For `commit` delivery, put the user action "Decide whether to push branch `<branch>` of `<repo>` (and whether to open a PR)" in the **same candidate**. Set `intended_state: archived` and run the state-change set. Then call archive with a `reason` naming the task id, the verified result, and that it relies on the recorded `archive_consent`.
+6. Request the archive: record artifacts from observed values (mapping in [references/state-schema.md](references/state-schema.md)). For each git worker other than a push worker (whose artifacts are recorded in "Verification" of step 7), append one group before its archive: its own branch as `branch`, followed by its verified head as `commit`. A worker brought back by 6.7 (a) already has a group; replace that group in place instead of appending a second one. For `commit` delivery, put the user action "Decide whether to push branch `<branch>` of `<repo>` (and whether to open a PR)" in the **same candidate**. Remove the worker's guidance (6.3 step 4) in that candidate. Set `intended_state: archived` and run the state-change set. Then call archive with a `reason` naming the task id, the verified result, and that it relies on the recorded `archive_consent`.
    - Success: set `observed_state: archived` and run the state-change set. When no worker of the task is active any more, the task moves to `archived` in that commit (a task with a user action stays `needs_user`).
    - Refused because mid-turn or background work: do nothing; reconciliation retries.
    - Refused because pinned, shown on screen, or approval denied: add a user action with the reason right away (e.g. "Close w-0004 from the screen or unpin it").
@@ -325,20 +341,20 @@ Periodic reconciliation: while at least one worker is `running`, `idle`, or `nee
 Call list with `include_archived: true` and `limit: 100`. Do not use `linked`. Match rows to `workers` by `session_id`, and evaluate the first rule before "Listed as active":
 
 - Replaced worker listed as active (it has `replaced_by`, 6.8):
-  - Successor still `pending`: in one candidate, remove the successor, remove `replaced_by` from the old worker, set it to `intended_state: running`, and update its observed state from the list. From then on handle it as a live worker.
+  - Successor still `pending`: in one candidate, remove the successor, remove `replaced_by` from the old worker, set it to `intended_state: running`, and update its observed state from the list. In the same candidate, read its latest message again and run `parse-report` on it; if it reports `needs_input`, `blocked`, or `failed`, add its guidance again (6.3 step 4), because 6.3 step 1 stops on the unchanged `message_ref`. From then on handle it as a live worker.
   - Successor already started: send the old worker "You were replaced by w-xxxx. Stop now; do not commit, push, or open pull requests.", then call archive quoting `archive_consent`. On success record `observed_state: archived`.
   - A non-git old worker keeps its observed state until that archive succeeds, because two running workers would occupy the same directory. If archive is refused mid-turn, retry by this rule in every reconciliation.
   - A git old worker occupies nothing, so update its observed state as usual.
 - Listed as active: update `observed_state` (`running` while running, otherwise `idle`) and `observed_at`. If the worker's latest events (event-reading capability) end in a pending permission request or an auto-mode classifier stop, set `needs_input` and add the user action "Answer the pending approval of w-xxxx in the app". Hand a non-running worker to 6.3.
 - `intended_state: archived`, not yet observed archived, and not running: call archive again with the same `reason` and the refusal branching of 6.3 step 6. Do this regardless of `message_ref`, since a worker can finish background work without a new message.
-- Listed as archived while `intended_state` is not `archived` (the user or the app archived it, e.g. after a PR merge): set `observed_state: archived`; the task derives `needs_user`. Verify the result on the repo side through an observer (6.0, purpose `repo-side` in `cwd`, since the worktree may be gone; non-git: `verify-files`). A merged PR whose head equals the recorded commit is enough (6.3 step 5, "Merged PR"). Otherwise `branch_exists` is true, `commit_count` (`base_branch..branch`) is 1 or more, and the PR / remote rules of 6.3 step 5 hold for `branch_head`; non-git: the reported files exist. If verified, record the artifacts (and the push-decision user action for `commit` delivery) and set `intended_state: archived` in one candidate; `archive_consent` is not needed for a worker already observed archived. Otherwise replace the worker with 6.8. When the user said in this chat that the work should stop, follow 6.6 or 6.9 instead.
+- Listed as archived while `intended_state` is not `archived` (the user or the app archived it, e.g. after a PR merge): set `observed_state: archived` and remove its guidance (6.3 step 4); the task derives `needs_user`. Verify the result on the repo side through an observer (6.0, purpose `repo-side` in `cwd`, since the worktree may be gone; non-git: `verify-files`). A merged PR whose head equals the recorded commit is enough (6.3 step 5, "Merged PR"). Otherwise `branch_exists` is true, `commit_count` (`base_branch..branch`) is 1 or more, and the PR / remote rules of 6.3 step 5 hold for `branch_head`; non-git: the reported files exist. If verified, record the artifacts (and the push-decision user action for `commit` delivery) and set `intended_state: archived` in one candidate; `archive_consent` is not needed for a worker already observed archived. Otherwise replace the worker with 6.8. When the user said in this chat that the work should stop, follow 6.6 or 6.9 instead.
 - Follow-ups with `done: pr_closed`: **only in the 6.4 at the start of a turn that begins with the user's message**, after matching the list, and only when at least one such user action exists. Never try this in an automatic continuation or a `/loop` turn; the `/loop` rule above does not change.
   - If `<dir>/.supervisor/observations/pr-state-follow-ups.json` has an `observed_at` within about 5 minutes and its `target.urls` is the same set as the current `pr_closed` follow-up urls, use it as is. Otherwise run one observer (6.0, purpose `pr-state`, target `urls` = all those urls).
   - Apply the result only to urls that are in its `target.urls` and still belong to a `pr_closed` follow-up; a different set alone is not a target mismatch and does not trigger a rerun. Remove every follow-up reported `MERGED` or `CLOSED` in one candidate.
   - `auth_ok: false`: tell the user once in this conversation that `gh` is not authenticated, and do not repeat it in later turns (nothing is recorded in the state).
   - A url whose `state` is `null` for another reason: mention it in one line of this turn's reply.
   - A missing or malformed result: follow 6.0 step 3 and its `pr-state` exception.
-- Not listed: a worker already intended `archived` without `replaced_by` has its result verified and its artifacts recorded (or its task was cancelled): set `missing` only if it is not observed `archived`, and never replace it (`commit` rejects `replaced_by` on it). Otherwise call get for that session. If still not found, set `missing` and replace the worker with 6.8 in the same candidate (when the user said in this chat that the work should stop, follow 6.6 or 6.9 instead). Never treat it as done. A `missing` worker still intended `running` keeps its task active; 6.8 sets it to `intended_state: archived`, which counts it as finished (no archive call, no `archive_consent` needed); for cancel, see 6.6. If a worker you gave up as `missing` (intended archived) shows up in the list again, do not just update its observed state: either set it back to `intended_state: running` and handle it as a live worker, or verify its deliverables through an observer (`repo-side` or `verify-files`) and archive it as in 6.3 step 6. A worker that has `replaced_by` follows the first rule above instead.
+- Not listed: a worker already intended `archived` without `replaced_by` has its result verified and its artifacts recorded (or its task was cancelled): set `missing` only if it is not observed `archived`, and never replace it (`commit` rejects `replaced_by` on it). Otherwise call get for that session. If still not found, set `missing`, remove its guidance (6.3 step 4), and replace the worker with 6.8 in the same candidate (when the user said in this chat that the work should stop, follow 6.6 or 6.9 instead). Never treat it as done. A `missing` worker still intended `running` keeps its task active; 6.8 sets it to `intended_state: archived`, which counts it as finished (no archive call, no `archive_consent` needed); for cancel, see 6.6. If a worker you gave up as `missing` (intended archived) shows up in the list again, do not just update its observed state: either set it back to `intended_state: running` (re-adding its guidance as in "Successor still pending" above when its latest message reports `needs_input`, `blocked`, or `failed`) and handle it as a live worker, or verify its deliverables through an observer (`repo-side` or `verify-files`) and archive it as in 6.3 step 6. A worker that has `replaced_by` follows the first rule above instead.
 
 Run the state-change set only when something differs.
 
@@ -367,6 +383,7 @@ When the user says a task should stop (e.g. "stop", "cancel", "やめて", "不�
 
 Decide from the content of each user message whether it continues an existing task (a task in `tasks` or an `archived` stub):
 
+- Not a follow-up, evaluated before the follow-up rules: a message that only answers the question of a worker with guidance (6.3 step 4) or with an old-wording blocker (section 5), asking for no new work; reply with the guidance of 6.3 step 4 (or follow "Old blocker wording" in section 5) and send nothing. When a message mixes such an answer with new work, or you cannot tell, ask the user once whether to send it as a follow-up.
 - Not a follow-up: an answer to a pending push-decision user action, and a message that only asks to push or open a PR for an existing branch (6.3 step 7).
 - A follow-up: a fix, addition, review response, or redo of the same deliverable; a mention of its T-ID, PR, branch, or files; a request on the same subject in the same directory as the previous one.
 - Undecidable: a new task (6.1).
@@ -406,6 +423,7 @@ A worker that went missing (6.4 "Not listed") or was archived outside the superv
 1. Count `n` before marking the failed worker: the workers of the same task with the same `cwd` that have `replaced_by`.
 2. `n` < 3: in one candidate,
    - set the old worker to `intended_state: archived` with `replaced_by: <new worker id>`;
+   - remove the old worker's guidance (6.3 step 4); the new worker asks again in its own report;
    - add a new worker with `intended_state: pending`, `observed_state: none`, copying from the old worker `kind`, `cwd`, `delivery`, `base_branch`, `title`, and its brief type (normal, push-only, or follow-up); a push-only worker also copies `branch` (the pushed branch) and `{commit}`. Do not copy `model`: 6.2.1 chooses it again from the inherited brief type when the worker is launched;
    - its `source_branch`, decided when it is launched (6.2): the pushed branch for a push-only worker; otherwise the old worker's app branch when the `base` observer reports it exists (`branch_head`), else the same start condition as the old worker;
    - set the task's `next_action` to `start w-xxxx on the next user message` and add no user action.
@@ -417,7 +435,7 @@ A worker that went missing (6.4 "Not listed") or was archived outside the superv
 
 When the user corrects a delegation decision in this chat (the dashboard does not change):
 
-- **Replace a worker**: use `replaced_by` as in 6.8 (the new `cwd` may differ). Archiving the old worker needs `archive_consent`. Tell the user that its branch and any unpushed commits remain. A replacement in the same `cwd` counts toward the limit of 6.8.
+- **Replace a worker**: use `replaced_by` as in 6.8 (the new `cwd` may differ). Archiving the old worker needs `archive_consent`. Remove the old worker's guidance (6.3 step 4) in the same candidate. Tell the user that its branch and any unpushed commits remain. A replacement in the same `cwd` counts toward the limit of 6.8.
 - **Move a follow-up**: remove it from one task's `followups` and append it to another task. Tell the original worker with send that the request is withdrawn, and tell the user that commits already made remain.
 - **Split a follow-up**: remove it from `followups` and create a new task (6.1) whose `request` is its `text`.
 
@@ -446,7 +464,7 @@ Then:
 | `prepare-dir` fails (exit 1) | Create no worker for that directory and tell the user its `error:` lines. Causes include authentication, the network, the timeout, an origin mismatch, a clone stopped halfway (no `HEAD`; the user decides whether to delete it, never the supervisor), and a `core.sshCommand` wrapper that does not accept `-o`. |
 | The target cannot be resolved (6.1 step 1, rule 5) | Create no task and report "Cannot resolve the target of this request: ..." in one line. |
 | Archive unavailable or refused by a classifier | After verifying the result, add the user action "Please archive w-xxxx". |
-| send does not reach the worker | Replace nudges and relays with the user action "Tell w-xxxx in the app: ...". |
+| send does not reach the worker | Replace nudges and relays with the user action "Tell w-xxxx in the app: ..." (report blockers are answered in the worker session and never relayed). |
 | Latest message unreadable or the fence is mangled | Ask the worker to resend the report as single-line JSON in the same fence. If that also fails, ask the user to paste the worker's final message. Never parse the turn-end note. |
 | Neither `sourceBranch` nor `origin/HEAD` is available | Run `verify-git` with an empty `base_branch`; the observer then counts commits not on any remote (`commit_count_basis: not-remotes`), which must be 1 or more. |
 | Subagent cannot be launched (for example refused in an automatic continuation or a `/loop` turn) | Do not verify and do not archive; never observe yourself. Set `next_action` to `verify w-xxxx on the next user message` and verify in the next turn that carries the user's words. For `pr-state`, defer to the start of the next user turn, leave `next_action` unchanged, and do not tell the user. |
@@ -476,8 +494,11 @@ Then:
 - The supervisor did not edit or write outside `<dir>` (except Claude's memory and temp directories, and `prepare-dir` inside `## Locations`) and ran no mutating git / jj / gh command; the guard entry is present in `<dir>/.claude/settings.json`.
 - No inferred target directory was put to the user for confirmation.
 - Every `request` and `followups[].text` is the user's words verbatim and unchanged (except a correction of 6.9 removing a follow-up).
-- The only user actions about delegation were "w-xxxx is not progressing" and the replacement limit of 6.8 (push decisions, archives, "Open repo" / Trust repository, pending approvals, and failed verifications are not about delegation).
+- The only user actions about delegation were "w-xxxx is not progressing" and the replacement limit of 6.8 (push decisions, archives, "Open repo" / Trust repository, pending approvals, report-blocker guidance, and failed verifications are not about delegation).
 - No replacement or follow-up worker got a failed-verification user action.
+- Every report blocker became a guidance user action "Answer w-xxxx (...) in the app: ...", and nothing about a blocker was sent to a worker.
+- Every guidance was removed in the candidate that processed the worker's next report, or that set the worker archived, `missing`, or replaced.
+- A blocker reported again with the same text kept the id and `since` of its existing guidance.
 - No push or PR happened without `push_consent` recorded from the user's own words, and every push / PR was made by a worker.
 - The delete capability was never called, and the branches of archived workers still exist (`branch_exists` from a `repo-side` observer).
 - The dashboard URL in `supervisor.dashboard.url` is unchanged after republishes and recoveries.

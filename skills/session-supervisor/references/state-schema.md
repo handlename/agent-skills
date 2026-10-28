@@ -238,7 +238,7 @@ The source of truth is `supervisor_errors` in the secretary skill's `state_tool.
 
 ### Meaning
 
-- **User-action wording.** The secretary decides how the user answers a decision (in the app, or by pasting text into this supervisor's chat) from the wording of `user_actions[].description`. That wording comes from the User actions table and the quoted user actions in SKILL.md, the automatic waiting-task action, and free-text report blockers.
+- **User-action wording.** The secretary decides how the user answers a decision (in the app, or by pasting text into this supervisor's chat) from the wording of `user_actions[].description`. That wording comes from the User actions table and the quoted user actions in SKILL.md, the automatic waiting-task action, the report-blocker guidance "Answer w-xxxx (...) in the app: ..." (classified `app` by the secretary's existing order-1 rule `in the app`, so `SUPERVISOR_UA_RULES` needs no change), free-text unparsed summaries, and free-text report blockers recorded before 0.27.0.
 - **Follow-ups.** A user action with `follow_up` is remaining work, not a decision: the secretary lists it under "Your tasks" with a link to `follow_up.url`, and its paste text reports completion, e.g. `T-0003 UA-0003 ("Review repo-a#42"): done`. Every user action without `follow_up` is a pending decision.
 - **Identity.** `(task.id, user_actions[].id, since)` identifies a decision. Because user-action numbers are reused, `since` is the time the action was added and is never rewritten.
 - **Occupancy.** The secretary copies the occupy rule of the non-git worker invariant (see Invariants) to decide whether a directory is busy before it relays to an external source.
@@ -250,6 +250,7 @@ The source of truth is `supervisor_errors` in the secretary skill's `state_tool.
 - Renaming a field, changing its type, value range, or meaning, changing user-action wording or the occupy rule, or bumping `schema_version` affects the secretary. Update, in the same change, the secretary skill's `state_tool.py` (`supervisor_errors`, `merge_supervisor`, `_occupies_cwd`, `SUPERVISOR_UA_RULES`) and the relay_mode classification table in the secretary skill's `references/state-schema.md`.
 - After a `schema_version` bump the secretary keeps showing its last merged items, its overlap check fails, and new relay sessions to external sources are rejected until it is updated.
 - Adding a field is compatible. A new user-action wording is still classified, so check it against the secretary's classification table.
+- The report-blocker guidance stays `app` only while its fixed part contains `in the app`; the secretary's contract test (`QUOTED_UAS`) does not cover it, so keep that phrase when editing the wording.
 - Run the secretary skill's tests as well; its contract test checks this state shape and the quoted user-action wording from the secretary's side.
 
 ## Invariants
