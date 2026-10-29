@@ -685,6 +685,18 @@ def _is_push_decision(user_action, worker):
     return "push" in desc.lower() and (not isinstance(branch, str) or not branch or branch in desc)
 
 
+def _pushed_at_head(task, worker):
+    """True when the worker's last group is recorded as pushed: its commit artifact URL names its own sha."""
+    arts = task.get("artifacts", [])
+    ref = f"{worker.get('cwd')}#{worker.get('branch')}"
+    idx = [i for i, a in enumerate(arts) if a.get("kind") == "branch" and a.get("ref") == ref]
+    if not idx or idx[-1] + 1 >= len(arts):
+        return False
+    nxt = arts[idx[-1] + 1]
+    url = nxt.get("url")
+    return nxt.get("kind") == "commit" and isinstance(url, str) and bool(nxt.get("ref")) and url.endswith(f"/commit/{nxt['ref']}")
+
+
 def _deletion_errors(current, candidate):
     errors = []
     cand_tasks = {t["id"] for t in candidate["tasks"]}
@@ -715,7 +727,7 @@ def _transition_errors(current, candidate):
         if w["observed_state"] not in ("archived", "missing") and not candidate["supervisor"].get("archive_consent"):
             errors.append(f"worker {w['id']}: archive requested without supervisor.archive_consent")
         task = tasks.get(w["task_id"], {})
-        if w["delivery"] == "commit" and not task.get("cancel") and w["observed_state"] != "missing" and not w.get("replaced_by") and not any(_is_push_decision(ua, w) for ua in task.get("user_actions", [])):
+        if w["delivery"] == "commit" and not task.get("cancel") and w["observed_state"] != "missing" and not w.get("replaced_by") and not _pushed_at_head(task, w) and not any(_is_push_decision(ua, w) for ua in task.get("user_actions", [])):
             errors.append(f"worker {w['id']}: commit delivery archive requires a push-decision user_action")
     return errors
 

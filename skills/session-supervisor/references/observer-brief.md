@@ -102,13 +102,15 @@ git -C "<worktree>" status --porcelain
 git -C "<worktree>" rev-parse HEAD
 git -C "<worktree>" rev-list --count "<base_branch>..HEAD"
 git -C "<worktree>" ls-remote origin "refs/heads/<branch>"
+git -C "<worktree>" remote get-url origin
+gh repo view "<owner/name>" --json url -q .url
 gh pr view "<pr>" --json url,headRefOid,state
 ```
 
-With an empty `base_branch`, count with `git -C "<worktree>" rev-list --count HEAD --not --remotes` instead. Run `gh pr view` only when `pr` is given.
+With an empty `base_branch`, count with `git -C "<worktree>" rev-list --count HEAD --not --remotes` instead. Run `gh pr view` only when `pr` is given. Take `<owner/name>` for `gh repo view` from the origin URL.
 
 ```json
-{"purpose": "verify-git", "porcelain_empty": true, "head": "3f2a9c1e0d...", "expected_sha": null, "commit_count": 1, "commit_count_basis": "base", "remote_sha": null, "pr": null}
+{"purpose": "verify-git", "porcelain_empty": true, "head": "3f2a9c1e0d...", "expected_sha": null, "commit_count": 1, "commit_count_basis": "base", "remote_sha": null, "pr": null, "web_url": "https://github.com/org/repo-a"}
 ```
 
 - `porcelain_empty`: the `status --porcelain` output is empty (untracked files included).
@@ -116,6 +118,7 @@ With an empty `base_branch`, count with `git -C "<worktree>" rev-list --count HE
 - `commit_count`: the count as an integer; `commit_count_basis`: `base` or `not-remotes`.
 - `remote_sha`: the sha from `ls-remote`, or `null` when the remote branch does not exist.
 - `pr`: `{url, headRefOid, state}` from `gh pr view`, or `null`.
+- `web_url`: the web URL of the `origin` repository from `gh repo view`, or `null` when it failed (error in `errors`).
 
 ### verify-files
 
@@ -140,19 +143,20 @@ git -C "<repo>" rev-parse --verify "refs/heads/<branch>"
 git -C "<repo>" rev-list --count "<base_branch>..<branch>"
 git -C "<repo>" ls-remote origin "refs/heads/<branch>"
 git -C "<repo>" remote get-url origin
+gh repo view "<owner/name>" --json url -q .url
 gh pr view "<pr>" --json url,headRefOid,state
 gh pr list --repo "<owner/name>" --head "<branch>" --state all --json url,headRefOid,state --limit 1
 ```
 
-Run `gh pr view` when `pr` is given; otherwise run `gh pr list`, with `<owner/name>` taken from the origin URL.
+Run `gh pr view` when `pr` is given; otherwise run `gh pr list`, with `<owner/name>` taken from the origin URL. Run `gh repo view` with the same `<owner/name>`.
 
 ```json
-{"purpose": "repo-side", "branch_exists": true, "branch_head": "3f2a9c1e0d...", "commit_count": 1, "remote_sha": "3f2a9c1e0d...", "pr": {"url": "https://github.com/org/repo-a/pull/42", "headRefOid": "3f2a9c1e0d...", "state": "MERGED"}}
+{"purpose": "repo-side", "branch_exists": true, "branch_head": "3f2a9c1e0d...", "commit_count": 1, "remote_sha": "3f2a9c1e0d...", "pr": {"url": "https://github.com/org/repo-a/pull/42", "headRefOid": "3f2a9c1e0d...", "state": "MERGED"}, "web_url": "https://github.com/org/repo-a"}
 ```
 
 - `branch_exists` / `branch_head`: from `rev-parse --verify`; `branch_head` is `null` when the branch is gone.
 - `commit_count`: an integer, or `null` when the branch is gone.
-- `remote_sha` and `pr`: as in `verify-git`.
+- `remote_sha`, `pr`, and `web_url`: as in `verify-git`.
 
 ### pr-state
 

@@ -198,6 +198,52 @@ class NextStateTest(unittest.TestCase):
         new = st.next_state(self.current, cand, NOW)
         self.assertEqual(find(new["tasks"], "T-0020")["status"], "needs_user")
 
+    def pushed_candidate(self):
+        git_task(self.current, "T-0020", "w-0020")
+        cand = self.candidate()
+        commit_artifacts(cand, "T-0020")
+        find(cand["tasks"], "T-0020")["artifacts"][1]["url"] = COMMIT_URL
+        find(cand["workers"], "w-0020")["intended_state"] = "archived"
+        return cand
+
+    def test_commit_delivery_pushed_at_head_skips_push_decision(self):
+        cand = self.pushed_candidate()
+        find(cand["tasks"], "T-0020")["artifacts"].append({"kind": "pr", "url": PR43})
+        new = st.next_state(self.current, cand, NOW)
+        self.assertNotEqual(find(new["tasks"], "T-0020")["status"], "needs_user")
+
+    def test_commit_delivery_stale_commit_url_requires_push_decision(self):
+        cand = self.pushed_candidate()
+        find(cand["tasks"], "T-0020")["artifacts"][1]["ref"] = "def456"
+        self.assertRejected(cand, "push-decision")
+
+    def test_commit_delivery_url_on_other_group_does_not_exempt(self):
+        cand = self.pushed_candidate()
+        find(cand["tasks"], "T-0020")["artifacts"][0]["ref"] = "/repo/b#x"
+        self.assertRejected(cand, "push-decision")
+
+    def test_commit_delivery_pushed_sibling_does_not_exempt_unpushed_worker(self):
+        cand = self.pushed_candidate()
+        task = find(cand["tasks"], "T-0020")
+        task["worker_ids"].append("w-0021")
+        task["artifacts"] += [
+            {"kind": "branch", "label": "b", "ref": "/repo/b#claude/b-x1"},
+            {"kind": "commit", "label": "b", "ref": "def456"},
+        ]
+        sibling = copy.deepcopy(find(cand["workers"], "w-0020"))
+        sibling.update({"id": "w-0021", "session_id": "sess_w-0021", "handle": "w-0021", "title": "w-0021",
+                        "cwd": "/repo/b", "branch": "claude/b-x1", "worktree_path": "/repo/b/.claude/worktrees/b-x1"})
+        cand["workers"].append(sibling)
+        with self.assertRaises(st.StateError) as ctx:
+            st.next_state(self.current, cand, NOW)
+        self.assertIn("worker w-0021: commit delivery archive requires a push-decision", str(ctx.exception))
+        self.assertNotIn("worker w-0020: commit delivery", str(ctx.exception))
+
+    def test_commit_delivery_pr_between_branch_and_commit_fails_closed(self):
+        cand = self.pushed_candidate()
+        find(cand["tasks"], "T-0020")["artifacts"].insert(1, {"kind": "pr", "url": PR43})
+        self.assertRejected(cand, "push-decision")
+
     def test_commit_delivery_stays_needs_user_after_archive(self):
         git_task(self.current, "T-0020", "w-0020", intended="archived", observed="idle")
         commit_artifacts(self.current, "T-0020")
@@ -2057,6 +2103,7 @@ RULES_MD = """# Session supervisor directory
 
 PR42 = "https://github.com/org/repo-a/pull/42"
 PR43 = "https://github.com/org/repo-a/pull/43"
+COMMIT_URL = "https://github.com/org/a/commit/abc123"
 
 
 def follow_up_ua(ua_id, url, rule="review-pr", done="pr_closed", description="Review it"):
@@ -2139,6 +2186,12 @@ class FollowUpCoreTest(unittest.TestCase):
         pr_task(cand, "T-0040", "w-0040")
         self.assertEqual(st.new_pr_urls(self.state, cand), [("T-0003", PR43), ("T-0040", PR43)])
         self.assertEqual(st.new_pr_urls(cand, cand), [])
+
+    def test_new_pr_urls_includes_commit_delivery_pr(self):
+        cand = copy.deepcopy(self.state)
+        git_task(cand, "T-0020", "w-0020")
+        find(cand["tasks"], "T-0020")["artifacts"].append({"kind": "pr", "url": PR43})
+        self.assertIn(("T-0020", PR43), st.new_pr_urls(self.state, cand))
 
     def test_label_from_artifact_then_url_then_raw(self):
         self.assertEqual(st.follow_up_label({"label": "repo-a#42"}, PR42), "repo-a#42")

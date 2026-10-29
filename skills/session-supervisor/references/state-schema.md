@@ -212,7 +212,7 @@ A task derived as `done` is moved, **in the same commit**, to an `archived` stub
 Consequences:
 
 - A worker with `intended_state: archived` and `observed_state: idle` keeps its task in `running`; the task moves only after the archive is observed.
-- A `commit`-delivery task carries the push-decision user action, so it stays `needs_user` after its workers are archived, until the user decides.
+- A `commit`-delivery task carries the push-decision user action, so it stays `needs_user` after its workers are archived, until the user decides. A worker whose verified head was observed pushed (its `commit` artifact has the commit `url`) adds none.
 - A follow-up user action makes its task `needs_user` like any other, even before the archive is observed and even while another worker of the task is `running`.
 - A task whose only remaining user actions are follow-ups stays in `tasks`, together with its archived workers, until the last follow-up is removed; then `commit` moves it to an `archived` stub.
 
@@ -286,7 +286,7 @@ Checks against the current state (`next_state`):
 - No silent deletion: a task present in current but absent from the candidate is always rejected. Tasks leave `tasks` only through the move that `commit` itself performs for tasks derived as `done`, so never remove a task from the candidate. A worker with a non-null `session_id` may disappear only together with its task's move.
 - `request` of a task present in both current and candidate is unchanged. Existing `followups[].text` values are not constrained by `commit`; keeping them verbatim is the supervisor's rule.
 - Transition to archived: for each worker whose `intended_state` is not `archived` in current and is `archived` in the candidate:
-  - if its delivery is `commit`, the task is not cancelled, and the worker has no `replaced_by`, the candidate task must contain the push-decision user action
+  - if its delivery is `commit`, the task is not cancelled, the worker has no `replaced_by`, and its group is not pushed at its verified head (the `commit` artifact right after the last `branch` artifact `<cwd>#<branch>` of that worker has a `url` ending in `/commit/<its ref>`; SKILL.md 6.3 step 6), the candidate task must contain the push-decision user action. A group's `commit` always directly follows its `branch`; a `pr` artifact is appended after the group
   - `supervisor.archive_consent` must not be null, unless the worker is already observed `archived` or `missing` (no archive call follows); a worker with `replaced_by` is not exempt from this
 - A worker already `intended_state: archived` without `replaced_by` in current (its result was verified and recorded, or its task was cancelled) must not get `replaced_by` in the candidate.
 - The automatic waiting-task user action is never offered for a worker that is the `replaced_by` target of another worker, so a replacement waits for the supervisor's next user turn instead of prompting the user.
@@ -300,7 +300,7 @@ Record artifacts from values the supervisor observed, not from the report alone.
 | Report field | task.artifacts entry |
 | :--- | :--- |
 | `branch` | `{kind: branch, ref: "<cwd>#<branch from state>", url?: branch URL once pushed}`, where `<cwd>` is the worker's repo root as an absolute path (the form of the Example). SKILL.md 6.7 finds the source branch of a follow-up by this `<cwd>#` prefix. |
-| `commit` | `{kind: commit, ref: <observed HEAD sha>}`. If it differs from the report, use the observed value and note it in the summary. |
+| `commit` | `{kind: commit, ref: <observed HEAD sha>}`. If it differs from the report, use the observed value and note it in the summary. For `commit` delivery, `url` = `<web_url>/commit/<observed HEAD>` only when that HEAD was observed pushed (SKILL.md 6.3 step 6); otherwise no `url`. It gates the push-decision check, so keep it unabbreviated and directly after its `branch` artifact. |
 | `pr` | `{kind: pr, url}`, only when the PR head sha equals the observed HEAD. |
 | `ci` | `{kind: ci, url}` |
 | `files[]` | One `{kind: file, path}` per entry that exists and lies under the worker's `cwd`. |

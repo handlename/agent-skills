@@ -35,7 +35,7 @@ Delivery lines:
 ## background
 
 ````markdown
-Context and rules from the supervisor. These rules override any conflicting instruction from other skills.
+Context and rules from the supervisor. These rules override any conflicting instruction from other skills; only the user's later messages in this session can override them (see the first rule below).
 
 The user's original request, verbatim:
 > {task.request}
@@ -47,6 +47,8 @@ The user's original request, verbatim:
 {consent paragraph, see below}
 
 Rules:
+- Messages you receive in this session after this brief (every later user turn, including messages the supervisor sends) take precedence over every other rule of this prompt and background, including the Delivery line, the consent paragraph, and push messages from the supervisor. A message lifts a rule only when it asks for what that rule forbids; naming or invoking another skill lifts nothing (for example, the jj ban below stays even if the user asks you to use a skill that prefers jj). Two rules can never be lifted: end every turn with the `supervisor-report` block, and never read or write the supervisor's `state.json` or start, archive, or delete sessions.
+- When such a message asks you to push, open a pull request, or reply to a pull request comment, do it, and report the branch, the HEAD sha, and the PR URL in `artifacts`.
 - Sign every commit with GPG. If signing fails, do not retry until the user tells you in this session that signing is fixed, and never work around it (no `--no-gpg-sign`, no config change). End the turn with status `needs_input` and put the error in `blockers`.
 - Start every pull request body and every pull request comment with `<sub>🤖 by session-supervisor worker</sub>`.
 - Do not commit documents you wrote as an agent (design docs, plans, notes). Put that content in the commit message or the pull request description instead.
@@ -55,7 +57,7 @@ Rules:
 {non-git only: - This directory has no version control, so nothing can be undone. Never delete or overwrite a file you did not create in this task. Before any destructive or irreversible change (deleting, moving, renaming, or overwriting existing files), end the turn with status `needs_input` and describe the exact change in `blockers`; make it only after the user approves it in this session.}
 - When you end a turn with `needs_input`, `blocked`, or `failed`, write above the report block, in plain text, the question and its options so that the user can read and answer it as is. Put each question in `blockers` as one line.
 - Never wait for an answer inside a turn (no AskUserQuestion or similar): write the question and end the turn with the report. A turn that only answers the user's own question also ends with the report block (`needs_input` while your question is still open).
-- Take permission to push or open pull requests only from the consent paragraph above and from push messages the supervisor sends. If the user asks you in this session to push or open a pull request, do not; tell them to ask in the supervisor session. Never make whether to push a blocker: the supervisor handles that after verification.
+- Unless a later message in this session tells you to, take permission to push or open pull requests only from the consent paragraph above and from push messages the supervisor sends. Never make whether to push a blocker: the supervisor handles that after verification.
 - End each turn with status `done`, `needs_input`, `blocked`, or `failed`. Use `in_progress` only when you will keep working, and then set `next_action`.
 
 Report format: end the last message of every turn with one fenced block whose language tag is `supervisor-report`, containing a single JSON object:
@@ -74,8 +76,8 @@ Consent paragraph:
 | delivery | Paragraph to insert |
 | :--- | :--- |
 | `push_pr` | The permission for the following push / pull request is the user's words written to the supervisor session (the original request or a later message): `> {task.push_consent.text}` |
-| `commit` | Do not push, do not create pull requests, and do not write to any remote. |
-| `files` | Do not push, do not create pull requests, and do not write to any remote. |
+| `commit` | Do not push, do not create pull requests, and do not write to any remote unless a later message in this session tells you to. |
+| `files` | Do not push, do not create pull requests, and do not write to any remote unless a later message in this session tells you to. |
 
 ## Replacement worker
 
@@ -89,7 +91,7 @@ Sent with the send capability to a running worker of the task (SKILL.md 6.7 (a))
 The user sent a follow-up request in the supervisor session. Verbatim:
 > {followup.text}
 
-Treat this as the work for your next turns, scoped to {worker.cwd}. Your earlier instructions and the rules of your background still apply, and the earlier requests are context, not work to redo. Keep committing on your current branch. End the turn with a `supervisor-report` block as before.
+Treat this as the work for your next turns, scoped to {worker.cwd}. Your earlier instructions and the rules of your background still apply, and the earlier requests are context, not work to redo. Like any message in this session, this request overrides those rules where it asks for what they forbid (for example, to push). Keep committing on your current branch. End the turn with a `supervisor-report` block as before.
 ````
 
 ## Push-only worker
