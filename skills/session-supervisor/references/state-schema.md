@@ -135,6 +135,7 @@ The example is a snapshot for illustration: `w-0005` and `w-0006` are elided, so
 | `worker_ids[]` | Workers that belong to this task. |
 | `created_at` | ISO 8601 timestamp with offset. |
 | `cancel` | Optional. `{at, reason}` once the user cancelled the task (see Cancellation). |
+| `no_result[]` | Optional. `{worker_id, summary, at}` entries (all non-empty strings), one per worker of the task whose `done` was verified as No result (SKILL.md 6.3 step 5): `summary` is that report's `summary` copied as is, `at` the time the supervisor recorded it. The named worker is exempt from the delivery artifact and push-decision requirements (see Invariants). Carried into the `archived` stub when non-empty; task cards do not show it. |
 
 ### workers[]
 
@@ -161,13 +162,13 @@ Later push workers (SKILL.md 6.3 step 7):
 
 ### archived[]
 
-Stubs of finished tasks: `{id, title, request, artifacts, archived_at}`, plus `followups` (copied from the task, only when non-empty), and `cancelled: true` and `reason` (copied from `cancel.reason`) for cancelled tasks; newest first, at most 20. `request` is always present on stubs written by `commit`; a stub without `request` is an older stub. The dashboard lists them with their artifact links and a cancelled badge. Task cards list their own artifacts.
+Stubs of finished tasks: `{id, title, request, artifacts, archived_at}`, plus `followups` (copied from the task, only when non-empty), `no_result` (only when non-empty), and `cancelled: true` and `reason` (copied from `cancel.reason`) for cancelled tasks; newest first, at most 20. `request` is always present on stubs written by `commit`; a stub without `request` is an older stub. The dashboard lists them with their artifact links, a cancelled badge, and a `no result` badge followed by each `no_result` summary. Task cards list their own artifacts. A stub's `no_result[].worker_id` is for display only: worker numbers are reused, so it is not checked against `workers`.
 
 Revival (SKILL.md 6.7 (c)):
 
 - A user request that continues an archived task revives it as a task with the **same id** as its stub. `commit` accepts a task id that is also in `archived` only when the stub has a `request`, is not `cancelled`, and its `request` equals the task's `request`. Otherwise it rejects: `task T-xxxx: id is an archived stub; revive only a non-cancelled stub with the same request`.
 - The stub stays in `archived` while the task is alive, so the same id shows both on a task card and in the archived list. The revived task starts with empty `artifacts` and `push_consent: null`; nothing is copied from the stub, so earlier deliveries are never re-reported or re-verified.
-- When the revived task is archived again, `commit` replaces the old stub with a new one. The new stub's `artifacts` are the old stub's `artifacts` followed by the task's `artifacts`, order preserved and without deduplication, so the last `branch` artifact of a directory is always the newest generation.
+- When the revived task is archived again, `commit` replaces the old stub with a new one. The new stub's `artifacts` are the old stub's `artifacts` followed by the task's `artifacts`, order preserved and without deduplication, so the last `branch` artifact of a directory is always the newest generation. `no_result` is concatenated the same way; the revived task starts with none.
 - A stub that fell out of the 20-stub window while its task was revived has lost its artifacts: the new stub holds only the task's `artifacts`.
 - A cancelled stub never revives: a continuing request starts a new task. A revived task that is cancelled can never be revived again.
 
@@ -212,7 +213,7 @@ A task derived as `done` is moved, **in the same commit**, to an `archived` stub
 Consequences:
 
 - A worker with `intended_state: archived` and `observed_state: idle` keeps its task in `running`; the task moves only after the archive is observed.
-- A `commit`-delivery task carries the push-decision user action, so it stays `needs_user` after its workers are archived, until the user decides. A worker whose verified head was observed pushed (its `commit` artifact has the commit `url`) adds none.
+- A `commit`-delivery task carries the push-decision user action, so it stays `needs_user` after its workers are archived, until the user decides. A worker whose verified head was observed pushed (its `commit` artifact has the commit `url`) adds none, and neither does a worker in `no_result`.
 - A follow-up user action makes its task `needs_user` like any other, even before the archive is observed and even while another worker of the task is `running`.
 - A task whose only remaining user actions are follow-ups stays in `tasks`, together with its archived workers, until the last follow-up is removed; then `commit` moves it to an `archived` stub.
 
@@ -266,6 +267,8 @@ Single-state checks (`validate`):
   - `push_pr`: `branch` + `commit` + (`pr`, or a `branch` with `url`)
   - `commit`: `branch` + `commit`
   - `files`: at least one `file`
+  - A worker named in its task's `no_result` needs none of these.
+- Each `no_result` entry of a task names a worker in that task's `worker_ids` whose `intended_state` is `archived` and that has no `replaced_by`, and no worker appears twice. A worker set back to `running` (SKILL.md 6.4, 6.7 (a)) must lose its entry in the same candidate. Otherwise: `task T-xxxx: no_result w-xxxx must name an archived, non-replaced worker of the task once`.
 - `replaced_by`, when present, names a different existing worker of the same task; its worker has `intended_state: archived`; following the chain ends at a worker without `replaced_by`.
 - `followups[]`, when present, is a list of objects with non-empty string `text` and `at`; a stub's `request` and `followups` have the same shapes.
 - A task id that is also in `archived` is a revival: the stub has a `request`, is not `cancelled`, and its `request` equals the task's `request`.
@@ -286,7 +289,7 @@ Checks against the current state (`next_state`):
 - No silent deletion: a task present in current but absent from the candidate is always rejected. Tasks leave `tasks` only through the move that `commit` itself performs for tasks derived as `done`, so never remove a task from the candidate. A worker with a non-null `session_id` may disappear only together with its task's move.
 - `request` of a task present in both current and candidate is unchanged. Existing `followups[].text` values are not constrained by `commit`; keeping them verbatim is the supervisor's rule.
 - Transition to archived: for each worker whose `intended_state` is not `archived` in current and is `archived` in the candidate:
-  - if its delivery is `commit`, the task is not cancelled, the worker has no `replaced_by`, and its group is not pushed at its verified head (the `commit` artifact right after the last `branch` artifact `<cwd>#<branch>` of that worker has a `url` ending in `/commit/<its ref>`; SKILL.md 6.3 step 6), the candidate task must contain the push-decision user action. A group's `commit` always directly follows its `branch`; a `pr` artifact is appended after the group
+  - if its delivery is `commit`, the task is not cancelled, the worker has no `replaced_by` and is not in the task's `no_result`, and its group is not pushed at its verified head (the `commit` artifact right after the last `branch` artifact `<cwd>#<branch>` of that worker has a `url` ending in `/commit/<its ref>`; SKILL.md 6.3 step 6), the candidate task must contain the push-decision user action. A group's `commit` always directly follows its `branch`; a `pr` artifact is appended after the group
   - `supervisor.archive_consent` must not be null, unless the worker is already observed `archived` or `missing` (no archive call follows); a worker with `replaced_by` is not exempt from this
 - A worker already `intended_state: archived` without `replaced_by` in current (its result was verified and recorded, or its task was cancelled) must not get `replaced_by` in the candidate.
 - The automatic waiting-task user action is never offered for a worker that is the `replaced_by` target of another worker, so a replacement waits for the supervisor's next user turn instead of prompting the user.

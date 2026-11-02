@@ -1316,6 +1316,139 @@ class CommitCliTest(unittest.TestCase):
             self.assertTrue(err.startswith("error:"), err)
 
 
+def no_result(worker_id, summary="investigated only, nothing kept"):
+    return {"worker_id": worker_id, "summary": summary, "at": NOW}
+
+
+class NoResultTest(unittest.TestCase):
+    def setUp(self):
+        self.current = fixture_state()
+
+    def candidate(self):
+        return copy.deepcopy(self.current)
+
+    def assertRejected(self, candidate, pattern):
+        with self.assertRaises(st.StateError) as ctx:
+            st.next_state(self.current, candidate, NOW)
+        self.assertRegex(str(ctx.exception), pattern)
+
+    def archive_with_no_result(self, cand, task_id, worker_id):
+        find(cand["workers"], worker_id)["intended_state"] = "archived"
+        find(cand["tasks"], task_id)["no_result"] = [no_result(worker_id)]
+
+    def second_git_worker(self, state, task_id, worker_id, branch="claude/license-x2"):
+        first = find(state["workers"], find(state["tasks"], task_id)["worker_ids"][0])
+        state["workers"].append(dict(first, id=worker_id, session_id="sess_" + worker_id, handle=worker_id,
+                                     title=worker_id, branch=branch))
+        find(state["tasks"], task_id)["worker_ids"].append(worker_id)
+
+    def test_commit_no_result_archive_accepted(self):
+        git_task(self.current, "T-0020", "w-0020")
+        cand = self.candidate()
+        self.archive_with_no_result(cand, "T-0020", "w-0020")
+        new = st.next_state(self.current, cand, NOW)
+        self.assertEqual(find(new["tasks"], "T-0020")["status"], "running")
+        cand = copy.deepcopy(new)
+        find(cand["workers"], "w-0020")["observed_state"] = "archived"
+        new = st.next_state(new, cand, NOW)
+        self.assertNotIn("T-0020", [t["id"] for t in new["tasks"]])
+        self.assertEqual(new["archived"][0]["no_result"], [no_result("w-0020")])
+
+    def test_files_no_result_archive_accepted(self):
+        nongit_task(self.current, "T-0030", "w-0030", "/data/x", "running", "idle")
+        cand = self.candidate()
+        self.archive_with_no_result(cand, "T-0030", "w-0030")
+        st.next_state(self.current, cand, NOW)
+
+    def test_push_pr_no_result_archive_accepted(self):
+        git_task(self.current, "T-0020", "w-0020", delivery="push_pr")
+        find(self.current["tasks"], "T-0020")["push_consent"] = {"text": "fix", "at": NOW}
+        cand = self.candidate()
+        self.archive_with_no_result(cand, "T-0020", "w-0020")
+        st.next_state(self.current, cand, NOW)
+
+    def test_archive_without_artifacts_or_no_result_rejected(self):
+        git_task(self.current, "T-0020", "w-0020")
+        cand = self.candidate()
+        push_decision(cand, "T-0020")
+        find(cand["workers"], "w-0020")["intended_state"] = "archived"
+        self.assertRejected(cand, "lacks commit artifacts")
+
+    def test_no_result_of_other_worker_does_not_exempt(self):
+        git_task(self.current, "T-0020", "w-0020")
+        self.second_git_worker(self.current, "T-0020", "w-0021")
+        cand = self.candidate()
+        self.archive_with_no_result(cand, "T-0020", "w-0020")
+        find(cand["workers"], "w-0021")["intended_state"] = "archived"
+        self.assertRejected(cand, "w-0021: archive requested but task lacks commit artifacts")
+        find(cand["tasks"], "T-0020")["artifacts"] = [
+            {"kind": "branch", "label": "a", "ref": "/repo/a#claude/license-x2"},
+            {"kind": "commit", "label": "a", "ref": "abc123"},
+        ]
+        self.assertRejected(cand, "w-0021: commit delivery archive requires a push-decision user_action")
+
+    def test_no_result_requires_archived_non_replaced_worker(self):
+        git_task(self.current, "T-0020", "w-0020")
+        self.second_git_worker(self.current, "T-0020", "w-0021")
+        cases = {
+            "running": lambda c: None,
+            "replaced": lambda c: find(c["workers"], "w-0020").update(intended_state="archived", replaced_by="w-0021"),
+            "unknown": lambda c: find(c["tasks"], "T-0020").update(no_result=[no_result("w-0099")]),
+            "duplicate": lambda c: find(c["tasks"], "T-0020").update(no_result=[no_result("w-0020"), no_result("w-0020")]),
+            "other task": lambda c: find(c["tasks"], "T-0020").update(no_result=[no_result("w-0004")]),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(case=name):
+                cand = self.candidate()
+                find(cand["tasks"], "T-0020")["no_result"] = [no_result("w-0020")]
+                if name != "running":
+                    find(cand["workers"], "w-0020")["intended_state"] = "archived"
+                mutate(cand)
+                self.assertRejected(cand, "no_result w-00[0-9]+ must name an archived, non-replaced worker of the task once")
+
+    def test_no_result_shape_validated(self):
+        for bad in ("x", [1], [{"worker_id": "w-0004", "summary": "", "at": NOW}], [{"worker_id": "w-0004", "at": NOW}],
+                    [{"worker_id": "w-0004", "summary": "s", "at": 1}]):
+            for owner in ("task", "stub"):
+                with self.subTest(bad=bad, owner=owner):
+                    cand = self.candidate()
+                    (find(cand["tasks"], "T-0004") if owner == "task" else cand["archived"][0])["no_result"] = bad
+                    self.assertRejected(cand, "no_result must be a list of")
+
+    def test_no_result_carried_into_stub_and_concatenated_on_revival(self):
+        git_task(self.current, "T-0020", "w-0020", intended="archived", observed="idle")
+        find(self.current["tasks"], "T-0020")["no_result"] = [no_result("w-0020", "first")]
+        cand = self.candidate()
+        find(cand["workers"], "w-0020")["observed_state"] = "archived"
+        state = st.next_state(self.current, cand, NOW)
+        self.assertEqual(state["archived"][0]["no_result"], [no_result("w-0020", "first")])
+        cand = copy.deepcopy(state)
+        git_task(cand, "T-0020", "w-0020", intended="archived", observed="archived")
+        find(cand["tasks"], "T-0020")["no_result"] = [no_result("w-0020", "second")]
+        state = st.next_state(state, cand, NOW)
+        stubs = [s for s in state["archived"] if s["id"] == "T-0020"]
+        self.assertEqual(len(stubs), 1)
+        self.assertEqual([n["summary"] for n in stubs[0]["no_result"]], ["first", "second"])
+        self.assertNotIn("w-0020", [w["id"] for w in state["workers"]])
+        self.assertEqual(st.validate(state), [])
+        cand = copy.deepcopy(state)
+        find(cand["tasks"], "T-0004")["cancel"] = {"at": NOW, "reason": "x"}
+        state = st.next_state(state, cand, NOW)
+        self.assertNotIn("no_result", find(state["archived"], "T-0004"))
+
+    def test_archived_stub_shows_no_result_chip_and_summary(self):
+        state = fixture_state()
+        state["archived"][0]["no_result"] = [no_result("w-0009", "<b>nothing</b> kept")]
+        page = st.assemble(*st.render(state, TEMPLATE))
+        archived = page[page.index('id="archived"'):]
+        self.assertEqual(archived.count('data-state="no result"'), 1)
+        self.assertIn("&lt;b&gt;nothing&lt;/b&gt; kept", archived)
+        self.assertNotIn("<b>nothing</b>", archived)
+        plain = st.assemble(*st.render(fixture_state(), TEMPLATE))
+        self.assertNotIn('data-state="no result"', plain)
+        self.assertNotIn('class="arc__note"', plain)
+
+
 class RenderTest(unittest.TestCase):
     def page(self, state):
         return st.assemble(*st.render(state, TEMPLATE))

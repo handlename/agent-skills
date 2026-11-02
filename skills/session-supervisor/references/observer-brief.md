@@ -95,7 +95,7 @@ git -C "<repo>" rev-parse --verify "refs/heads/<branch>"
 
 ### verify-git
 
-Used by SKILL.md 6.3 step 5 for every git worker, including push workers. Target: `worktree`, `branch`, `base_branch` (may be empty), `pr` (the reported PR URL, may be empty), `expected_sha` (push workers only).
+Used by SKILL.md 6.3 step 5 for every git worker, including push workers, and by 6.4 for a worker archived outside the supervisor whose latest report is `done` while its worktree remains. Target: `worktree`, `branch`, `base_branch` (may be empty), `pr` (the reported PR URL, may be empty), `expected_sha` (push workers only).
 
 ```bash
 git -C "<worktree>" status --porcelain

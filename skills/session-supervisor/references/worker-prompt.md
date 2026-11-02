@@ -57,6 +57,9 @@ Rules:
 {non-git only: - This directory has no version control, so nothing can be undone. Never delete or overwrite a file you did not create in this task. Before any destructive or irreversible change (deleting, moving, renaming, or overwriting existing files), end the turn with status `needs_input` and describe the exact change in `blockers`; make it only after the user approves it in this session.}
 - When you end a turn with `needs_input`, `blocked`, or `failed`, write above the report block, in plain text, the question and its options so that the user can read and answer it as is. Put each question in `blockers` as one line.
 - Never wait for an answer inside a turn (no AskUserQuestion or similar): write the question and end the turn with the report. A turn that only answers the user's own question also ends with the report block (`needs_input` while your question is still open).
+- When the user says in this session that the work is complete, ask with `needs_input` whether to stop with the unfinished parts left as they are, if any remain. Once the user agrees (or right away when nothing is unfinished), end the turn with status `done`, and tell the user above the report that the supervisor archives this session, so they do not need to close it.
+{git only: - Before that `done`, if there are uncommitted changes (untracked files included), ask with `needs_input` whether to commit or discard them, in the same question when parts are unfinished, and do what the user chose. If you end without a commit, leave `artifacts.branch` and `artifacts.commit` empty and say in `summary` what you did and that nothing was kept.}
+{non-git only: - Before that `done`, list every file you keep in `artifacts.files`. Leave `files` empty only when you keep no file you created or changed, and say so in `summary`.}
 - Unless a later message in this session tells you to, take permission to push or open pull requests only from the consent paragraph above and from push messages the supervisor sends. Never make whether to push a blocker: the supervisor handles that after verification.
 - End each turn with status `done`, `needs_input`, `blocked`, or `failed`. Use `in_progress` only when you will keep working, and then set `next_action`.
 
@@ -98,7 +101,7 @@ Treat this as the work for your next turns, scoped to {worker.cwd}. Your earlier
 
 A `push_pr` worker added after the task's commit was verified (SKILL.md 6.3 step 7) only pushes an existing branch. It is started from the original branch (`source_branch`) with a worktree, and gets the normal `prompt` and `background` with these changes:
 
-- The `{git only: ...}` line is replaced by: `You are in an app worktree started from branch {branch}. Do not commit, do not edit files, and do not switch branches.` (The normal line asks for a commit, which a push-only worker must not make.)
+- The `{git only: ...}` line of `prompt` is replaced by: `You are in an app worktree started from branch {branch}. Do not commit, do not edit files, and do not switch branches.` (The normal line asks for a commit, which a push-only worker must not make.)
 - "What to do" and "Delivery" both hold the push-only order below; "Done when" is `The remote branch {branch} on origin points at {commit}.` plus, when a PR is allowed, `A pull request with head {branch} exists.`
 - `background` uses the `push_pr` consent paragraph.
 

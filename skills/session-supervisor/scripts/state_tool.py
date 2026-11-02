@@ -450,6 +450,10 @@ def _validate_last_report(prefix, report):
     return errors
 
 
+def _no_result_ids(task):
+    return {n["worker_id"] for n in task.get("no_result", [])}
+
+
 def _delivery_artifacts_ok(delivery, artifacts):
     kinds = [a.get("kind") for a in artifacts]
     if delivery == "files":
@@ -487,6 +491,10 @@ def _shape_errors(state):
         if not isinstance(followups, list) or not all(
                 isinstance(f, dict) and all(isinstance(f.get(k), str) and f.get(k) for k in ("text", "at")) for f in followups):
             errors.append(f"{prefix}: followups must be a list of {{text, at}} with non-empty strings")
+        no_result = owner.get("no_result", [])
+        if not isinstance(no_result, list) or not all(
+                isinstance(n, dict) and all(isinstance(n.get(k), str) and n.get(k) for k in ("worker_id", "summary", "at")) for n in no_result):
+            errors.append(f"{prefix}: no_result must be a list of {{worker_id, summary, at}} with non-empty strings")
     for s in state["archived"]:
         if s.get("request") is not None and not isinstance(s["request"], str):
             errors.append(f"archived {s['id']}: request must be a string")
@@ -605,6 +613,15 @@ def validate(state):
             for wid in task.get("worker_ids", []):
                 if workers_by_id.get(wid, {}).get("intended_state") == "running":
                     errors.append(f"{prefix}: cancelled but worker {wid} is still intended running")
+        # A no_result entry exempts its worker from delivery artifacts, so it must stay tied to that finished worker.
+        seen = set()
+        for entry in task.get("no_result", []):
+            wid = entry["worker_id"]
+            w = workers_by_id.get(wid)
+            if (wid in seen or w is None or w.get("task_id") != tid
+                    or w.get("intended_state") != "archived" or w.get("replaced_by")):
+                errors.append(f"{prefix}: no_result {wid} must name an archived, non-replaced worker of the task once")
+            seen.add(wid)
         cwds = [w["cwd"] for w in workers if w.get("task_id") == tid and w.get("cwd")]
         for i, artifact in enumerate(task.get("artifacts", [])):
             errors += _validate_artifact(f"{prefix} artifact[{i}]", artifact, cwds)
@@ -641,7 +658,8 @@ def validate(state):
             if not text or text not in (source or ""):
                 errors.append(f"{prefix}: push_pr requires push_consent.text quoted from push_consent.message when present, else from the task request")
         # A vanished session produces no deliverables, so giving it up requires none; nor does handing a worker to its replacement.
-        exempt = task is None or task.get("cancel") or w.get("observed_state") == "missing" or w.get("replaced_by")
+        exempt = (task is None or task.get("cancel") or w.get("observed_state") == "missing" or w.get("replaced_by")
+                  or wid in _no_result_ids(task))
         if w.get("intended_state") == "archived" and not exempt:
             if not _delivery_artifacts_ok(delivery, task.get("artifacts", [])):
                 errors.append(f"{prefix}: archive requested but task lacks {delivery} artifacts")
@@ -727,7 +745,7 @@ def _transition_errors(current, candidate):
         if w["observed_state"] not in ("archived", "missing") and not candidate["supervisor"].get("archive_consent"):
             errors.append(f"worker {w['id']}: archive requested without supervisor.archive_consent")
         task = tasks.get(w["task_id"], {})
-        if w["delivery"] == "commit" and not task.get("cancel") and w["observed_state"] != "missing" and not w.get("replaced_by") and not _pushed_at_head(task, w) and not any(_is_push_decision(ua, w) for ua in task.get("user_actions", [])):
+        if w["delivery"] == "commit" and not task.get("cancel") and w["observed_state"] != "missing" and not w.get("replaced_by") and w["id"] not in _no_result_ids(task) and not _pushed_at_head(task, w) and not any(_is_push_decision(ua, w) for ua in task.get("user_actions", [])):
             errors.append(f"worker {w['id']}: commit delivery archive requires a push-decision user_action")
     return errors
 
@@ -820,6 +838,9 @@ def next_state(current, candidate, now):
         stub = {"id": t["id"], "title": t.get("title"), "request": t.get("request"), "artifacts": artifacts, "archived_at": now}
         if t.get("followups"):
             stub["followups"] = t["followups"]
+        no_result = old_stubs.get(t["id"], {}).get("no_result", []) + t.get("no_result", [])
+        if no_result:
+            stub["no_result"] = no_result
         if t.get("cancel"):
             stub.update(cancelled=True, reason=t["cancel"]["reason"])
         stubs.append(stub)
@@ -1038,10 +1059,14 @@ def _render_archived(state):
             cancelled = ""
             if stub.get("cancelled"):
                 cancelled = f' {_chip("cancelled")} <span class="arc__reason">{_esc(stub.get("reason"))}</span>'
+            no_result = stub.get("no_result", [])
+            chip = f' {_chip("no result")}' if no_result else ""
+            notes = "".join(f'<p class="arc__note"><span class="id">{_esc(n["worker_id"])}</span> {_esc(n["summary"])}</p>'
+                            for n in no_result)
             items.append(
                 f'<li class="arc"{" data-cancelled" if stub.get("cancelled") else ""}><p class="arc__title">{_copy_id("id", stub["id"])} '
-                f'{_esc(stub.get("title"))}{cancelled}</p><p class="arc__meta">archived {_time(stub.get("archived_at"))}</p>'
-                f'{_render_artifact_list(stub.get("artifacts", []))}</li>')
+                f'{_esc(stub.get("title"))}{cancelled}{chip}</p><p class="arc__meta">archived {_time(stub.get("archived_at"))}</p>'
+                f'{notes}{_render_artifact_list(stub.get("artifacts", []))}</li>')
         rows = f'<ul class="arc-list">{"".join(items)}</ul>'
     return (f'<section class="archived" id="archived" aria-labelledby="archived-label"><h2 class="section-label" id="archived-label">'
             f'Archived <span class="count">{len(stubs)}</span></h2>{rows}</section>')
