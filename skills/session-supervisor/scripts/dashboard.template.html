@@ -198,6 +198,15 @@ a { text-underline-offset: 2px; text-decoration-thickness: 1px; }
 .md code { padding: 0 3px; border-radius: 2px; background: var(--glass); }
 .md strong { font-weight: 700; }
 
+/* ---- sticky header, project index and project headings ---- */
+.top { position: sticky; top: 0; z-index: 3; background: var(--bg); flex-wrap: wrap; row-gap: 8px; }
+.pindex { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; font: 500 0.74rem/1.2 var(--font-mono); }
+.pindex a { display: inline-flex; gap: 6px; align-items: baseline; padding: 4px 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); text-decoration: none; }
+.pindex a:hover, .pindex a:focus-visible { background: var(--hover-bg); }
+.pindex .count { border: 0; padding: 0; }
+.project { scroll-margin-top: var(--top-h, 0px); }
+.project__head { position: sticky; top: var(--top-h, 0px); z-index: 2; background: var(--bg); padding-top: 8px; }
+
 /* ---- section placards ---- */
 main { gap: 30px; }
 .section-label {
@@ -344,6 +353,7 @@ button.copyable { font: inherit; letter-spacing: inherit; color: inherit; text-a
 <span class="sig" aria-hidden="true"></span>
 <div class="top__title"><p class="top__eyebrow">Session Supervisor</p><h1>Dashboard</h1></div>
 <p class="top__asof" data-asof></p>
+{{INDEX}}
 </header>
 <main>
 {{TASKS}}
@@ -370,6 +380,22 @@ button.copyable { font: inherit; letter-spacing: inherit; color: inherit; text-a
   var upd = foot && foot.querySelector("time");
   if (asof && foot && upd) asof.textContent = "as of rev " + foot.dataset.rev + " · " + upd.textContent;
 })();
+// The sticky header's height (its tick ruler hangs into the heading's top padding) offsets the sticky project headings and the index jumps.
+(function () {
+  var top = document.querySelector(".top");
+  if (!top) return;
+  function measure() { document.documentElement.style.setProperty("--top-h", top.offsetHeight + "px"); }
+  measure();
+  window.addEventListener("resize", measure);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(measure);
+})();
+document.addEventListener("click", function (e) {
+  var link = e.target.closest && e.target.closest("[data-jump]");
+  var target = link && document.getElementById(link.getAttribute("href").slice(1));
+  if (!target) return;
+  e.preventDefault();
+  target.scrollIntoView({ behavior: "smooth", block: "start" });
+});
 // Click-to-copy: copy the text of the clicked [data-copy] element (task ID); if the clipboard is refused (e.g. inside the artifact frame), select it for a manual copy.
 function copyFrom(el) {
   function flash(text) {

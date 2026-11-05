@@ -447,6 +447,7 @@ In a turn that carries the user's words, after reconciliation, start every `pend
 5. If Artifacts are unavailable, give the user the local path `<dir>/dashboard.html` instead.
 6. Each task card header and archived entry shows the task ID as a click-to-copy button (label `Copy T-0007`, keyboard-focusable, briefly shows `Copied`; falls back to selecting the ID when the clipboard is refused) that copies exactly the ID, so the user can paste it into chat. There are no separate Copy buttons.
 7. A task whose only remaining user actions are follow-ups stays on the dashboard, together with its archived workers, until the last follow-up is removed.
+8. With projects, the header holds a project index (one jump link per project and one for tasks outside projects, each with its task count); the header and each project heading stay fixed while scrolling.
 
 #### 6.6 Cancel
 

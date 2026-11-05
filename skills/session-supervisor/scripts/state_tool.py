@@ -1347,13 +1347,27 @@ def _render_tasks(state):
     if projects:
         groups = [_render_project(p, [t for t in tasks if t.get("project_id") == p["id"]], workers_by_id) for p in projects]
         rest = [t for t in tasks if not t.get("project_id")]
-        groups.append(f'<section class="project" data-project="none"><header class="project__head">'
+        groups.append(f'<section class="project" id="project-none" data-project="none"><header class="project__head">'
                       f'<h3 class="project__title">Outside projects</h3></header>{_task_list(rest, workers_by_id)}</section>')
         body = f'<div class="project-list">{"".join(groups)}</div>'
     else:
         body = _task_list(tasks, workers_by_id)
     return (f'<section class="tasks" id="tasks" aria-labelledby="tasks-label"><h2 class="section-label" id="tasks-label">'
             f'Tasks <span class="count">{len(tasks)}</span></h2>{body}</section>')
+
+
+def _render_index(state):
+    """Jump links to each project group; empty without projects, so such dashboards keep their header."""
+    projects = _projects(state)
+    if not projects:
+        return ""
+    tasks = state["tasks"]
+    links = [(f'project-{p["id"]}', f'{p["id"]} {p["name"]}', sum(1 for t in tasks if t.get("project_id") == p["id"]))
+             for p in projects]
+    links.append(("project-none", "Outside projects", sum(1 for t in tasks if not t.get("project_id"))))
+    items = "".join(f'<a href="#{_esc(anchor)}" data-jump>{_esc(text)} <span class="count">{n}</span></a>'
+                    for anchor, text, n in links)
+    return f'<nav class="pindex" aria-label="Projects">{items}</nav>'
 
 
 def _render_project(project, tasks, workers_by_id):
@@ -1368,7 +1382,7 @@ def _render_project(project, tasks, workers_by_id):
         rows = "".join(_render_attention_row("user", ua) for ua in project["user_actions"])
         attention = (f'<div class="task__attention"><span class="label">Needs you</span>'
                      f'<ul class="task__attention-list">{rows}</ul></div>')
-    return (f'<section class="project" data-project="{_esc(project["id"])}"><header class="project__head">'
+    return (f'<section class="project" id="project-{_esc(project["id"])}" data-project="{_esc(project["id"])}"><header class="project__head">'
             f'{_copy_id("id project__id", project["id"])}<h3 class="project__title">{_esc(project["name"])}</h3>'
             f'{_chip(m.get("observed_state"))}{closed}</header>'
             f'<p class="project__meta">{manager} · {_a(project["context_doc_url"], "context doc ↗")}</p>'
@@ -1440,7 +1454,8 @@ def _render_archived(state):
 def render(state, template):
     """Return (body, footer). body keeps the {{FOOTER}} slot so it can be hashed without rev/updated_at."""
     body = (
-        template.replace("{{TASKS}}", _render_tasks(state))
+        template.replace("{{INDEX}}", _render_index(state))
+        .replace("{{TASKS}}", _render_tasks(state))
         .replace("{{ARCHIVED}}", _render_archived(state))
     )
     rev = _esc(state.get("rev"))

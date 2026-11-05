@@ -3399,6 +3399,7 @@ class ProjectRenderTest(unittest.TestCase):
         self.assertEqual(st.assemble(*st.render(state, self.SLOTS)), golden)
         state["projects"] = []
         self.assertEqual(st.assemble(*st.render(state, self.SLOTS)), golden)
+        self.assertNotIn("pindex", st.assemble(*st.render(state, TEMPLATE)).split("<body>")[1].split("<script>")[0])
 
     def test_project_groups(self):
         state = fixture_state()
@@ -3421,6 +3422,11 @@ class ProjectRenderTest(unittest.TestCase):
         self.assertEqual(st.validate(state), [])
         page = st.assemble(*st.render(state, TEMPLATE))
         self.assertEqual(page.count('<section class="project"'), 3)
+        index = page.split('<nav class="pindex"')[1].split("</nav>")[0]
+        self.assertEqual(re.findall(r'href="#(project-[^"]+)" data-jump', index), ["project-P-0001", "project-P-0002", "project-none"])
+        for anchor in ("project-P-0001", "project-P-0002", "project-none"):
+            self.assertIn(f'id="{anchor}"', page)
+        self.assertIn("P-0002 &lt;b&gt;Other&lt;/b&gt;", index)
         self.assertIn('data-project="none"', page)
         self.assertIn('manager <a href="#local_sess_mgr_P-0001">P-0001 Nature MCP</a> <code>sess_mgr_P-0001</code>', page)
         self.assertIn('href="https://github.com/org/repo/issues/1"', page)
