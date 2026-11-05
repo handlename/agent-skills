@@ -28,14 +28,6 @@ ul { list-style: none; margin: 0; padding: 0; }
 .top__asof { font-size: 0.8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 main { display: grid; gap: calc(var(--gap) * 1.5); }
 
-.hero { position: relative; background: var(--attention-bg); color: var(--attention-text); border-radius: var(--radius); padding: 20px; }
-.hero:not([data-pending]) { background: var(--surface); color: var(--text); }
-.hero__head { display: flex; align-items: center; gap: 16px; }
-.hero__count { font: 800 4rem/1 var(--font-display); font-variant-numeric: tabular-nums; }
-.hero__label { font: 700 1.3rem/1.2 var(--font-display); }
-.hero__sub { opacity: 0.85; }
-.hero__list { display: grid; gap: 8px; margin-top: 16px; }
-.hero__clear { margin-top: 8px; color: var(--muted); }
 .act { background: var(--surface); color: var(--text); border-radius: calc(var(--radius) - 2px); padding: 10px 12px; display: grid; gap: 2px; }
 .act__kind { font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .act__meta { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 0.8rem; color: var(--muted); }
@@ -86,15 +78,9 @@ main { display: grid; gap: calc(var(--gap) * 1.5); }
 .chip[data-state="done"], .chip[data-state="archived"] { background: var(--ok-bg); color: var(--ok-text); }
 .chip[data-state="cancelled"] { background: var(--bad-bg); color: var(--bad-text); }
 
-/* motion: one-shot entrance, and the only infinite animation is the pending pulse */
+/* motion: one-shot entrance only */
 @keyframes sv-enter { from { opacity: 0; transform: translateY(6px); } }
-@keyframes sv-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 0.6; } }
-.hero, .act, .task { animation: sv-enter 420ms cubic-bezier(.2,.7,.2,1) both; animation-delay: calc(var(--i, 0) * 50ms); }
-.hero[data-pending]::after {
-  content: ""; position: absolute; inset: -3px; border-radius: calc(var(--radius) + 3px);
-  border: 2px solid var(--attention); pointer-events: none;
-  animation: sv-pulse 2.4s ease-in-out infinite;
-}
+.task { animation: sv-enter 420ms cubic-bezier(.2,.7,.2,1) both; animation-delay: calc(var(--i, 0) * 50ms); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
@@ -105,13 +91,12 @@ main { display: grid; gap: calc(var(--gap) * 1.5); }
   --warn-bg: #f4d98a; --warn-text: #573900; --run-bg: #cde4f0; --run-text: #06476b;
   --ok-bg: #d0e9d5; --ok-text: #165a2b; --bad-bg: #f4d0cb; --bad-text: #8c1b12;
   --idle-bg: #dadfe0; --idle-text: #384044;
-  --attention: #9a6200; --attention-bg: #f5ad0a; --attention-text: #1a1200;
+  --attention: #9a6200;
   --seg-track: #d3d8d8;
-  /* light: the annunciator is a daylight panel face; the dark glass stays for dark mode */
-  --glass: #e2e5e4; --glass-2: #ffffff; --legend: #111517; --legend-muted: #474f53;
-  --lamp: #8a5300; --lamp-text: #1a1200; --advisory: #0a5884; --norm: #146c3c;
-  --count-bg: #ffffff; --count-fg: #0b0800; --count-ring: inset 0 0 0 2px #a3abad;
-  --bracket: #2b3337; --tick: #7d878b; --scan: rgba(0, 0, 0, 0.02); --bezel: #b9c0c1;
+  /* light: --glass is a daylight panel face; dark mode keeps a dark glass */
+  --glass: #e2e5e4;
+  --lamp: #8a5300; --advisory: #0a5884;
+  --bracket: #2b3337; --tick: #7d878b;
   --font-body: "Barlow", "Hiragino Sans", "Noto Sans JP", "Segoe UI", sans-serif;
   --font-display: "Chakra Petch", "Barlow", "Hiragino Sans", "Noto Sans JP", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, Menlo, "Hiragino Sans", "Noto Sans JP", monospace;
@@ -125,13 +110,11 @@ main { display: grid; gap: calc(var(--gap) * 1.5); }
     --warn-bg: #4b3707; --warn-text: #ffd47e; --run-bg: #0e3547; --run-text: #8ad3f3;
     --ok-bg: #123b22; --ok-text: #8fe0a8; --bad-bg: #4d1a16; --bad-text: #ffa094;
     --idle-bg: #353e45; --idle-text: #c6ced3;
-    --attention: #f0aa22; --attention-bg: #ffc53d; --attention-text: #0b0800;
+    --attention: #f0aa22;
     --seg-track: #3b454c;
-    --glass: #0a0c0d; --glass-2: #15191c; --legend: #d0d6d9; --legend-muted: #97a3a9;
-    --lamp: #ffc53d; --lamp-text: #0b0800; --advisory: #5fc6e8; --norm: #63d08f;
-  --count-bg: var(--lamp); --count-fg: var(--lamp-text); --count-ring: none;
-    --count-bg: var(--lamp); --count-fg: var(--lamp-text); --count-ring: none;
-    --bracket: #8e9aa1; --tick: #66727a; --scan: rgba(255, 255, 255, 0.02); --bezel: #46525a;
+    --glass: #0a0c0d;
+    --lamp: #ffc53d; --advisory: #5fc6e8;
+    --bracket: #8e9aa1; --tick: #66727a;
     --hover-bg: rgba(115, 198, 240, 0.18);
     color-scheme: dark;
   }
@@ -142,12 +125,11 @@ main { display: grid; gap: calc(var(--gap) * 1.5); }
   --warn-bg: #4b3707; --warn-text: #ffd47e; --run-bg: #0e3547; --run-text: #8ad3f3;
   --ok-bg: #123b22; --ok-text: #8fe0a8; --bad-bg: #4d1a16; --bad-text: #ffa094;
   --idle-bg: #353e45; --idle-text: #c6ced3;
-  --attention: #f0aa22; --attention-bg: #ffc53d; --attention-text: #0b0800;
+  --attention: #f0aa22;
   --seg-track: #3b454c;
-  --glass: #0a0c0d; --glass-2: #15191c; --legend: #d0d6d9; --legend-muted: #97a3a9;
-  --lamp: #ffc53d; --lamp-text: #0b0800; --advisory: #5fc6e8; --norm: #63d08f;
-  --count-bg: var(--lamp); --count-fg: var(--lamp-text); --count-ring: none;
-  --bracket: #8e9aa1; --tick: #66727a; --scan: rgba(255, 255, 255, 0.02); --bezel: #46525a;
+  --glass: #0a0c0d;
+  --lamp: #ffc53d; --advisory: #5fc6e8;
+  --bracket: #8e9aa1; --tick: #66727a;
   --hover-bg: rgba(115, 198, 240, 0.18);
   color-scheme: dark;
 }
@@ -185,44 +167,9 @@ a { text-underline-offset: 2px; text-decoration-thickness: 1px; }
   border: 1px solid var(--border); background: var(--surface); padding: 6px 8px;
 }
 
-/* ---- hero: master caution annunciator ---- */
-.hero,
-.hero:not([data-pending]) {
-  background:
-    repeating-linear-gradient(0deg, var(--scan) 0 1px, transparent 1px 3px),
-    var(--glass);
-  color: var(--legend);
-  border-radius: var(--radius);
-  padding: 18px 20px 20px;
-  box-shadow: inset 0 0 0 1px var(--glass-2), 0 0 0 1px var(--bezel);
-}
-.hero__head { gap: 18px; align-items: stretch; }
-.hero__count {
-  display: grid; place-items: center; min-width: 1.5em; padding: 0.06em 0.18em 0.02em;
-  font: 700 4.75rem/1 var(--font-display); font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
-  background: var(--count-bg); color: var(--count-fg); box-shadow: var(--count-ring);
-  clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
-}
-.hero__words { display: grid; align-content: center; gap: 6px; min-width: 0; }
-.hero__label {
-  font: 700 1.6rem/1.05 var(--font-display); text-transform: uppercase; letter-spacing: 0.14em;
-  color: var(--lamp);
-}
-.hero__sub {
-  opacity: 1; color: var(--legend-muted); font: 500 0.82rem/1.3 var(--font-mono); letter-spacing: 0.04em;
-}
-.hero__sig {
-  position: absolute; top: 10px; right: 12px; display: flex; align-items: center; gap: 6px;
-  font: 600 0.62rem/1 var(--font-mono); letter-spacing: 0.2em; color: var(--lamp);
-}
-.hero__sig::before { content: "MASTER CAUTION"; }
-.hero__sig::after {
-  content: ""; width: 8px; height: 8px; background: var(--lamp); box-shadow: 0 0 0 2px var(--glass-2);
-}
-
-.hero__list { gap: 6px; margin-top: 18px; }
+.task__attention-list { display: grid; gap: 6px; margin-top: 6px; }
 .act {
-  background: var(--glass-2); color: var(--legend); border-radius: 1px;
+  background: var(--surface-2); color: var(--text); border-radius: 1px;
   padding: 9px 12px 9px 14px; border-left: 4px solid var(--lamp);
   grid-template-columns: 5.5rem minmax(0, 1fr); grid-template-areas: "kind text" "kind meta"; column-gap: 12px;
 }
@@ -231,13 +178,13 @@ a { text-underline-offset: 2px; text-decoration-thickness: 1px; }
   grid-area: kind; align-self: start; padding-top: 3px;
   font: 600 0.66rem/1.2 var(--font-mono); letter-spacing: 0.18em; color: var(--lamp);
 }
-.act[data-kind="worker"] .act__kind { color: var(--legend-muted); }
+.act[data-kind="worker"] .act__kind { color: var(--muted); }
 .act[data-kind="external"] .act__kind { color: var(--advisory); }
 .act__text { grid-area: text; font-weight: 500; }
 .act__meta {
-  grid-area: meta; color: var(--legend-muted); font: 400 0.74rem/1.4 var(--font-mono); gap: 2px 14px;
+  grid-area: meta; color: var(--muted); font: 400 0.74rem/1.4 var(--font-mono); gap: 2px 14px;
 }
-.act__meta code { font-size: 1em; }
+.act__text code { overflow-wrap: anywhere; }
 .md > * + * { margin-top: 6px; }
 .md ul, .md ol { margin: 0; padding-left: 1.4em; }
 .md ul { list-style: disc; }
@@ -245,25 +192,6 @@ a { text-underline-offset: 2px; text-decoration-thickness: 1px; }
 .md li + li { margin-top: 2px; }
 .md code { padding: 0 3px; border-radius: 2px; background: var(--glass); }
 .md strong { font-weight: 700; }
-
-/* pending pulse: the caution bezel flashes; static ring otherwise */
-.hero[data-pending]::after {
-  inset: -5px; border-radius: 3px; border: 2px solid var(--lamp);
-}
-
-/* all clear: lamp extinguished, NORM legend lit */
-.hero:not([data-pending]) .hero__count {
-  background: var(--glass-2); color: var(--norm); box-shadow: inset 0 0 0 2px var(--norm);
-}
-.hero:not([data-pending]) .hero__label { color: var(--norm); }
-.hero:not([data-pending]) .hero__sig { color: var(--norm); }
-.hero:not([data-pending]) .hero__sig::before { content: "SYS NORM"; }
-.hero:not([data-pending]) .hero__sig::after { background: var(--norm); }
-.hero__clear {
-  margin-top: 16px; color: var(--legend-muted); font: 500 0.8rem/1.4 var(--font-mono); letter-spacing: 0.04em;
-  padding: 12px 0 0 1.3em; text-indent: -1.3em; border-top: 1px dashed var(--glass-2);
-}
-.hero__clear::before { content: "▸ "; color: var(--norm); }
 
 /* ---- section placards ---- */
 main { gap: 30px; }
@@ -383,14 +311,6 @@ button.copyable { font: inherit; letter-spacing: inherit; color: inherit; text-a
   .top { margin-bottom: 14px; padding-bottom: 10px; flex-wrap: wrap; row-gap: 6px; }
   .top h1 { font-size: 1.1rem; }
   .top__asof { flex-basis: 100%; padding: 4px 6px; font-size: 0.66rem; }
-  .hero,
-  .hero:not([data-pending]) { padding: 14px 12px 12px; }
-  .hero__head { gap: 12px; }
-  .hero__count { font-size: 3.25rem; clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px); }
-  .hero__label { font-size: 1.2rem; letter-spacing: 0.1em; }
-  .hero__sub { font-size: 0.72rem; }
-  .hero__sig { top: 6px; right: 8px; font-size: 0.55rem; }
-  .hero__list { margin-top: 12px; gap: 4px; }
   .act {
     grid-template-columns: minmax(0, 1fr); grid-template-areas: "kind" "text" "meta";
     padding: 6px 10px 7px 10px; border-left-width: 3px; row-gap: 1px;
@@ -398,7 +318,6 @@ button.copyable { font: inherit; letter-spacing: inherit; color: inherit; text-a
   .act__kind { padding-top: 0; font-size: 0.58rem; }
   .act__text { font-size: 0.88rem; line-height: 1.35; }
   .act__meta { font-size: 0.66rem; }
-  .act__meta code { display: none; }
 }
 </style>
 </head>
@@ -410,7 +329,6 @@ button.copyable { font: inherit; letter-spacing: inherit; color: inherit; text-a
 <p class="top__asof" data-asof></p>
 </header>
 <main>
-{{HERO}}
 {{TASKS}}
 {{ARCHIVED}}
 </main>

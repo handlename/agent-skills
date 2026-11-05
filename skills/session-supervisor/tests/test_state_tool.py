@@ -27,6 +27,11 @@ def fixture_state():
     return json.loads((FIXTURES / "state_valid.json").read_text(encoding="utf-8"))
 
 
+def task_card(page, task_id):
+    start = page.rindex('<article class="task"', 0, page.index(f'>{task_id}</button>'))
+    return page[start:page.index("</article>", start)]
+
+
 def find(items, item_id):
     return next(i for i in items if i["id"] == item_id)
 
@@ -1263,7 +1268,7 @@ class CommitCliTest(unittest.TestCase):
     def test_visible_change_is_dashboard_change(self):
         self.run_commit(self.current())
         cand = self.current()
-        find(cand["tasks"], "T-0003")["next_action"] = "Review PR #42"
+        find(cand["tasks"], "T-0004")["next_action"] = "Review PR #42"
         _, out, _ = self.run_commit(cand)
         self.assertTrue(json.loads(out)["dashboard_changed"])
 
@@ -1459,7 +1464,6 @@ class RenderTest(unittest.TestCase):
     def test_section_order_and_title(self):
         page = self.page(fixture_state())
         self.assertIn("<title>Supervisor Dashboard</title>", page)
-        self.assertLess(page.index('id="actions"'), page.index('id="tasks"'))
         self.assertLess(page.index('id="tasks"'), page.index('id="archived"'))
         self.assertNotIn('id="artifacts"', page)
         self.assertNotIn("{{", page)
@@ -1478,21 +1482,61 @@ class RenderTest(unittest.TestCase):
         self.assertIn("ユーザーが不要と判断", archived)
         self.assertEqual(archived.count('data-state="cancelled"'), 1)
 
-    def test_hero_counts_every_attention_source(self):
+    def test_task_card_lists_every_attention_source(self):
         state = fixture_state()
         find(state["workers"], "w-0004")["observed_state"] = "archived"
-        hero = self.page(state).split('id="actions"', 1)[1].split('id="tasks"', 1)[0]
+        card = task_card(self.page(state), "T-0003")
         # UA-0002, UA-0003 (follow-up), w-0005 needs_input, w-0004 archived outside the supervisor
-        self.assertIn('data-pending="4"', hero)
-        self.assertIn('<p class="hero__count">4</p>', hero)
+        attention = card[card.index('class="task__attention-list"'):card.index('class="task__workers"')]
+        self.assertEqual(attention.count('class="act"'), 4)
+        for item_id in ("UA-0002", "UA-0003", "w-0005", "w-0004"):
+            self.assertIn(item_id, attention)
+        self.assertIn("since <time", attention)
+        self.assertNotIn('class="task__next"', card)
 
-    def test_hero_has_no_pending_marker_when_clear(self):
+    def test_task_card_shows_next_when_nothing_waits(self):
         state = fixture_state()
         find(state["tasks"], "T-0003")["user_actions"] = []
         find(state["workers"], "w-0005")["observed_state"] = "running"
+        card = task_card(self.page(state), "T-0003")
+        self.assertNotIn('class="task__attention"', card)
+        self.assertIn('class="task__next"', card)
+
+    def test_attention_rows_omit_task_id(self):
+        card = task_card(self.page(fixture_state()), "T-0003")
+        attention = card[card.index('class="task__attention-list"'):card.index('class="task__workers"')]
+        metas = re.findall(r'<p class="act__meta">.*?</p>', attention)
+        self.assertTrue(metas)
+        for meta in metas:
+            self.assertNotIn("T-0003", meta)
+
+    def test_tasks_needing_user_come_first_in_stable_order(self):
+        state = fixture_state()
+        base = find(state["tasks"], "T-0004")
+        tasks = []
+        for n, (kind, status) in enumerate([(None, "waiting"), ("user", "needs_user"), (None, "waiting"),
+                                            ("worker", "running"), (None, "needs_user")], start=1):
+            task = copy.deepcopy(base)
+            task.update(id=f"T-01{n:02d}", status=status, user_actions=[], worker_ids=[])
+            if kind == "user":
+                task["user_actions"] = [{"id": f"UA-01{n:02d}", "description": "approve", "since": "2026-10-17T10:00:00+09:00"}]
+            if kind == "worker":
+                worker = copy.deepcopy(find(state["workers"], "w-0005"))
+                worker.update(id=f"w-01{n:02d}", task_id=task["id"])
+                state["workers"].append(worker)
+                task["worker_ids"] = [worker["id"]]
+            tasks.append(task)
+        state["tasks"] = tasks
         page = self.page(state)
-        self.assertNotIn("data-pending=", page.split("<main>", 1)[1])
-        self.assertIn("All clear", page)
+        order = sorted(t["id"] for t in tasks)
+        order.sort(key=lambda tid: page.index(f'>{tid}</button>'))
+        self.assertEqual(order, ["T-0102", "T-0104", "T-0105", "T-0101", "T-0103"])
+
+    def test_page_has_no_hero(self):
+        page = self.page(fixture_state())
+        self.assertNotIn('id="actions"', page)
+        self.assertNotIn('class="hero', page)
+        self.assertNotIn("{{HERO}}", TEMPLATE)
 
     def test_task_card_shows_progress_reports_and_cancel(self):
         state = fixture_state()
@@ -1516,22 +1560,20 @@ class RenderTest(unittest.TestCase):
         self.assertNotIn("rev 12", body)
         self.assertIn('data-rev="12">rev 12', footer)
 
-    def test_actions_section_lists_externally_archived_worker(self):
+    def test_task_card_attention_lists_externally_archived_worker(self):
         state = fixture_state()
         find(state["workers"], "w-0004")["observed_state"] = "archived"
-        page = self.page(state)
-        actions = page[page.index('id="actions"'):page.index('id="tasks"')]
-        self.assertIn("archived outside the supervisor", actions)
+        card = task_card(self.page(state), "T-0003")
+        self.assertIn("archived outside the supervisor", card)
 
-    def test_actions_section_lists_missing_and_needs_input(self):
+    def test_task_card_attention_lists_missing_and_needs_input(self):
         state = fixture_state()
         find(state["workers"], "w-0004")["observed_state"] = "missing"
-        page = self.page(state)
-        actions = page[page.index('id="actions"'):page.index('id="tasks"')]
-        self.assertIn("w-0004", actions)
-        self.assertIn("w-0005", actions)
-        self.assertIn("needs_input", actions)
-        self.assertIn("UA-0002", actions)
+        card = task_card(self.page(state), "T-0003")
+        self.assertIn("w-0004", card)
+        self.assertIn("w-0005", card)
+        self.assertIn("needs_input", card)
+        self.assertIn("UA-0002", card)
 
     def test_escapes_script_and_blocks_javascript_links(self):
         state = fixture_state()
@@ -1550,11 +1592,11 @@ class RenderTest(unittest.TestCase):
             "Push `a/<b>` **now**: [PR](https://x.test/1?a=1&b=2)\n"
             "- one `**x**`\n- two\n\n1. first\n2. [bad](javascript:alert(1))")
         page = self.page(state)
-        actions = page[page.index('id="actions"'):page.index('id="tasks"')]
+        card = task_card(page, task["id"])
         self.assertIn("<p>Push <code>a/&lt;b&gt;</code> <strong>now</strong>: "
-                      '<a href="https://x.test/1?a=1&amp;b=2">PR</a></p>', actions)
-        self.assertIn("<ul><li>one <code>**x**</code></li><li>two</li></ul>", actions)
-        self.assertIn("<ol><li>first</li><li>[bad](javascript:alert(1))</li></ol>", actions)
+                      '<a href="https://x.test/1?a=1&amp;b=2">PR</a></p>', card)
+        self.assertIn("<ul><li>one <code>**x**</code></li><li>two</li></ul>", card)
+        self.assertIn("<ol><li>first</li><li>[bad](javascript:alert(1))</li></ol>", card)
         self.assertNotIn('href="javascript:', page)
 
     def test_markdown_never_emits_raw_html_or_template_slots(self):
@@ -1599,9 +1641,8 @@ class RenderTest(unittest.TestCase):
         self.assertIn("prefers-color-scheme: dark", page)
         self.assertIn(':root[data-theme="dark"]', page)
 
-    def test_only_pending_hero_animates_forever(self):
-        for selector in re.findall(r"([^{}]+)\{[^}]*\binfinite\b", TEMPLATE):
-            self.assertIn(".hero[data-pending]", selector)
+    def test_nothing_animates_forever(self):
+        self.assertNotIn("infinite", TEMPLATE)
         self.assertIn("@media (prefers-reduced-motion: reduce)", TEMPLATE)
 
     def test_copyable_hover_changes_no_box_property(self):

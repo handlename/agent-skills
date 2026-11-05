@@ -938,52 +938,28 @@ def _render_artifact_list(artifacts):
     return f'<ul class="artifacts">{items}</ul>'
 
 
-def _attention_items(state):
-    """Everything waiting on the user: user actions, needs_input / missing workers, and workers archived outside the supervisor."""
-    items = []
-    for task in state["tasks"]:
-        for ua in task.get("user_actions", []):
-            items.append(("user", task, ua))
-    for w in state["workers"]:
+def _task_attention(task, workers):
+    """Everything in one task waiting on the user: its user actions, needs_input / missing workers, and workers archived outside the supervisor."""
+    items = [("user", ua) for ua in task.get("user_actions", [])]
+    for w in workers:
         if w.get("observed_state") in ("missing", "needs_input"):
-            items.append(("worker", None, w))
+            items.append(("worker", w))
         elif _archived_externally(w):
-            items.append(("external", None, w))
+            items.append(("external", w))
     return items
 
 
-def _render_hero(state):
-    items = _attention_items(state)
-    n = len(items)
-    # data-pending only when something waits: it drives the only looping animation on the page.
-    pending = f' data-pending="{n}"' if n else ""
-    if n:
-        label, sub = "Needs you", f"{n} item{'s' if n != 1 else ''} waiting on you"
-    else:
-        label, sub = "All clear", "Workers are on it. Nothing needs you right now."
-    rows = []
-    for i, (kind, task, obj) in enumerate(items):
-        if kind == "user":
-            rows.append(
-                f'<li class="act" data-kind="user" style="--i:{i}"><span class="act__kind">Action</span>'
+def _render_attention_row(kind, obj):
+    if kind == "user":
+        return (f'<li class="act" data-kind="user"><span class="act__kind">Action</span>'
                 f'<div class="act__text md">{_md(obj.get("description"))}</div>'
-                f'<p class="act__meta"><span class="id">{_esc(task["id"])}</span><span class="id">{_esc(obj.get("id"))}</span>'
+                f'<p class="act__meta"><span class="id">{_esc(obj.get("id"))}</span>'
                 f'<span>since {_time(obj.get("since"))}</span></p></li>')
-            continue
-        text = (f'is {_chip(obj["observed_state"])}' if kind == "worker"
-                else "was archived outside the supervisor; its results need checking")
-        rows.append(
-            f'<li class="act" data-kind="{kind}" style="--i:{i}"><span class="act__kind">Worker</span>'
-            f'<p class="act__text"><span class="id">{_esc(obj["id"])}</span> {_esc(obj.get("title"))} {text}</p>'
-            f'<p class="act__meta"><span class="id">{_esc(obj["task_id"])}</span><code>{_esc(obj.get("cwd"))}</code></p></li>')
-    body = (f'<ul class="hero__list">{"".join(rows)}</ul>' if rows
-            else '<p class="hero__clear">Nothing to review, approve or answer.</p>')
-    return (
-        f'<section class="hero" id="actions"{pending} aria-labelledby="hero-label">'
-        f'<span class="hero__sig" aria-hidden="true"></span>'
-        f'<div class="hero__head"><p class="hero__count">{n}</p>'
-        f'<div class="hero__words"><h2 class="hero__label" id="hero-label">{label}</h2><p class="hero__sub">{sub}</p></div></div>'
-        f'{body}</section>')
+    text = (f'is {_chip(obj["observed_state"])}' if kind == "worker"
+            else "was archived outside the supervisor; its results need checking")
+    return (f'<li class="act" data-kind="{kind}"><span class="act__kind">Worker</span>'
+            f'<p class="act__text"><span class="id">{_esc(obj["id"])}</span> {_esc(obj.get("title"))} {text} '
+            f'<code>{_esc(obj.get("cwd"))}</code></p></li>')
 
 
 def _segment_state(worker):
@@ -1025,11 +1001,22 @@ def _render_tasks(state):
         cards = '<p class="empty">No active tasks.</p>'
     else:
         workers_by_id = {w["id"]: w for w in state["workers"]}
-        out = []
-        for i, task in enumerate(tasks):
+        entries = []
+        for task in tasks:
             workers = [workers_by_id[wid] for wid in task.get("worker_ids", []) if wid in workers_by_id]
+            entries.append((task, workers, _task_attention(task, workers)))
+        # Tasks waiting on the user come first; the sort is stable, so state.json order holds within each group.
+        entries.sort(key=lambda e: not (e[2] or e[0].get("status") == "needs_user"))
+        out = []
+        for i, (task, workers, attention) in enumerate(entries):
             done = sum(1 for w in workers if _finished(w))
             segs = "".join(f'<span class="seg" data-state="{_esc(_segment_state(w))}"></span>' for w in workers)
+            if attention:
+                rows = "".join(_render_attention_row(kind, obj) for kind, obj in attention)
+                next_or_attention = (f'<div class="task__attention"><span class="label">Needs you</span>'
+                                     f'<ul class="task__attention-list">{rows}</ul></div>')
+            else:
+                next_or_attention = f'<p class="task__next"><span class="label">Next</span> {_esc(task.get("next_action"))}</p>'
             cancel = ""
             if task.get("cancel"):
                 cancel = f'<p class="task__cancel">{_chip("cancelled")} {_esc(task["cancel"].get("reason"))}</p>'
@@ -1041,7 +1028,7 @@ def _render_tasks(state):
                 f'<div class="task__progress"><div class="task__segments" role="img" aria-label="{done} of {len(workers)} workers finished">{segs}</div>'
                 f'<p class="task__progress-label"><b>{done}</b>/{len(workers)} done</p>'
                 f'<p class="task__elapsed">started {_time(task.get("created_at"))}</p></div>'
-                f'<p class="task__next"><span class="label">Next</span> {_esc(task.get("next_action"))}</p>'
+                f'{next_or_attention}'
                 f'<ul class="task__workers">{"".join(_render_worker(w) for w in workers)}</ul>'
                 f'{_render_artifact_list(task.get("artifacts", []))}</article>')
         cards = "".join(out)
@@ -1075,8 +1062,7 @@ def _render_archived(state):
 def render(state, template):
     """Return (body, footer). body keeps the {{FOOTER}} slot so it can be hashed without rev/updated_at."""
     body = (
-        template.replace("{{HERO}}", _render_hero(state))
-        .replace("{{TASKS}}", _render_tasks(state))
+        template.replace("{{TASKS}}", _render_tasks(state))
         .replace("{{ARCHIVED}}", _render_archived(state))
     )
     rev = _esc(state.get("rev"))
