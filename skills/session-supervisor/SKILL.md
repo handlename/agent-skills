@@ -181,6 +181,8 @@ Every state change runs this set. Never skip it, never batch unrelated edits acr
 
 Any user action keeps its task `needs_user`, so a resolved one left behind blocks the task forever. Rule: **remove a user action in the same candidate that records its resolution.** The only exception is the automatic "Waiting task T-xxxx can start now ..." action, which `commit` adds and removes by itself; never touch it.
 
+Links: when the user has to open a page to act (a PR, a CI run, an issue, a document), put its URL in the description so they can open it from the dashboard: `[label](https://…)` or a bare `https://…` URL (only http(s) URLs become links). Use only a URL you observed (an observer result, a worker report, an artifact), never a guessed one. For a wording quoted in this file, keep the quoted text unchanged at the start and append the link after it, e.g. "Failed verification of w-0004: [CI run](https://github.com/org/repo-a/actions/runs/123) is red". A follow-up needs no link in its description: the dashboard links `follow_up.url` itself.
+
 The secretary classifies user actions by their wording (this table and the user-action wording quoted elsewhere in this file). Before changing that wording, check [Read by the secretary](references/state-schema.md#read-by-the-secretary). The prefix `Answer w-NNNN (` is reserved for report-blocker guidance (6.3 step 4); never start another user action with it.
 
 | User action | Added in | Resolved by (remove it in that candidate) |

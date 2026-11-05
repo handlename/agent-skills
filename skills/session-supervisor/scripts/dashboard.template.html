@@ -34,7 +34,7 @@ main { display: grid; gap: calc(var(--gap) * 1.5); }
 
 .section-label { font: 700 1rem/1.3 var(--font-display); margin-bottom: 10px; display: flex; gap: 8px; align-items: baseline; }
 .count { font-size: 0.8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
-.task-list { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); }
+.task-list { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 500px), 1fr)); }
 .task { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; display: grid; gap: 10px; align-content: start; }
 .task__head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px; }
 .task__id { color: var(--muted); }
@@ -289,6 +289,18 @@ button.copyable { font: inherit; letter-spacing: inherit; color: inherit; text-a
   border: 1px solid var(--border); border-left: 3px solid var(--tick); padding: 1px 7px; background: var(--surface-2); max-width: 100%;
 }
 .artifacts code { font-size: 1em; }
+.artifacts-fold { border-top: 1px dashed var(--border); padding-top: 8px; }
+.artifacts-fold > summary {
+  cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px;
+  font: 400 0.72rem/1.5 var(--font-mono); color: var(--muted);
+}
+.artifacts-fold > summary::-webkit-details-marker { display: none; }
+.artifacts-fold > summary::before { content: "▸"; width: 1em; color: var(--tick); }
+.artifacts-fold[open] > summary::before { content: "▾"; }
+.artifacts-fold > summary:hover { color: var(--text); }
+.artifacts-fold > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.artifacts-fold .artifacts { margin-top: 8px; }
+.arc .artifacts-fold { border-top: 0; padding-top: 2px; }
 
 /* ---- logbook ---- */
 .arc-list { gap: 0; border-top: 1px solid var(--border); }

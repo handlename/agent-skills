@@ -859,9 +859,28 @@ def _esc(value):
 
 
 _MD_CODE = re.compile(r"(`[^`\n]+`)")
-_MD_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+# A bare URL takes ASCII URL characters only, so Japanese text right after it stays outside,
+# and never ends in punctuation that usually belongs to the sentence.
+_MD_LINK_OR_URL = re.compile(
+    r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)"
+    r"|(https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()+,;=%]*[A-Za-z0-9\-_~/#=&%+])")
 _MD_BOLD = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*")
 _MD_ITEM = re.compile(r"^\s*(?:([-*])|\d+[.)])\s+(.*)$")
+
+
+def _a(url, text):
+    # The dashboard runs inside the artifact frame, where most sites refuse to load; open links in a new tab.
+    return f'<a href="{_esc(url)}" target="_blank" rel="noopener noreferrer">{_esc(text)}</a>'
+
+
+def _md_links(text):
+    out, pos = [], 0
+    for m in _MD_LINK_OR_URL.finditer(text):
+        out.append(_esc(text[pos:m.start()]))
+        out.append(_a(m.group(2), m.group(1)) if m.group(2) else _a(m.group(3), m.group(3)))
+        pos = m.end()
+    out.append(_esc(text[pos:]))
+    return "".join(out)
 
 
 def _md_inline(text):
@@ -870,13 +889,12 @@ def _md_inline(text):
         if len(part) > 2 and part.startswith("`") and part.endswith("`"):
             out.append(f"<code>{_esc(part[1:-1])}</code>")
             continue
-        part = _MD_LINK.sub(lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', _esc(part))
-        out.append(_MD_BOLD.sub(r"<strong>\1</strong>", part))
+        out.append(_MD_BOLD.sub(r"<strong>\1</strong>", _md_links(part)))
     return "".join(out)
 
 
 def _md(value):
-    """Render a markdown subset (paragraphs, lists, `code`, **bold**, [text](http-url)) as escaped HTML."""
+    """Render a markdown subset (paragraphs, lists, `code`, **bold**, [text](http-url), bare http(s) URLs) as escaped HTML."""
     blocks, para, items, ordered = [], [], [], False
 
     def flush():
@@ -911,7 +929,7 @@ def _chip(state):
 
 def _link_or_text(url, text):
     if _is_http_url(url):
-        return f'<a href="{_esc(url)}">{_esc(text)}</a>'
+        return _a(url, text)
     return f"<code>{_esc(text)}</code>"
 
 
@@ -931,11 +949,21 @@ def _render_artifact(a):
     return f"{_esc(kind)}: {_link_or_text(a.get('url'), label)}"
 
 
+_ARTIFACT_KIND_LABELS = {"pr": "PR", "ci": "CI"}
+
+
 def _render_artifact_list(artifacts):
+    # Collapsed by default; the summary keeps a per-kind tally visible.
     if not artifacts:
         return ""
+    counts = {}
+    for a in artifacts:
+        counts[a.get("kind")] = counts.get(a.get("kind"), 0) + 1
+    tally = " · ".join(f"{n} {_ARTIFACT_KIND_LABELS.get(k, k)}" for k, n in counts.items())
     items = "".join(f'<li data-kind="{_esc(a.get("kind"))}">{_render_artifact(a)}</li>' for a in artifacts)
-    return f'<ul class="artifacts">{items}</ul>'
+    return (f'<details class="artifacts-fold"><summary><span class="label">Artifacts</span>'
+            f'<span class="artifacts-fold__tally">{_esc(tally)}</span></summary>'
+            f'<ul class="artifacts">{items}</ul></details>')
 
 
 def _task_attention(task, workers):
@@ -951,10 +979,14 @@ def _task_attention(task, workers):
 
 def _render_attention_row(kind, obj):
     if kind == "user":
+        url = (obj.get("follow_up") or {}).get("url")
+        open_link = ""
+        if _is_http_url(url) and url not in (obj.get("description") or ""):
+            open_link = f'<span>{_a(url, "open ↗")}</span>'
         return (f'<li class="act" data-kind="user"><span class="act__kind">Action</span>'
                 f'<div class="act__text md">{_md(obj.get("description"))}</div>'
                 f'<p class="act__meta"><span class="id">{_esc(obj.get("id"))}</span>'
-                f'<span>since {_time(obj.get("since"))}</span></p></li>')
+                f'<span>since {_time(obj.get("since"))}</span>{open_link}</p></li>')
     text = (f'is {_chip(obj["observed_state"])}' if kind == "worker"
             else "was archived outside the supervisor; its results need checking")
     return (f'<li class="act" data-kind="{kind}"><span class="act__kind">Worker</span>'

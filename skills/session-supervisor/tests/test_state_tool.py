@@ -1594,7 +1594,7 @@ class RenderTest(unittest.TestCase):
         page = self.page(state)
         card = task_card(page, task["id"])
         self.assertIn("<p>Push <code>a/&lt;b&gt;</code> <strong>now</strong>: "
-                      '<a href="https://x.test/1?a=1&amp;b=2">PR</a></p>', card)
+                      '<a href="https://x.test/1?a=1&amp;b=2" target="_blank" rel="noopener noreferrer">PR</a></p>', card)
         self.assertIn("<ul><li>one <code>**x**</code></li><li>two</li></ul>", card)
         self.assertIn("<ol><li>first</li><li>[bad](javascript:alert(1))</li></ol>", card)
         self.assertNotIn('href="javascript:', page)
@@ -1604,7 +1604,44 @@ class RenderTest(unittest.TestCase):
                          "<p>&lt;img src=x onerror=1&gt; <code>&#123;&#123;HERO&#125;&#125;</code> "
                          "<strong>&#123;&#123;TASKS&#125;&#125;</strong></p>")
         self.assertEqual(st._md('[x](https://a.test/"onmouseover=1)'),
-                         '<p><a href="https://a.test/&quot;onmouseover=1">x</a></p>')
+                         '<p><a href="https://a.test/&quot;onmouseover=1" target="_blank" rel="noopener noreferrer">x</a></p>')
+
+    def test_markdown_links_bare_urls(self):
+        a = '<a href="{0}" target="_blank" rel="noopener noreferrer">{0}</a>'
+        self.assertEqual(st._md("PR https://github.com/org/repo-b/pull/17をレビュー"),
+                         "<p>PR " + a.format("https://github.com/org/repo-b/pull/17") + "をレビュー</p>")
+        self.assertEqual(st._md("(see https://x.test/a?b=1&c=2)."),
+                         "<p>(see " + a.format("https://x.test/a?b=1&amp;c=2") + ").</p>")
+        self.assertEqual(st._md('"https://x.test/a" `https://x.test/b`'),
+                         "<p>&quot;" + a.format("https://x.test/a") + "&quot; <code>https://x.test/b</code></p>")
+        self.assertEqual(st._md("[https://x.test/a](https://x.test/b)"),
+                         '<p><a href="https://x.test/b" target="_blank" rel="noopener noreferrer">https://x.test/a</a></p>')
+        self.assertEqual(st._md("javascript:alert(1) ftp://x.test/a"), "<p>javascript:alert(1) ftp://x.test/a</p>")
+
+    def test_every_dashboard_link_opens_in_a_new_tab(self):
+        page = self.page(fixture_state())
+        anchors = re.findall(r"<a\b[^>]*>", page)
+        self.assertTrue(anchors)
+        for tag in anchors:
+            self.assertIn('target="_blank" rel="noopener noreferrer"', tag)
+
+    def test_follow_up_url_is_linked_unless_in_description(self):
+        state = fixture_state()
+        task = find(state["tasks"], "T-0003")
+        link = '<a href="https://github.com/org/repo-a/pull/42" target="_blank" rel="noopener noreferrer">open ↗</a>'
+        self.assertIn(link, task_card(self.page(state), "T-0003"))
+        task["user_actions"][1]["description"] = "Review https://github.com/org/repo-a/pull/42"
+        self.assertNotIn("open ↗", task_card(self.page(state), "T-0003"))
+
+    def test_artifacts_are_collapsed_with_a_tally(self):
+        page = self.page(fixture_state())
+        card = task_card(page, "T-0003")
+        self.assertIn('<details class="artifacts-fold"><summary><span class="label">Artifacts</span>'
+                      '<span class="artifacts-fold__tally">1 branch · 1 commit · 1 PR · 1 CI</span></summary>', card)
+        self.assertNotIn("<details open", page)
+        archived = page[page.index('id="archived"'):]
+        self.assertIn('<span class="artifacts-fold__tally">1 PR</span>', archived)
+        self.assertNotIn("artifacts-fold", task_card(page, "T-0004"))
 
     def test_file_artifact_is_not_a_link(self):
         state = fixture_state()
