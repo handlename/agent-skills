@@ -2741,7 +2741,7 @@ def add_project(state, pid="P-0001", name="Nature MCP", directory=PROJECT_DIR, l
         "created_at": NOW, "last_review_number": last_review, "user_actions": [],
         "manager": {
             "session_id": f"sess_mgr_{pid}", "started_by": "sess_sup_01", "handle": f"{pid.lower().replace('-', '')}-manager",
-            "title": f"{pid} manager {name}", "intended_state": "running", "observed_state": "idle", "observed_at": NOW,
+            "title": f"{pid} {name}", "intended_state": "running", "observed_state": "idle", "observed_at": NOW,
             "last_report": None, "previous_session_ids": [], "replacements": 0,
         },
     })
@@ -3422,7 +3422,7 @@ class ProjectRenderTest(unittest.TestCase):
         page = st.assemble(*st.render(state, TEMPLATE))
         self.assertEqual(page.count('<section class="project"'), 3)
         self.assertIn('data-project="none"', page)
-        self.assertIn('<a href="#local_sess_mgr_P-0001">P-0001 manager Nature MCP</a> <code>sess_mgr_P-0001</code>', page)
+        self.assertIn('manager <a href="#local_sess_mgr_P-0001">P-0001 Nature MCP</a> <code>sess_mgr_P-0001</code>', page)
         self.assertIn('href="https://github.com/org/repo/issues/1"', page)
         self.assertIn("Add docs", page)
         for chip in ("review", "rejected", "review waived"):

@@ -39,7 +39,7 @@ Field names are agent-neutral:
         "session_id": "sess_mgr01",
         "started_by": "sess_sup_01",
         "handle": "p0001-manager",
-        "title": "P-0001 manager Uploader reliability",
+        "title": "P-0001 Uploader reliability",
         "intended_state": "running",
         "observed_state": "idle",
         "observed_at": "2026-10-17T10:41:00+09:00",
@@ -174,7 +174,7 @@ Optional (absent counts as an empty list). A project groups tasks under one proj
 
 | Field | Meaning |
 | :--- | :--- |
-| `session_id`, `started_by`, `handle`, `title` | As for workers. `handle` is `pNNNN-manager`, `title` is `P-NNNN manager <name>` (also the sidebar title). |
+| `session_id`, `started_by`, `handle`, `title` | As for workers. `handle` is `pNNNN-manager`, `title` is `P-NNNN <name>` (also the sidebar title). |
 | `intended_state`, `observed_state`, `observed_at` | Same ranges as for workers. The manager becomes `intended_state: archived` only when the project has `close` or the manager is observed `archived` or `missing`. |
 | `model` | Optional, as for workers. |
 | `last_report` | `null`, `{message_ref, status, summary, at}` with `status` `idle` or `needs_input`, or `{message_ref, status: "unparsed", error, at}`. `message_ref` makes the manager's turn-end handling idempotent (SKILL.md 6.11). |
@@ -207,7 +207,7 @@ Optional (absent counts as an empty list). A project groups tasks under one proj
 | :--- | :--- |
 | `id`, `task_id` | Worker id and owning task. |
 | `session_id`, `started_by` | Runtime session id and the supervisor session that started it (`null` while pending). |
-| `handle`, `title` | Start-time name (`[a-z0-9-]`, 24 characters or fewer) and display title (52 characters or fewer, always set; the session's sidebar title is `<task id> <title>`, SKILL.md 6.2.2). |
+| `handle`, `title` | Start-time name (`[a-z0-9-]`, 24 characters or fewer) and display title (52 characters or fewer, always set; the session's sidebar title is `<task id>|<worker id> <title>`, or `<project id>|<task id>|<worker id> <title>` for a project task, SKILL.md 6.2.2). |
 | `cwd` | Repo root (git) or target directory (non-git), absolute. |
 | `kind` | `git` or `non-git`. |
 | `delivery` | `push_pr`, `commit`, or `files` (see Value ranges). |

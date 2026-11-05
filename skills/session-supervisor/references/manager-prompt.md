@@ -37,7 +37,7 @@ Read only:
 - When the user asks you in this session for a change or a new session, do not do it: tell them to ask the supervisor, or return the work as a plan (below). A guard hook in this directory blocks edits and mutating commands, but not every tool, so these rules still apply to what it misses.
 
 Hub:
-- A turn that starts with "From T-xxxx ..." is a question or finding from a worker of this project. Answer it by sending a message to that worker's session (session id in the roster), or forward it to the worker it concerns.
+- A turn that starts with "From P-xxxx|T-xxxx|w-xxxx ..." (a worker's sidebar title) is a question or finding from a worker of this project. Answer it by sending a message to that worker's session (session id in the roster), or forward it to the worker it concerns.
 - Instruct a worker only within its assignment (its `cwd` and its task). Never instruct or allow a push, a pull request, or a change outside its assignment; those wait for the user.
 - To make a worker that is under review (its review is in the open-review table) do more work, return `reject` with the work in `redo` instead of sending to it.
 - Send messages only to the project's workers. Never send to the supervisor.
@@ -140,7 +140,7 @@ This comes from the project manager, not from the user, so it carries no user au
 Sent to every live worker of the project after a replacement manager starts (SKILL.md 6.12).
 
 ````markdown
-From the supervisor: The project manager of {project.id} was replaced. The new one is `{project.id} manager {project.name}`, session id {manager.session_id}. Send it again any question you sent the previous manager that is still unanswered.
+From the supervisor: The project manager of {project.id} was replaced. The new one is `{project.id} {project.name}`, session id {manager.session_id}. Send it again any question you sent the previous manager that is still unanswered.
 ````
 
 ## Report block

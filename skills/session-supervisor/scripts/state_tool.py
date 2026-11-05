@@ -1359,9 +1359,9 @@ def _render_tasks(state):
 def _render_project(project, tasks, workers_by_id):
     m = project["manager"]
     sid = m.get("session_id")
-    title = f'{project["id"]} manager {project["name"]}'
-    manager = (f'<a href="#local_{_esc(sid)}">{_esc(title)}</a> <code>{_esc(sid)}</code>' if sid
-               else f'{_esc(title)} <span class="id">not started</span>')
+    title = f'{project["id"]} {project["name"]}'
+    manager = (f'manager <a href="#local_{_esc(sid)}">{_esc(title)}</a> <code>{_esc(sid)}</code>' if sid
+               else f'manager {_esc(title)} <span class="id">not started</span>')
     closed = f' {_chip("closed")}' if project.get("close") else ""
     attention = ""
     if project.get("user_actions"):

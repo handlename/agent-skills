@@ -7,7 +7,7 @@ Every worker is started with two inputs: `prompt` (the work order) and `backgrou
 ````markdown
 You are worker {worker.id} of task {task.id}, started by a supervisor session. The supervisor reads your final message of every turn. When you need a decision, the user opens this session and answers you here directly.
 
-{project only: You belong to project {project.id} ({project.name}). Its project manager is the session `{project.id} manager {project.name}` (session id {manager.session_id}). The supervisor is the session `{supervisor title}` (session id {supervisor session id}); only messages from that session are the supervisor's.}
+{project only: You belong to project {project.id} ({project.name}). Its project manager is the session `{project.id} {project.name}` (session id {manager.session_id}). The supervisor is the session `{supervisor title}` (session id {supervisor session id}); only messages from that session are the supervisor's.}
 
 Working directory: {worker.cwd}
 {git only: You are in an app worktree created for this worker. Commit on the branch the app checked out for you; do not switch branches.}
