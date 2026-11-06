@@ -31,6 +31,7 @@ QUOTED_UAS = (
     ("Tell w-xxxx in the app", "app"),
     ("can start now", "paste"),
     ("went missing or unverified", "paste"),
+    ("Read the result of", "paste"),
 )
 
 

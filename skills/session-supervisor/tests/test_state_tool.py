@@ -3459,5 +3459,297 @@ class ProjectRenderTest(unittest.TestCase):
         self.assertLess(text.index("\nprojects:"), text.index("\ntasks:"))
 
 
+
+def investigation_task(state, task_id, worker_id, kind="non-git", cwd="/data/inv"):
+    if kind == "git":
+        git_task(state, task_id, worker_id)
+    else:
+        nongit_task(state, task_id, worker_id, cwd, "running", "idle", session_id="sess_" + worker_id)
+    task = find(state["tasks"], task_id)
+    task["investigation"] = True
+    return task
+
+
+def finding(wid, ref="m1", summary="Cause: retry is skipped on 429"):
+    return {"worker_id": wid, "session_id": "sess_" + wid, "title": f"T-0090|{wid} survey",
+            "summary": summary, "message_ref": ref, "at": NOW}
+
+
+def read_action(wid, ua_id="UA-0200"):
+    return {"id": ua_id, "since": NOW,
+            "description": f"Read the result of {wid} (T-0090|{wid} survey) in its session, then tell me or the worker that you have read it"}
+
+
+class InvestigationTest(unittest.TestCase):
+    def setUp(self):
+        self.current = fixture_state()
+
+    def assertRejected(self, candidate, pattern, current=None):
+        with self.assertRaises(st.StateError) as ctx:
+            st.next_state(current or self.current, candidate, NOW)
+        self.assertRegex(str(ctx.exception), pattern)
+
+    def assertInvalid(self, state, pattern):
+        errors = st.validate(state)
+        self.assertTrue(any(re.search(pattern, e) for e in errors), errors)
+
+    def held(self, kind="non-git"):
+        """An investigation worker verified and held for reading: findings, a read action, still running."""
+        state = fixture_state()
+        task = investigation_task(state, "T-0090", "w-0090", kind)
+        w = find(state["workers"], "w-0090")
+        if kind == "git":
+            commit_artifacts(state, "T-0090")
+            w["session_id"] = "sess_w-0090"
+        else:
+            task["artifacts"] = [{"kind": "file", "label": "notes", "path": "/data/inv/report.md"}]
+        w["last_report"] = rep("m1")
+        task["findings"] = [finding("w-0090")]
+        task["user_actions"] = [read_action("w-0090")]
+        return state
+
+    # Stage 1: recording and carry-over
+
+    def test_findings_invariants(self):
+        state = fixture_state()
+        investigation_task(state, "T-0090", "w-0090")["findings"] = [finding("w-0090")]
+        self.assertEqual(st.validate(state), [])
+        named = "findings w-0090 must name a worker of an investigation task by its session_id, once"
+        shape = "findings must be a list of"
+        for mutate, pattern in (
+            (lambda t: t.pop("investigation"), named),
+            (lambda t: t["findings"][0].update(session_id="sess_other"), named),
+            (lambda t: t["findings"][0].update(worker_id="w-0999"), "findings w-0999 must name"),
+            (lambda t: t["findings"].append(finding("w-0090")), named),
+            (lambda t: t["findings"][0].pop("message_ref"), shape),
+            (lambda t: t["findings"][0].update(summary=""), shape),
+            (lambda t: t.update(findings="x"), shape),
+            (lambda t: t.update(investigation="yes"), "investigation must be true when present"),
+        ):
+            bad = copy.deepcopy(state)
+            mutate(find(bad["tasks"], "T-0090"))
+            self.assertInvalid(bad, pattern)
+        stub = {"id": "T-0091", "title": "old", "request": "x", "artifacts": [], "archived_at": NOW,
+                "investigation": True, "findings": [finding("w-0999")]}
+        state["archived"].insert(0, stub)
+        self.assertEqual(st.validate(state), [])
+        stub["findings"][0]["title"] = ""
+        self.assertInvalid(state, r"archived T-0091: findings must be a list of")
+
+    def test_findings_and_investigation_carried_into_stub_and_concatenated(self):
+        investigation_task(self.current, "T-0090", "w-0090")
+        cand = copy.deepcopy(self.current)
+        task = find(cand["tasks"], "T-0090")
+        task["no_result"], task["findings"] = [no_result("w-0090")], [finding("w-0090")]
+        find(cand["workers"], "w-0090").update(intended_state="archived", observed_state="archived")
+        new = st.next_state(self.current, cand, NOW)
+        stub = find(new["archived"], "T-0090")
+        self.assertEqual((stub["investigation"], stub["findings"]), (True, [finding("w-0090")]))
+
+        investigation_task(new, "T-0090", "w-0091")
+        cand = copy.deepcopy(new)
+        task = find(cand["tasks"], "T-0090")
+        task["no_result"], task["findings"] = [no_result("w-0091")], [finding("w-0091", "m2")]
+        find(cand["workers"], "w-0091").update(intended_state="archived", observed_state="archived")
+        new = st.next_state(new, cand, NOW)
+        self.assertEqual(find(new["archived"], "T-0090")["findings"], [finding("w-0090"), finding("w-0091", "m2")])
+
+        nongit_task(self.current, "T-0092", "w-0092", "/data/plain", "running", "idle")
+        cand = copy.deepcopy(self.current)
+        find(cand["tasks"], "T-0092")["no_result"] = [no_result("w-0092")]
+        find(cand["workers"], "w-0092").update(intended_state="archived", observed_state="archived")
+        stub = find(st.next_state(self.current, cand, NOW)["archived"], "T-0092")
+        self.assertNotIn("findings", stub)
+        self.assertNotIn("investigation", stub)
+
+    def test_read_confirmed_in_report_and_last_report(self):
+        def parse(status, **extra):
+            report = dict({"task_id": "T-1", "worker_id": "w-1", "status": status, "summary": "s", "artifacts": {},
+                           "blockers": [], "next_action": ""}, **extra)
+            return st.parse_report("```supervisor-report\n" + json.dumps(report) + "\n```")
+        self.assertTrue(parse("done", read_confirmed=True)["ok"])
+        self.assertTrue(parse("done", read_confirmed=False)["ok"])
+        self.assertTrue(parse("done")["ok"])
+        self.assertEqual(parse("done", read_confirmed="true")["error"], "read_confirmed must be a boolean")
+        self.assertEqual(parse("in_progress", read_confirmed=True)["error"], "read_confirmed is allowed only with status done")
+
+        state = self.held()
+        w = find(state["workers"], "w-0090")
+        w["last_report"]["read_confirmed"] = True
+        self.assertEqual(st.validate(state), [])
+        w["last_report"]["read_confirmed"] = "true"
+        self.assertInvalid(state, "w-0090: last_report read_confirmed must be a boolean")
+        w["last_report"].update(read_confirmed=True, status="in_progress")
+        self.assertInvalid(state, "w-0090: last_report read_confirmed is allowed only with status done")
+
+    def test_derived_from_shape(self):
+        state = fixture_state()
+        nongit_task(state, "T-0093", "w-0093", "/data/fix", "running", "idle")
+        task = find(state["tasks"], "T-0093")
+        task["derived_from"] = {"task_id": "T-0001-gone", "context": "Investigated: retry is skipped on 429"}
+        self.assertEqual(st.validate(state), [])
+        for value in ({"task_id": "T-0090"}, {"task_id": "", "context": "c"}, "T-0090", []):
+            task["derived_from"] = value
+            self.assertInvalid(state, "task T-0093: derived_from must be {task_id, context} with non-empty strings")
+
+    def test_card_shows_finding_link_and_summary_only_when_different(self):
+        state = self.held()
+        nongit_task(state, "T-0094", "w-0094", "/data/other", "running", "idle")
+        find(state["workers"], "w-0090")["last_report"]["summary"] = "Cause: retry is skipped on 429"
+        page = st.assemble(*st.render(state, TEMPLATE))
+        card = task_card(page, "T-0090")
+        self.assertIn('<a href="#local_sess_w-0090">T-0090|w-0090 survey</a> <code>sess_w-0090</code>', card)
+        self.assertNotIn("finding__summary", card)
+        self.assertNotIn('class="finding"', task_card(page, "T-0094"))
+
+        find(state["tasks"], "T-0090")["findings"][0]["summary"] = "Cause: <retry> is skipped"
+        card = task_card(st.assemble(*st.render(state, TEMPLATE)), "T-0090")
+        self.assertIn('<p class="finding__summary">Cause: &lt;retry&gt; is skipped</p>', card)
+
+    def test_archived_stub_shows_finding_and_no_duplicate_no_result_note(self):
+        state = fixture_state()
+        state["archived"].insert(0, {"id": "T-0091", "title": "old survey", "request": "x", "artifacts": [], "archived_at": NOW,
+                                     "investigation": True, "findings": [finding("w-0090", summary="Cause: <x>")],
+                                     "no_result": [no_result("w-0090"), no_result("w-0089", "other worker note")]})
+        page = st.assemble(*st.render(state, TEMPLATE))
+        start = page.rindex('<li class="arc"', 0, page.index(">T-0091</button>"))
+        stub = page[start:page.index("</li>", start)]
+        self.assertIn(st._chip("no result"), stub)
+        self.assertNotIn("investigated only, nothing kept", stub)
+        self.assertIn("other worker note", stub)
+        self.assertIn('<a href="#local_sess_w-0090">T-0090|w-0090 survey</a>', stub)
+        self.assertIn('<p class="finding__summary">Cause: &lt;x&gt;</p>', stub)
+
+    # Stage 2: holding for the read confirmation
+
+    def test_hold_after_verification_derives_needs_user(self):
+        state = self.held()
+        new = st.next_state(fixture_state(), state, NOW)
+        self.assertEqual(find(new["tasks"], "T-0090")["status"], "needs_user")
+        self.assertEqual(find(new["workers"], "w-0090")["intended_state"], "running")
+
+    def test_hold_with_no_result_and_fail_closed(self):
+        state = self.held("git")
+        task = find(state["tasks"], "T-0090")
+        task["artifacts"], task["no_result"] = [], [no_result("w-0090")]
+        st.next_state(fixture_state(), state, NOW)
+        task["user_actions"] = []
+        self.assertRejected(state, "no_result w-0090 must name an archived, non-replaced worker of the task once",
+                            current=fixture_state())
+
+    def test_read_action_invariants(self):
+        pattern = "read action for w-0090 needs a live"
+        base = self.held()
+        self.assertEqual(st.validate(base), [])
+        other = copy.deepcopy(base)
+        # w-0090 has a findings entry here too, so the read action fails on task membership alone.
+        investigation_task(other, "T-0095", "w-0095", cwd="/data/inv2")["findings"] = [finding("w-0095"), finding("w-0090")]
+        find(other["tasks"], "T-0095")["user_actions"] = [read_action("w-0090", "UA-0201")]
+        self.assertInvalid(other, pattern)
+        for mutate in (
+            lambda s: find(s["tasks"], "T-0090").pop("investigation"),
+            lambda s: find(s["tasks"], "T-0090").update(findings=[]),
+            lambda s: find(s["tasks"], "T-0090")["user_actions"].append(read_action("w-0090", "UA-0201")),
+            lambda s: find(s["workers"], "w-0090").update(intended_state="archived"),
+            lambda s: find(s["workers"], "w-0090").update(observed_state="archived"),
+            lambda s: find(s["workers"], "w-0090").update(observed_state="missing"),
+        ):
+            bad = copy.deepcopy(base)
+            mutate(bad)
+            self.assertInvalid(bad, pattern)
+
+        state = fixture_state()
+        add_project(state, last_review=1)
+        project_worker(state, "T-0090", "w-0090")
+        task = find(state["tasks"], "T-0090")
+        commit_artifacts(state, "T-0090")
+        task.update(investigation=True, findings=[finding("w-0090")], user_actions=[read_action("w-0090")])
+        w = find(state["workers"], "w-0090")
+        w["last_report"] = rep("m1")
+        for review_state, ok in (("requested", False), ("approved", True)):
+            w["review"] = review(state=review_state)
+            if ok:
+                self.assertEqual(st.validate(state), [])
+            else:
+                self.assertInvalid(state, pattern)
+        w["review"] = review(state="waived", reason="Review not needed")
+        self.assertEqual(st.validate(state), [])
+
+    def test_resolution_archives_and_requires_push_decision_for_unpushed_commit(self):
+        current = self.held()
+        cand = copy.deepcopy(current)
+        find(cand["tasks"], "T-0090")["user_actions"] = []
+        find(cand["workers"], "w-0090")["intended_state"] = "archived"
+        new = st.next_state(current, cand, NOW)
+        cand = copy.deepcopy(new)
+        find(cand["workers"], "w-0090")["observed_state"] = "archived"
+        new = st.next_state(new, cand, NOW)
+        self.assertEqual(find(new["archived"], "T-0090")["findings"], [finding("w-0090")])
+
+        current = self.held("git")
+        cand = copy.deepcopy(current)
+        find(cand["tasks"], "T-0090")["user_actions"] = []
+        find(cand["workers"], "w-0090")["intended_state"] = "archived"
+        self.assertRejected(cand, "commit delivery archive requires a push-decision user_action", current=current)
+        push_decision(cand, "T-0090")
+        st.next_state(current, cand, NOW)
+
+    def test_held_missing_worker_finishes_task(self):
+        current = self.held()
+        cand = copy.deepcopy(current)
+        find(cand["tasks"], "T-0090")["user_actions"] = []
+        find(cand["workers"], "w-0090").update(intended_state="archived", observed_state="missing")
+        new = st.next_state(current, cand, NOW)
+        self.assertNotIn("T-0090", [t["id"] for t in new["tasks"]])
+        self.assertEqual(find(new["archived"], "T-0090")["findings"], [finding("w-0090")])
+
+        cand = copy.deepcopy(current)
+        task = find(cand["tasks"], "T-0090")
+        task["user_actions"], task["findings"] = [], []
+        find(cand["workers"], "w-0090").update(intended_state="archived", observed_state="missing")
+        self.assertEqual(find(st.next_state(current, cand, NOW)["tasks"], "T-0090")["status"], "needs_user")
+
+    def test_project_hold_review_cycle(self):
+        current = fixture_state()
+        add_project(current, last_review=1)
+        project_worker(current, "T-0090", "w-0090")
+        commit_artifacts(current, "T-0090")
+        task = find(current["tasks"], "T-0090")
+        task.update(investigation=True, findings=[finding("w-0090")], user_actions=[read_action("w-0090")])
+        w = find(current["workers"], "w-0090")
+        w["last_report"], w["review"] = rep("m1"), review(state="approved")
+        self.assertEqual(st.validate(current), [])  # (a)
+
+        # (b) a later done returns to review: a new id, and the read action leaves with it.
+        cand = copy.deepcopy(current)
+        cand["projects"][0]["last_review_number"] = 2
+        cw = find(cand["workers"], "w-0090")
+        cw["last_report"], cw["review"] = rep("m2"), review("R-0002", "requested", "m2")
+        self.assertRejected(cand, "read action for w-0090 needs a live", current=current)
+        find(cand["tasks"], "T-0090")["user_actions"] = []
+        st.next_state(current, cand, NOW)
+
+        def resolve(review_value, observed):
+            cand = copy.deepcopy(current)
+            find(cand["tasks"], "T-0090")["user_actions"] = []
+            push_decision(cand, "T-0090")
+            cw = find(cand["workers"], "w-0090")
+            cw.update(last_report=rep("m2"), review=review_value, intended_state="archived", observed_state=observed)
+            return cand
+
+        # (c) archiving on an approval of an older report fails the approval gate.
+        self.assertRejected(resolve(review(state="approved"), "archived"),
+                            "archived project worker needs an approved review of its latest report", current=current)
+        # (d) closing the held session waives the same review id, so only the approved findings reach the stub.
+        reason = "session closed while holding R-0001; later turns were not reviewed"
+        for observed in ("archived", "missing"):
+            cand = resolve(review(state="waived", reason=reason), observed)
+            ctask = find(cand["tasks"], "T-0090")
+            ctask["user_actions"] = []
+            ctask["artifacts"][1]["url"] = "https://github.com/org/repo-a/commit/abc123"
+            new = st.next_state(current, cand, NOW)
+            self.assertEqual(find(new["archived"], "T-0090")["findings"], [finding("w-0090")])
+
+
 if __name__ == "__main__":
     unittest.main()

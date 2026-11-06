@@ -55,6 +55,8 @@ REPORT_RE = re.compile(r"```supervisor-report[ \t]*\r?\n(.*?)\r?\n[ \t]*```", re
 UA_ID_RE = re.compile(r"^UA-(\d+)$")
 HUB_WAIT_PREFIX = "Hub wait {wid} ("
 REVIEW_WAIT_PREFIX = "Review wait {wid} ("
+READ_ACTION_PREFIX = "Read the result of "
+FINDING_KEYS = ("worker_id", "session_id", "title", "summary", "message_ref", "at")
 
 FOLLOW_UP_HEADING = "## Follow-ups"
 FOLLOW_UP_RULE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
@@ -446,8 +448,12 @@ def derive_status(task, workers_by_id):
     if any(o == "none" for o in observed):
         return "waiting"
     # Workers given up as missing deliver nothing, and a replaced worker was never verified;
-    # without one verified archive the task needs a replacement or a cancel.
-    if not any(w.get("observed_state") == "archived" and not w.get("replaced_by") for w in workers):
+    # without one verified archive the task needs a replacement or a cancel. An investigation
+    # worker that went missing while held has its verified findings, so it counts as finished.
+    finding_ids = {f.get("worker_id") for f in task.get("findings", [])}
+    if not any((w.get("observed_state") == "archived"
+                or (w.get("observed_state") == "missing" and w.get("intended_state") == "archived" and w["id"] in finding_ids))
+               and not w.get("replaced_by") for w in workers):
         return "needs_user"
     return "done"
 
@@ -495,7 +501,30 @@ def _validate_last_report(prefix, report):
                 errors.append(f"{prefix}: last_report requires {key}")
     else:
         errors.append(f"{prefix}: last_report has invalid status {status!r}")
+    errors += [f"{prefix}: last_report {e}" for e in _read_confirmed_errors(report)]
     return errors
+
+
+def _read_confirmed_errors(report):
+    if "read_confirmed" not in report:
+        return []
+    if not isinstance(report["read_confirmed"], bool):
+        return ["read_confirmed must be a boolean"]
+    if report["read_confirmed"] and report.get("status") != "done":
+        return ["read_confirmed is allowed only with status done"]
+    return []
+
+
+def _read_action_worker(ua):
+    """The worker id a read-the-result user action names, or None for any other user action."""
+    description = ua.get("description")
+    if ua.get("follow_up") is not None or not isinstance(description, str) or not description.startswith(READ_ACTION_PREFIX + "w-"):
+        return None
+    return description[len(READ_ACTION_PREFIX):].split(" (", 1)[0]
+
+
+def _held_ids(task):
+    return {wid for wid in map(_read_action_worker, task.get("user_actions", [])) if wid}
 
 
 def _no_result_ids(task):
@@ -543,6 +572,12 @@ def _shape_errors(state):
         if not isinstance(no_result, list) or not all(
                 isinstance(n, dict) and all(isinstance(n.get(k), str) and n.get(k) for k in ("worker_id", "summary", "at")) for n in no_result):
             errors.append(f"{prefix}: no_result must be a list of {{worker_id, summary, at}} with non-empty strings")
+        findings = owner.get("findings", [])
+        if not isinstance(findings, list) or not all(
+                isinstance(f, dict) and all(isinstance(f.get(k), str) and f.get(k) for k in FINDING_KEYS) for f in findings):
+            errors.append(f"{prefix}: findings must be a list of {{{', '.join(FINDING_KEYS)}}} with non-empty strings")
+        if "investigation" in owner and owner["investigation"] is not True:
+            errors.append(f"{prefix}: investigation must be true when present")
     for s in state["archived"]:
         if s.get("request") is not None and not isinstance(s["request"], str):
             errors.append(f"archived {s['id']}: request must be a string")
@@ -557,6 +592,9 @@ def _shape_errors(state):
         cancel = t.get("cancel")
         if cancel is not None and not (isinstance(cancel, dict) and all(isinstance(cancel.get(k), str) and cancel.get(k) for k in ("at", "reason"))):
             errors.append(f"task {t['id']}: cancel must be null or {{at, reason}} with non-empty strings")
+        derived = t.get("derived_from")
+        if derived is not None and not (isinstance(derived, dict) and all(_str(derived.get(k)) for k in ("task_id", "context"))):
+            errors.append(f"task {t['id']}: derived_from must be {{task_id, context}} with non-empty strings")
     for w in state["workers"]:
         for key in ("task_id", "cwd"):
             if not isinstance(w.get(key), str):
@@ -797,14 +835,35 @@ def validate(state):
             for wid in task.get("worker_ids", []):
                 if workers_by_id.get(wid, {}).get("intended_state") == "running":
                     errors.append(f"{prefix}: cancelled but worker {wid} is still intended running")
-        # A no_result entry exempts its worker from delivery artifacts, so it must stay tied to that finished worker.
+        # A no_result entry exempts its worker from delivery artifacts, so it must stay tied to that finished or held worker.
+        held = _held_ids(task)
         seen = set()
         for entry in task.get("no_result", []):
             wid = entry["worker_id"]
             w = workers_by_id.get(wid)
             if (wid in seen or w is None or w.get("task_id") != tid
-                    or w.get("intended_state") != "archived" or w.get("replaced_by")):
+                    or (w.get("intended_state") != "archived" and wid not in held) or w.get("replaced_by")):
                 errors.append(f"{prefix}: no_result {wid} must name an archived, non-replaced worker of the task once")
+            seen.add(wid)
+        seen = set()
+        for entry in task.get("findings", []):
+            wid = entry["worker_id"]
+            w = workers_by_id.get(wid)
+            if (wid in seen or not task.get("investigation") or w is None or w.get("task_id") != tid
+                    or w.get("session_id") != entry["session_id"]):
+                errors.append(f"{prefix}: findings {wid} must name a worker of an investigation task by its session_id, once")
+            seen.add(wid)
+        # A held worker stays running only while the user still has to read its verified result.
+        finding_ids = {f["worker_id"] for f in task.get("findings", [])}
+        seen = set()
+        for wid in filter(None, map(_read_action_worker, task.get("user_actions", []))):
+            w = workers_by_id.get(wid) or {}
+            review_ok = not task.get("project_id") or (w.get("review") or {}).get("state") in ("approved", "waived")
+            if (wid in seen or not task.get("investigation") or w.get("task_id") != tid
+                    or w.get("intended_state") != "running" or w.get("observed_state") in ("archived", "missing")
+                    or wid not in finding_ids or not review_ok):
+                errors.append(f"{prefix}: read action for {wid} needs a live, approved or waived (project) worker "
+                              "of an investigation task with findings, once")
             seen.add(wid)
         cwds = [w["cwd"] for w in workers if w.get("task_id") == tid and w.get("cwd")]
         for i, artifact in enumerate(task.get("artifacts", [])):
@@ -1126,6 +1185,11 @@ def next_state(current, candidate, now):
         no_result = old_stubs.get(t["id"], {}).get("no_result", []) + t.get("no_result", [])
         if no_result:
             stub["no_result"] = no_result
+        findings = old_stubs.get(t["id"], {}).get("findings", []) + t.get("findings", [])
+        if findings:
+            stub["findings"] = findings
+        if t.get("investigation"):
+            stub["investigation"] = True
         if t.get("cancel"):
             stub.update(cancelled=True, reason=t["cancel"]["reason"])
         project = projects_by_id.get(t.get("project_id"))
@@ -1318,6 +1382,13 @@ def _render_report(r, awaiting_since=None):
             f'{_esc(r.get("summary"))}{since}</p>')
 
 
+def _render_finding(f, with_summary):
+    sid = _esc(f["session_id"])
+    summary = f'<p class="finding__summary">{_esc(f["summary"])}</p>' if with_summary else ""
+    return (f'<div class="finding"><p class="finding__link"><span class="label">Result</span> '
+            f'<a href="#local_{sid}">{_esc(f["title"])}</a> <code>{sid}</code></p>{summary}</div>')
+
+
 def _copy_id(cls, text):
     # Click-to-copy control whose text is the ID itself (see the click handler in the template).
     return (f'<button type="button" class="{cls} copyable" data-copy aria-label="Copy {_esc(text)}" '
@@ -1409,6 +1480,10 @@ def _task_list(tasks, workers_by_id):
                                      f'<ul class="task__attention-list">{rows}</ul></div>')
             else:
                 next_or_attention = f'<p class="task__next"><span class="label">Next</span> {_esc(task.get("next_action"))}</p>'
+            # The worker row already shows its latest summary; repeat the recorded conclusion only when it differs.
+            summaries = {w["id"]: (w.get("last_report") or {}).get("summary") for w in workers}
+            findings = "".join(_render_finding(f, f["summary"] != summaries.get(f["worker_id"]))
+                               for f in task.get("findings", []))
             cancel = ""
             if task.get("cancel"):
                 cancel = f'<p class="task__cancel">{_chip("cancelled")} {_esc(task["cancel"].get("reason"))}</p>'
@@ -1422,7 +1497,7 @@ def _task_list(tasks, workers_by_id):
                 f'<p class="task__elapsed">started {_time(task.get("created_at"))}</p></div>'
                 f'{next_or_attention}'
                 f'<ul class="task__workers">{"".join(_render_worker(w) for w in workers)}</ul>'
-                f'{_render_artifact_list(task.get("artifacts", []))}</article>')
+                f'{findings}{_render_artifact_list(task.get("artifacts", []))}</article>')
         cards = "".join(out)
     return f'<div class="task-list">{cards}</div>'
 
@@ -1439,8 +1514,11 @@ def _render_archived(state):
                 cancelled = f' {_chip("cancelled")} <span class="arc__reason">{_esc(stub.get("reason"))}</span>'
             no_result = stub.get("no_result", [])
             chip = f' {_chip("no result")}' if no_result else ""
+            findings = stub.get("findings", [])
+            finding_ids = {f["worker_id"] for f in findings}
             notes = "".join(f'<p class="arc__note"><span class="id">{_esc(n["worker_id"])}</span> {_esc(n["summary"])}</p>'
-                            for n in no_result)
+                            for n in no_result if n["worker_id"] not in finding_ids)
+            notes += "".join(_render_finding(f, True) for f in findings)
             project = f'<span class="id">{_esc(stub["project"]["id"])}</span> ' if stub.get("project") else ""
             items.append(
                 f'<li class="arc"{" data-cancelled" if stub.get("cancelled") else ""}><p class="arc__title">{_copy_id("id", stub["id"])} {project}'
@@ -1563,6 +1641,9 @@ def parse_report(text, expect_task=None, expect_worker=None, allow_awaiting_mana
         return {"ok": False, "error": "artifacts.files must be a list of strings"}
     if report["status"] in ("needs_input", "blocked", "awaiting_manager") and not report["blockers"]:
         return {"ok": False, "error": f"status {report['status']} requires at least one blocker"}
+    confirmed = _read_confirmed_errors(report)
+    if confirmed:
+        return {"ok": False, "error": confirmed[0]}
     if expect_task is not None and report["task_id"] != expect_task:
         return {"ok": False, "error": f"task_id {report['task_id']!r} does not match {expect_task!r}"}
     if expect_worker is not None and report["worker_id"] != expect_worker:
