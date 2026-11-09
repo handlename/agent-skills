@@ -7,7 +7,7 @@ guard_decision (bash_violations, path_violation), parse_follow_ups, new_pr_urls,
 parse_locations, default_locations, add_missing_locations, clone_url_parts,
 parse_frontmatter, set_props, new_note_text, parse_sections, parse_user_actions, ua_open, render_ua_line,
 apply_note_ops, parse_artifacts, render_artifact_line, artifacts_view, art_sha,
-join_view, split_view, note_props, user_transition, artifact_needs.
+join_view, split_view, note_props, user_transition, artifact_needs, note_values, journal_reflected, number_note_ops.
 Imperative shell: the argparse subcommands at the bottom of this file.
 """
 
@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 SCHEMA_VERSION = 2
@@ -193,9 +193,8 @@ def serialize(state):
 
 
 def empty_state(supervisor_dir):
-    # commit still stores the v1 view until the note commit flow is wired into the CLI.
     return {
-        "schema_version": VIEW_SCHEMA_VERSION,
+        "schema_version": SCHEMA_VERSION,
         "rev": 0,
         "updated_at": None,
         "supervisor": {
@@ -204,6 +203,9 @@ def empty_state(supervisor_dir):
             "archive_consent": None,
             "dashboard": {"url": None, "path": os.path.join(supervisor_dir, "dashboard.html")},
             "last_project_number": 0,
+            "last_ua_number": 0,
+            "note_warnings": {},
+            "note_journal": None,
         },
         "tasks": [],
         "workers": [],
@@ -428,6 +430,8 @@ def bash_violations(command):
 
 def path_violation(path, cwd, supervisor_dir, config_dir, tmp_dirs):
     full = _real(os.path.join(_real(cwd), os.path.expanduser(path)))
+    if _under(full, os.path.join(supervisor_dir, "vault")):
+        return f"{full} (vault notes are written only by state_tool commit)"
     if _under(full, supervisor_dir):
         if any(_under(full, os.path.join(supervisor_dir, rel)) for rel in GUARD_PROTECTED):
             return f"{full} (written only by setup or commit)"
@@ -746,7 +750,10 @@ def _project_shape_errors(state):
         prefix = f"project {p['id']}"
         if not _str(p.get("name")):
             errors.append(f"{prefix}: name must be a non-empty string")
-        if not _is_http_url(p.get("context_doc_url")):
+        uas = p.get("user_actions", [])
+        # A project delegated from a note without a context document waits for the user's answer (ask answer).
+        asking = isinstance(uas, list) and any(isinstance(ua, dict) and ua.get("needs_answer") for ua in uas)
+        if not _is_http_url(p.get("context_doc_url")) and not (p.get("context_doc_url") is None and asking):
             errors.append(f"{prefix}: context_doc_url must be http(s)")
         if not isinstance(p.get("dir"), str) or not os.path.isabs(p["dir"]):
             errors.append(f"{prefix}: dir must be an absolute path")
@@ -756,7 +763,6 @@ def _project_shape_errors(state):
             errors.append(f"{prefix}: last_review_number must be a non-negative integer")
         if p.get("close") is not None and not _fields_ok(p["close"], ("at", "reason")):
             errors.append(f"{prefix}: close must be null or {{at, reason}} with non-empty strings")
-        uas = p.get("user_actions", [])
         if not isinstance(uas, list) or not all(isinstance(ua, dict) for ua in uas):
             errors.append(f"{prefix}: user_actions must be a list of objects")
         else:
@@ -1656,6 +1662,11 @@ def digest(state, state_path, limit=DIGEST_LIMIT):
     actions += [f"- {t.get('id')} {ua.get('id')}: {ua.get('description')}{_digest_follow_up(ua)}"
                 for t in state.get("tasks", []) for ua in t.get("user_actions", [])]
     lines += actions or ["- (none)"]
+    holds = [f"- {o.get('id')} note {o.get('uid')} ({o.get('note')}): status/assignee outside the transition table; "
+             "ask the user to set listed values" for o in projects + state.get("tasks", [])
+             if isinstance(o, dict) and (o.get("user_hold") or {}).get("reason") == "invalid"]
+    if holds:
+        lines += ["notes on hold (invalid values):"] + holds
     if projects:
         lines.append("projects:")
         for p in projects:
@@ -2686,7 +2697,8 @@ def _storage_errors(state, notes):
             if not _str(uid):
                 errors.append(f"{prefix}: uid must be a non-empty string")
                 continue
-            if uid not in notes:
+            # A stub's note may be gone (the user deleted it); only live items need theirs.
+            if uid not in notes and key != "archived":
                 errors.append(f"{prefix}: note {uid} not found")
             if key != "archived":
                 if uid in live_uids:
@@ -2833,6 +2845,64 @@ def artifact_needs(view_task, workers, items):
         if any(k == "branch" and kinds[j + 1:j + 2] != ["commit"] for j, k in enumerate(kinds)):
             needs.append(f"グループ {g} の branch の直後の commit")
     return needs
+
+
+def _text_sha(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def note_values(text):
+    """{status, assignee, ua_sha, art_sha} of a note (what note_seen tracks), or None when its frontmatter is unreadable."""
+    props, body, errors = parse_frontmatter(text)
+    if errors:
+        return None
+    sections = parse_sections(body)
+    return {"status": props.get("status"), "assignee": props.get("assignee"),
+            "ua_sha": _text_sha(sections.get(UA_SECTION, "")),
+            "art_sha": art_sha(parse_artifacts(sections.get(ART_SECTION, ""))[0])}
+
+
+def _pair(values):
+    return ((values or {}).get("status"), (values or {}).get("assignee"))
+
+
+def journal_reflected(text, entry, rev):
+    """True when the note (None when missing) already shows a journal entry's write (3.5 step 1): its sha is after_sha,
+    one of the block ids it created exists, one of its rev marks exists, or its props are the written after values.
+    Block ids that existed before the write are not in new_ids, so they never count."""
+    if text is None:
+        return False
+    if _text_sha(text) == entry.get("after_sha"):
+        return True
+    lines = text.split("\n")
+    if any(_has_block(lines, block_id) for block_id in entry.get("new_ids", [])):
+        return True
+    if re.search(rf"(?:chk=r{rev}|\bdone=\S+ r{rev})(?=[ \t])|\"r\":{rev}[,}}]", text):
+        return True
+    after, before = _pair(entry.get("after")), _pair(entry.get("before"))
+    return after != before and _pair(note_values(text)) == after
+
+
+def number_note_ops(ops, next_ua, art_last):
+    """Fill the user action ids and artifact numbers the supervisor left out (3.5 step 3). ops is {uid: [op, ...]},
+    next_ua the first free UA number, art_last {uid: highest artifact number used}. Returns new ops."""
+    out = {}
+    for uid in sorted(ops):
+        last = art_last.get(uid, 0)
+        filled = []
+        for op in copy.deepcopy(ops[uid]):
+            if op.get("op") == "ua_add" and not (op.get("ua") or {}).get("id"):
+                op.setdefault("ua", {})["id"] = f"UA-{next_ua:04d}"
+                next_ua += 1
+            if op.get("op") in ("art_add", "art_replace_group"):
+                for item in op.get("items") or []:
+                    if "n" not in item:
+                        last += 1
+                        item["n"] = last
+                    last = max(last, item["n"]) if isinstance(item["n"], int) else last
+            filled.append(op)
+        out[uid] = filled
+    return out
 
 
 def _pr_urls(task):
@@ -3171,17 +3241,15 @@ def cmd_version(args):
     return 0
 
 
-def cmd_commit(args):
-    html_path = args.html or _default_html(args.state)
-    template = Path(args.template).read_text(encoding="utf-8")
-    new = next_state(_read_json(args.state), _read_json(args.candidate), _now())
-    body, footer = render(new, template)
+def _write_state_and_dashboard(state_path, html_path, new, view, template):
+    """Write the dashboard temp file, replace state.json, then the dashboard. Returns the result dict."""
+    body, footer = render(view, template)
     old_body = body_of(Path(html_path).read_text(encoding="utf-8")) if os.path.exists(html_path) else None
     html_tmp = _write_tmp(os.path.dirname(os.path.abspath(html_path)), assemble(body, footer))
     try:
-        state_tmp = _write_tmp(os.path.dirname(os.path.abspath(args.state)), serialize(new))
+        state_tmp = _write_tmp(os.path.dirname(os.path.abspath(state_path)), serialize(new))
         try:
-            os.replace(state_tmp, args.state)
+            os.replace(state_tmp, state_path)
         except BaseException:
             os.unlink(state_tmp)
             raise
@@ -3198,13 +3266,306 @@ def cmd_commit(args):
             os.unlink(html_tmp)
         result.update(dashboard_changed=True, dashboard_error=str(e))
         print(f"warning: state committed at rev {new['rev']} but the dashboard was not written: {e}", file=sys.stderr)
-    print(json.dumps(result))
+    return result
+
+
+def cmd_commit(args):
+    html_path = args.html or _default_html(args.state)
+    template = Path(args.template).read_text(encoding="utf-8")
+    current = _read_json(args.state)
+    if isinstance(current, dict) and current.get("schema_version") == SCHEMA_VERSION:
+        result = _commit_v2(args, current, html_path, template)
+    else:
+        # A v1 state.json keeps the v1 flow until migrate-v2 converts it.
+        if args.notes:
+            raise StateError("--notes needs a schema_version 2 state")
+        new = next_state(current, _read_json(args.candidate), _now())
+        result = _write_state_and_dashboard(args.state, html_path, new, new, template)
+    print(json.dumps(result, ensure_ascii=False))
     return 0
+
+
+VAULT_DIR = "vault"
+VAULT_SKIP = ("_templates",)
+DASHBOARD_NOTE = "Supervisor.md"
+
+
+def _vault_path(state_path):
+    return os.path.join(os.path.dirname(os.path.abspath(state_path)), VAULT_DIR)
+
+
+def _new_note_path(uid):
+    return f"{uid[:4]}/{uid[4:6]}/{uid}.md"
+
+
+def _index_vault(vault):
+    """({relpath: text}, {uid: [relpath, ...]}) of the vault's notes, without _templates/, hidden folders and Supervisor.md."""
+    texts, uids = {}, {}
+    if not os.path.isdir(vault):
+        return texts, uids
+    for root, dirs, files in os.walk(vault):
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and not (root == vault and d in VAULT_SKIP))
+        for name in sorted(files):
+            rel = Path(os.path.relpath(os.path.join(root, name), vault)).as_posix()
+            if not name.endswith(".md") or rel == DASHBOARD_NOTE:
+                continue
+            try:
+                text = Path(root, name).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            texts[rel] = text
+            uid = parse_frontmatter(text)[0].get("uid")
+            if isinstance(uid, str) and uid:
+                uids.setdefault(uid, []).append(rel)
+    return texts, uids
+
+
+def _notes_by_uid(texts, uids):
+    return {uid: texts[paths[0]] for uid, paths in uids.items()}
+
+
+def _write_note(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    _write_atomic(path, text)
+
+
+def _load_view(state_path):
+    """The v1 view of state.json: a v2 state joined with its vault notes, a v1 state as it is."""
+    state = _read_json(state_path)
+    if not isinstance(state, dict) or state.get("schema_version") != SCHEMA_VERSION:
+        return state
+    try:
+        texts, uids = _index_vault(_vault_path(state_path))
+    except OSError:
+        texts, uids = {}, {}
+    return join_view(state, _notes_by_uid(texts, uids))
+
+
+def _pending_entries(state, texts, uids):
+    """Journal entries of the last commit whose notes do not show their write yet, by uid."""
+    journal = (state.get("supervisor") or {}).get("note_journal")
+    if not journal or journal.get("rev") != state.get("rev"):
+        return {}
+    pending = {}
+    for entry in journal.get("entries", []):
+        rel = (uids.get(entry.get("uid")) or [entry.get("path")])[0]
+        if not journal_reflected(texts.get(rel), entry, journal["rev"]):
+            pending.setdefault(entry.get("uid"), entry)
+    return pending
+
+
+def _replay_journal(state, vault, texts, uids, warnings):
+    """Re-apply each unreflected entry of the last commit once (3.5 step 1). Returns the entries to carry over."""
+    journal = (state.get("supervisor") or {}).get("note_journal")
+    if not journal or journal.get("rev") != state.get("rev"):
+        return []
+    carried = []
+    for uid, entry in _pending_entries(state, texts, uids).items():
+        rel = (uids.get(uid) or [entry["path"]])[0]
+        text = texts.get(rel)
+        new_text, _, _ = apply_note_ops(text or "", entry.get("ops", []), entry.get("at") or _now(), journal["rev"])
+        if entry.get("props") and _pair(note_values(text or new_text)) == _pair(entry.get("before") or note_values(new_text)):
+            new_text = set_props(new_text, entry["props"])
+        try:
+            _write_note(os.path.join(vault, rel), new_text)
+        except OSError as e:
+            tries = entry.get("tries", 0) + 1
+            if tries >= 2:
+                warnings.append(f"note {rel}: dropped the unwritten changes of rev {journal['rev']} after {tries} tries ({e})")
+            else:
+                carried.append(dict(entry, tries=tries))
+            continue
+        texts[rel] = new_text
+        uids.setdefault(uid, [rel])
+    return carried
+
+
+def _ops_arg(path):
+    ops = _read_json(path) if path else {}
+    if not isinstance(ops, dict) or not all(isinstance(v, list) and all(isinstance(o, dict) for o in v) for v in ops.values()):
+        raise StateError("--notes must be a JSON object {uid: [op, ...]}")
+    return ops
+
+
+def _numbered_ops(raw_ops, candidate, base, view_cur):
+    next_ua = max(_next_ua_number(view_cur), (candidate.get("supervisor") or {}).get("last_ua_number", 0) + 1)
+    art_last = {}
+    for key in ("tasks", "archived"):
+        for item in candidate.get(key, []):
+            art_last[item.get("uid")] = max(art_last.get(item.get("uid"), 0), item.get("last_artifact_number", 0))
+    for uid in raw_ops:
+        rows = parse_artifacts(parse_sections(parse_frontmatter(base.get(uid) or "")[1]).get(ART_SECTION, ""))[0]
+        art_last[uid] = max([art_last.get(uid, 0)] + [r["n"] for r in rows])
+    return number_note_ops(raw_ops, next_ua, art_last)
+
+
+def _date_props(status, now):
+    if status == "done":
+        return {"completed_at": now[:10]}
+    if status == "archived":
+        return {"archived_at": f"{now[:10]} {now[11:19]}"}
+    return {}
+
+
+def _commit_v2(args, current, html_path, template):
+    now = _now()
+    vault = _vault_path(args.state)
+    candidate = _read_json(args.candidate)
+    if not isinstance(candidate, dict):
+        raise StateError("candidate must be a JSON object")
+    raw_ops = _ops_arg(args.notes)
+    rev = current["rev"] + 1
+    warnings = []
+    texts, uids = _index_vault(vault)
+    # 1. Re-apply the last commit's note writes that did not happen.
+    carried = _replay_journal(current, vault, texts, uids, warnings)
+    pending = {e["uid"]: e for e in carried}
+
+    # 2. Locate the notes and check the acks the supervisor copied into note_seen.
+    paths = {uid: rels[0] for uid, rels in uids.items()}
+    for uid, ops in raw_ops.items():
+        if len(uids.get(uid, [])) > 1:
+            raise StateError(f"note uid {uid} is used by {uids[uid]}")
+        if uid in paths:
+            continue
+        given = next((o.get("path") for o in ops if o.get("op") == "assign_uid"), None)
+        if given in texts:
+            paths[uid] = given
+        elif any(o.get("op") == "create" for o in ops):
+            paths[uid] = _new_note_path(uid)
+        else:
+            raise StateError(f"note {uid} not found in {vault}")
+    notes = _notes_by_uid(texts, uids)
+    base = {uid: texts.get(rel) for uid, rel in paths.items()}
+    seen_store, cur_items = {}, {}
+    for key in ("tasks", "projects", "archived"):
+        cur_items.update({(key, i.get("id")): i for i in current.get(key, [])})
+        for item in candidate.get(key, []):
+            uid, seen = item.get("uid"), item.get("note_seen")
+            if seen is not None:
+                seen_store.setdefault(uid, seen)
+            if seen is not None and seen != cur_items.get((key, item.get("id")), {}).get("note_seen"):
+                values = note_values(base.get(uid) or "") if base.get(uid) else None
+                if values != {k: seen.get(k) for k in SEEN_KEYS}:
+                    raise StateError(f"note {uid} changed after notes-scan; run notes-scan again and rebuild the candidate")
+    seen_cmp = dict(seen_store, **{uid: e.get("before") for uid, e in pending.items()})
+
+    # 3. Apply the ops in memory.
+    view_cur = join_view(current, notes)
+    ops = _numbered_ops(raw_ops, candidate, base, view_cur)
+    after, new_ids, problems = dict(base), {}, []
+    for uid, items in ops.items():
+        after[uid], new_ids[uid], probs = apply_note_ops(base.get(uid) or "", items, now, rev)
+        problems += [f"{paths[uid]}: {p}" for p in probs]
+    notes_after = dict(notes, **{uid: text for uid, text in after.items() if text})
+
+    # 4. Views and validation.
+    view_cand = join_view(candidate, notes_after)
+    view_new = next_state(view_cur, view_cand, now)
+
+    # 5. Note props, including the tasks this commit archives (they are stubs in view_new).
+    live_ids = {t["id"] for t in view_new["tasks"]}
+    workers_new = {w["id"]: w for w in view_new["workers"]}
+    workers_cand = {w["id"]: w for w in view_cand["workers"]}
+    targets = ([("task", t, workers_new) for t in view_new["tasks"]] + [("project", p, {}) for p in view_new.get("projects", [])]
+               + [("task", t, workers_cand) for t in view_cand["tasks"] if t["id"] not in live_ids])
+    props, deferred = {}, []
+    for kind, item, workers in targets:
+        uid = item.get("uid")
+        if not after.get(uid):
+            continue
+        derived = note_props(kind, item, workers)
+        if derived is None:
+            continue
+        cur_pair = _pair(note_values(after[uid]))
+        seen = seen_cmp.get(uid)
+        if seen is not None and base.get(uid) and _pair(note_values(base[uid])) != _pair(seen):
+            deferred.append(uid)
+            continue
+        changes = {}
+        if derived[0] != cur_pair[0]:
+            changes["status"] = derived[0]
+        # The date is set when the note reaches done / archived, also when the user moved it there first.
+        changes.update({k: v for k, v in _date_props(derived[0], now).items() if not parse_frontmatter(after[uid])[0].get(k)})
+        if derived[1] and derived[1] != cur_pair[1]:
+            changes["assignee"] = derived[1]
+        if changes:
+            try:
+                after[uid] = set_props(after[uid], changes)
+                props[uid] = changes
+            except StateError as e:
+                problems.append(f"{paths[uid]}: props not written ({e})")
+
+    # 6. Storage form, the ops commit itself adds, note_seen and the journal.
+    state_new, ops_all = split_view(view_cand, view_new, ops)
+    for uid, items in ops_all.items():
+        extra = items[len(ops.get(uid, [])):]
+        if extra and after.get(uid):
+            after[uid], ids, probs = apply_note_ops(after[uid], extra, now, rev)
+            new_ids[uid] = new_ids.get(uid, []) + ids
+            problems += [f"{paths[uid]}: {p}" for p in probs]
+    written = sorted(uid for uid in after if after[uid] and after[uid] != base.get(uid))
+    new_seen = {}
+    for uid in written:
+        values, old, seen = note_values(after[uid]), note_values(base[uid]) if base.get(uid) else None, seen_cmp.get(uid)
+        if seen is None or values is None:
+            new_seen[uid] = values
+            continue
+        merged = dict(seen)
+        if uid not in deferred:
+            merged.update(status=values["status"], assignee=values["assignee"])
+        # Our own section writes are acked, a user's unhandled section change is left for the next scan.
+        for key in ("ua_sha", "art_sha"):
+            if old is None or old[key] == seen.get(key):
+                merged[key] = values[key]
+        new_seen[uid] = merged
+    cand_tasks = {t["id"]: t for t in candidate.get("tasks", [])}
+    for key in ("tasks", "projects", "archived"):
+        for item in state_new.get(key, []):
+            uid = item.get("uid")
+            if key == "archived" and "note_seen" not in item and cand_tasks.get(item["id"], {}).get("uid") == uid:
+                item["note_seen"] = seen_store.get(uid)
+            if uid in new_seen:
+                item["note_seen"] = new_seen[uid]
+            if key != "archived" and uid in paths:
+                item["note"] = paths[uid]
+    entries = list(carried) + [{
+        "uid": uid, "path": paths[uid], "before": seen_cmp.get(uid), "after": new_seen.get(uid),
+        "ops": ops_all.get(uid, []), "props": props.get(uid, {}), "new_ids": new_ids.get(uid, []),
+        "after_sha": _text_sha(after[uid]), "tries": 0, "at": now,
+    } for uid in written]
+    state_new["supervisor"]["note_journal"] = {"rev": rev, "entries": entries} if entries else None
+    errors = _storage_errors(state_new, dict(notes_after, **{uid: after[uid] for uid in written}))
+    if errors:
+        raise StateError(errors)
+
+    # 7. state.json (with the journal) first, then the notes.
+    result = _write_state_and_dashboard(args.state, html_path, state_new, view_new, template)
+    written_paths, failed = [], []
+    for uid in written:
+        target = os.path.join(vault, paths[uid])
+        try:
+            now_text = Path(target).read_text(encoding="utf-8") if os.path.exists(target) else None
+            text = after[uid]
+            if now_text != base.get(uid):
+                # The user saved the note meanwhile: build on what is there now.
+                text = apply_note_ops(now_text or "", ops_all.get(uid, []), now, rev)[0]
+                if props.get(uid) and _pair(note_values(now_text or text)) == _pair(seen_cmp.get(uid) or note_values(text)):
+                    text = set_props(text, props[uid])
+            _write_note(target, text)
+            written_paths.append(paths[uid])
+        except (OSError, StateError):
+            failed.append(paths[uid])
+    result.update(notes_written=written_paths, notes_deferred=[paths[u] for u in deferred],
+                  notes_failed=failed, note_problems=problems)
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def cmd_digest(args):
     try:
-        state = _read_json(args.state)
+        state = _load_view(args.state)
         if not isinstance(state, dict):
             raise ValueError("state is not a JSON object")
         print(digest(state, os.path.abspath(args.state)))
@@ -3221,7 +3582,7 @@ def cmd_parse_report(args):
 
 
 def cmd_check_cwd(args):
-    print("busy" if cwd_busy(_read_json(args.state), _real(args.cwd)) else "free")
+    print("busy" if cwd_busy(_load_view(args.state), _real(args.cwd)) else "free")
     return 0
 
 
@@ -3243,6 +3604,7 @@ This directory belongs to the session-supervisor skill. It is not a project.
 - Never delete sessions.
 - The supervisor only operates sessions, changes state through commit, publishes the dashboard, and talks to the user. Workers edit, commit, push, and open PRs; observer subagents run read-only checks and investigations, write results under .supervisor/observations/, and return the path.
 - A PreToolUse hook (state_tool.py guard) blocks edits outside this directory and mutating git / jj / gh commands. The one allowed exception is `state_tool.py prepare-dir`, which writes only under the `## Locations` roots. To disable it, remove its entry from .claude/settings.json by hand; the supervisor asks before restoring a missing entry.
+- `vault/` is an Obsidian vault with one note per task and project: the note holds the meaning (title, `## 概要`, status, assignee, `## ユーザーアクション`, `## 成果物`). Only `python3 .supervisor/state_tool.py commit --notes <ops.json>` writes it (the guard blocks edits); read changes with `notes-scan` and a note with `note-show`. `vault/Supervisor.md` is the kanban dashboard: moving a card changes the note's status. Delegate a task by setting a note to `backlog` / `agent`.
 - `## Follow-ups` (optional) turns each newly verified PR into a user action such as "Review org/repo#42". Format: references/follow-ups-format.md in the session-supervisor skill. Check it with `python3 .supervisor/state_tool.py validate-follow-ups --claude-md CLAUDE.md`.
 
 <!-- Example: remove the comment markers to enable it.
@@ -3292,6 +3654,8 @@ def cmd_setup(args):
         _write_atomic(str(state_path), serialize(empty_state(str(target))))
         report.append(("created", state_path))
 
+    report += _setup_vault(target / VAULT_DIR)
+
     if old_md is None:
         claude_md.write_text(new_md, encoding="utf-8")
         report.append(("created", claude_md))
@@ -3304,6 +3668,57 @@ def cmd_setup(args):
     for status, path in report:
         print(f"{status}: {path}")
     return 0
+
+
+SUPERVISOR_NOTE = """```base
+filters:
+  and:
+    - or:
+        - file.hasTag("task")
+        - file.hasTag("project")
+    - '!file.inFolder("_templates")'
+formulas:
+  title: link(file.name, title)
+views:
+  - type: kanban
+    name: Tasks
+    groupBy:
+      property: status
+      direction: ASC
+    order: [formula.title, assignee, parent, created_at]
+    groupOrder: [backlog, in progress, pending, done, archived]
+    hideEmptyGroups: false
+```
+"""
+ART_SECTION_NOTE = ("<!-- state_tool が書く行です。表示テキストは直せますが、メタデータ(sv-art)のある行に書き足した文字は、"
+                    "成果物のグループを置き換えるときに行ごと消えます。 -->")
+
+
+def note_template(kind):
+    """A core Templates template for a task or project note: backlog / user, uid from the creation time."""
+    text = new_note_text("UIDX", "TITLEX", kind, "backlog", "user", "2000-01-01T00:00:00")
+    text = text.replace('"UIDX"', '"{{date:YYYYMMDD}}_{{time:HHmmss}}"').replace('"TITLEX"', '"{{title}}"')
+    text = text.replace("2000-01-01 00:00:00", "{{date:YYYY-MM-DD}} {{time:HH:mm:ss}}")
+    return text.replace(f"## {ART_SECTION}\n\n", f"## {ART_SECTION}\n\n{ART_SECTION_NOTE}\n\n")
+
+
+def _setup_vault(vault):
+    """Create the vault files that are missing; never overwrite one."""
+    files = (
+        (vault / DASHBOARD_NOTE, SUPERVISOR_NOTE),
+        (vault / "_templates" / "task.md", note_template("task")),
+        (vault / "_templates" / "project.md", note_template("project")),
+        (vault / ".obsidian" / "templates.json", json.dumps({"folder": "_templates"}) + "\n"),
+    )
+    report = []
+    for path, text in files:
+        if path.exists():
+            report.append(("exists", path))
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _write_atomic(str(path), text)
+            report.append(("created", path))
+    return report
 
 
 def guard_hook_command(script, directory, role=None):
@@ -3405,6 +3820,9 @@ def cmd_follow_ups(args):
     closed = [url for group in args.closed for url in group]
     claude_md = args.claude_md or os.path.join(os.path.dirname(os.path.abspath(state_path)), "CLAUDE.md")
     rules = _read_follow_up_rules(claude_md)
+    state = _read_json(state_path)
+    if isinstance(state, dict) and state.get("schema_version") == SCHEMA_VERSION:
+        return _follow_ups_v2(args, state, state_path, candidate, rules, closed, manual)
     if manual:
         task = next((t for t in candidate.get("tasks", []) if t.get("id") == args.task), None)
         if task is None or args.url not in _pr_urls(task):
@@ -3426,6 +3844,42 @@ def cmd_follow_ups(args):
         added += [dict(a, task_id=task_id) for a in actions]
     if added:
         _write_atomic(args.candidate, serialize(candidate))
+    print(json.dumps(added, ensure_ascii=False))
+    return 0
+
+
+def _follow_ups_v2(args, state, state_path, candidate, rules, closed, manual):
+    """Follow-ups of a v2 candidate: new pr rows are found in the views with the note ops applied, and the follow-up
+    user actions are added to the ops file as ua_add (the ops file is rewritten with its numbers filled)."""
+    if not args.notes:
+        raise StateError("--notes is required with a schema_version 2 state")
+    _check_candidate_path(args.notes, state_path)
+    raw_ops = _ops_arg(args.notes) if os.path.exists(args.notes) else {}
+    texts, uids = _index_vault(_vault_path(state_path))
+    notes = _notes_by_uid(texts, uids)
+    view_cur = join_view(state, notes)
+    ops = _numbered_ops(raw_ops, candidate, notes, view_cur)
+    now = _now()
+    after = dict(notes, **{uid: apply_note_ops(notes.get(uid, ""), items, now, state["rev"] + 1)[0] for uid, items in ops.items()})
+    view_cand = join_view(candidate, after)
+    if manual:
+        task = next((t for t in view_cand["tasks"] if t.get("id") == args.task), None)
+        if task is None or args.url not in _pr_urls(task):
+            raise StateError(f"{args.url} is not a pr artifact of task {args.task} in the candidate")
+        targets = [(args.task, args.url)]
+        closed_urls = {args.url} if args.closed and (not closed or args.url in closed) else set()
+    else:
+        targets = new_pr_urls(view_cur, view_cand)
+        closed_urls = set(closed)
+    added = []
+    for task_id, url in targets:
+        task = next(t for t in view_cand["tasks"] if t.get("id") == task_id)
+        actions = follow_up_actions(view_cand, task_id, url, rules, now, closed=url in closed_urls)
+        task["user_actions"].extend(actions)
+        ops.setdefault(task["uid"], []).extend(_ua_add_op(task_id, ua) for ua in actions)
+        added += [dict(a, task_id=task_id) for a in actions]
+    if added or ops != raw_ops:
+        _write_atomic(args.notes, json.dumps(ops, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps(added, ensure_ascii=False))
     return 0
 
@@ -3549,27 +4003,154 @@ def cmd_plan_actions(args):
     result = parse_project_report(_read_text_arg(args.file), args.project)
     if not result["ok"]:
         raise StateError(result["error"])
-    print(json.dumps(plan_actions(_read_json(args.state), args.project, result["report"], args.running), ensure_ascii=False))
+    print(json.dumps(plan_actions(_load_view(args.state), args.project, result["report"], args.running), ensure_ascii=False))
     return 0
 
 
 def cmd_roster(args):
-    print(roster(_read_json(args.state), args.project), end="")
+    print(roster(_load_view(args.state), args.project), end="")
     return 0
 
 
 def cmd_waits(args):
-    print(json.dumps(waits(_read_json(args.state), args.now or _now(), args.hub_minutes, args.review_minutes), ensure_ascii=False))
+    print(json.dumps(waits(_load_view(args.state), args.now or _now(), args.hub_minutes, args.review_minutes), ensure_ascii=False))
     return 0
 
 
 def cmd_manager_reconcile(args):
-    project = _project(_read_json(args.state), args.project)
+    project = _project(_load_view(args.state), args.project)
     rows = _read_json(args.rows)
     if isinstance(rows, dict):
         rows = rows.get("sessions", rows.get("rows", []))
     events = _read_json(args.events) if args.events else None
     print(json.dumps(manager_reconcile(project["manager"], rows, events), ensure_ascii=False))
+    return 0
+
+
+def _require_v2(state, path):
+    if not isinstance(state, dict) or state.get("schema_version") != SCHEMA_VERSION:
+        raise StateError(f"{path} is not a schema_version {SCHEMA_VERSION} state")
+
+
+def _ua_summary(ua):
+    return {k: ua[k] for k in ("id", "kind", "detector", "answer_required", "checked", "done", "description", "answer", "rule", "url")}
+
+
+def _scan_ctx(kind, item, view_item, workers, live, duplicate, items):
+    if kind == "project":
+        active = _occupies(item.get("manager") or {})
+    else:
+        active = any(_occupies(w) for w in workers if w.get("task_id") == item.get("id"))
+    ctx = {"managed": True, "live": live, "kind": kind, "active": active, "duplicate": duplicate,
+           "hold": (item.get("user_hold") or {}).get("reason"), "open_ua": bool((view_item or {}).get("user_actions"))}
+    needs = artifact_needs(view_item, workers, items) if live and kind == "task" and view_item else []
+    return dict(ctx, artifacts_ok=not needs), needs
+
+
+def _proposed_uid(path, taken):
+    st_ = os.stat(path)
+    t = datetime.fromtimestamp(getattr(st_, "st_birthtime", st_.st_mtime))
+    while t.strftime("%Y%m%d_%H%M%S") in taken:
+        t += timedelta(seconds=1)
+    return t.strftime("%Y%m%d_%H%M%S")
+
+
+def notes_scan(state, texts, uids, vault=None):
+    """Events for the notes the user changed (3.4 (2)), without writing anything."""
+    view = join_view(state, _notes_by_uid(texts, uids))
+    pending = _pending_entries(state, texts, uids)
+    view_items = {(k, i["id"]): i for k in ("tasks", "projects", "archived") for i in view.get(k, [])}
+    managed = {}
+    for key, kind, live in (("tasks", "task", True), ("projects", "project", True), ("archived", "task", False)):
+        for item in state.get(key, []):
+            if item.get("uid") and item["uid"] not in managed:
+                managed[item["uid"]] = (key, kind, item, live)
+    events, warnings = [], []
+    for uid, (key, kind, item, live) in managed.items():
+        rels = uids.get(uid, [])
+        if not rels:
+            if live and uid not in pending:
+                warnings.append(f"{item.get('id')}: note {uid} ({item.get('note')}) not found")
+            continue
+        text = texts[rels[0]]
+        cur = note_values(text)
+        seen = (pending[uid].get("before") if uid in pending else item.get("note_seen")) or cur
+        body = parse_sections(parse_frontmatter(text)[1])
+        rows = parse_artifacts(body.get(ART_SECTION, ""))[0]
+        ctx, needs = _scan_ctx(kind, item, view_items.get((key, item["id"])), view["workers"], live, len(rels) > 1, rows)
+        result = user_transition(seen, cur, ctx)
+        if cur == seen and not result["clear_invalid"] and result["event"] == "none":
+            continue
+        event = dict(result, uid=uid, path=rels[0], id=item.get("id"), kind=kind, live=live, seen=seen, cur=cur,
+                     user_actions=[_ua_summary(u) for u in parse_user_actions(body.get(UA_SECTION, ""))])
+        if needs:
+            event["needs"] = needs
+        events.append(event)
+    taken = set(uids) | set(managed)
+    warned = (state.get("supervisor") or {}).get("note_warnings") or {}
+    for rel, text in texts.items():
+        props, body_text, _ = parse_frontmatter(text)
+        uid = props.get("uid") if isinstance(props.get("uid"), str) and props.get("uid") else None
+        tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]
+        kind = "project" if "project" in tags else "task" if "task" in tags else None
+        if uid in managed or kind is None:
+            continue
+        cur = note_values(text)
+        result = user_transition(None, cur, {"managed": False})
+        if result["event"] == "none":
+            continue
+        event = dict(result, uid=uid, path=rel, kind=kind, cur=cur)
+        if result["event"] == "invalid":
+            sha = _text_sha(json.dumps(_pair(cur), ensure_ascii=False))
+            if warned.get(uid or rel) == sha:
+                continue
+            event["warning_key"], event["warning_sha"] = uid or rel, sha
+        sections = parse_sections(body_text)
+        event.update(title=props.get("title"), request=sections.get("概要", "").strip(),
+                     parent=props.get("parent"), follows=props.get("follows"))
+        if uid is None and vault:
+            event["proposed_uid"] = _proposed_uid(os.path.join(vault, rel), taken)
+            taken.add(event["proposed_uid"])
+        events.append(event)
+    return {"events": events, "warnings": warnings}
+
+
+def cmd_notes_scan(args):
+    state = _read_json(args.state)
+    _require_v2(state, args.state)
+    vault = _vault_path(args.state)
+    texts, uids = _index_vault(vault)
+    print(json.dumps(notes_scan(state, texts, uids, vault), ensure_ascii=False))
+    return 0
+
+
+def cmd_note_show(args):
+    vault = _vault_path(args.state)
+    texts, uids = _index_vault(vault)
+    if args.uid not in uids:
+        raise StateError(f"note {args.uid} not found in {vault}")
+    rel = uids[args.uid][0]
+    props, body, errors = parse_frontmatter(texts[rel])
+    sections = parse_sections(body)
+    uas = parse_user_actions(sections.get(UA_SECTION, ""))
+    items, problems = parse_artifacts(sections.get(ART_SECTION, ""))
+    print(json.dumps({"uid": args.uid, "path": rel, "props": props, "frontmatter_errors": errors, "sections": sections,
+                      "user_actions": [_ua_summary(u) for u in uas],
+                      "slots": {u["id"]: u["answer"] for u in uas if u["kind"] == "slot" and not u["done"]},
+                      "artifacts": items, "artifact_problems": problems}, ensure_ascii=False))
+    return 0
+
+
+def cmd_new_note(args):
+    state = _read_json(args.state)
+    _require_v2(state, args.state)
+    _, uids = _index_vault(_vault_path(args.state))
+    taken = set(uids) | {i.get("uid") for k in ("tasks", "projects", "archived") for i in state.get(k, [])}
+    t = datetime.now()
+    while t.strftime("%Y%m%d_%H%M%S") in taken:
+        t += timedelta(seconds=1)
+    uid = t.strftime("%Y%m%d_%H%M%S")
+    print(json.dumps({"uid": uid, "path": _new_note_path(uid), "kind": args.kind}))
     return 0
 
 
@@ -3590,7 +4171,22 @@ def build_parser():
     p.add_argument("--candidate", required=True)
     p.add_argument("--template", default=default_template)
     p.add_argument("--html", help="dashboard path (default: dashboard.html next to the state)")
+    p.add_argument("--notes", help="JSON file {uid: [note op, ...]} applied to the vault notes (schema_version 2)")
     p.set_defaults(func=cmd_commit)
+
+    p = sub.add_parser("notes-scan", help="list the changes the user made to vault notes as events (JSON, writes nothing)")
+    p.add_argument("--state", required=True)
+    p.set_defaults(func=cmd_notes_scan)
+
+    p = sub.add_parser("note-show", help="print a vault note's props, sections, user actions and artifacts (JSON)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--uid", required=True)
+    p.set_defaults(func=cmd_note_show)
+
+    p = sub.add_parser("new-note", help="reserve a uid and path for a new task or project note (writes nothing)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--kind", required=True, choices=("task", "project"))
+    p.set_defaults(func=cmd_new_note)
 
     p = sub.add_parser("digest", help="print the SessionStart summary (always exits 0)")
     p.add_argument("--state", required=True)
@@ -3651,6 +4247,7 @@ def build_parser():
     p.add_argument("--claude-md", help="default: CLAUDE.md next to the state")
     p.add_argument("--task", help="manual mode: add follow-ups for --url of this task without comparing (re-adds removed ones)")
     p.add_argument("--url")
+    p.add_argument("--notes", help="note ops file (schema_version 2): follow-ups are added to it as ua_add ops")
     p.set_defaults(func=cmd_follow_ups)
 
     p = sub.add_parser("prepare-dir", help="show the ## Locations roots, or clone a repository / create a work directory under them")

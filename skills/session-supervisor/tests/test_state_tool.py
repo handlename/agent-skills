@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from unittest import mock
 from pathlib import Path
 
@@ -1841,12 +1842,15 @@ class SetupTest(unittest.TestCase):
         proc = self.setup_dir(target)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.files(target), [".claude/settings.json", ".supervisor/dashboard.template.html",
-                                              ".supervisor/state_tool.py", "CLAUDE.md", "state.json"])
+                                              ".supervisor/state_tool.py", "CLAUDE.md", "state.json",
+                                              "vault/.obsidian/templates.json", "vault/Supervisor.md",
+                                              "vault/_templates/project.md", "vault/_templates/task.md"])
         entries = self.hooks(target)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["matcher"], "startup|resume|clear|compact")
         state = json.loads((target / "state.json").read_text(encoding="utf-8"))
-        self.assertEqual(st.validate(state), [])
+        self.assertEqual(st._storage_errors(state, {}), [])
+        self.assertEqual(st.validate(st.join_view(state, {})), [])
         self.assertEqual(state["rev"], 0)
 
     def test_idempotent(self):
@@ -2794,7 +2798,8 @@ class ProjectStateTest(unittest.TestCase):
         self.assertEqual(st.validate(state), [])
         empty = st.empty_state("/sup")
         self.assertEqual((empty["projects"], empty["supervisor"]["last_project_number"]), ([], 0))
-        self.assertEqual(st.validate(empty), [])
+        self.assertEqual(st._storage_errors(empty, {}), [])
+        self.assertEqual(st.validate(st.join_view(empty, {})), [])
         self.assertEqual(st.validate(self.current), [])
 
     def test_project_shape_errors(self):
@@ -4621,6 +4626,468 @@ class ArtifactDependencyTest(unittest.TestCase):
         self.assertEqual([a["ref"] for a in stub["artifacts"]], ["/repo/a#claude/license-x1", "abc123"])
         got = st.user_transition(nv("done", "user"), nv("done", "user", art="a1"), dict(STUB, artifacts_ok=False))
         self.assertEqual(got["event"], "artifacts_edit")
+
+
+
+class Crash(BaseException):
+    """Stands for the process being killed: nothing catches it."""
+
+
+U1, U2, U3 = "20261110_090001", "20261110_090002", "20261110_090003"
+
+
+class VaultEnv:
+    def __init__(self, test):
+        tmp = tempfile.TemporaryDirectory()
+        test.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.vault = self.dir / "vault"
+        self.state_path = self.dir / "state.json"
+        self.state = st.empty_state(str(self.dir))
+
+    def add_task(self, task_id, worker_id, uid, uas=(), groups=(), **kw):
+        notes = {}
+        task = v2_git_task(self.state, notes, task_id, worker_id, uid, uas=uas, groups=groups, **kw)
+        self.put(uid, notes[uid])
+        task.update(note=st._new_note_path(uid), note_seen=st.note_values(notes[uid]))
+        return task
+
+    def path(self, uid):
+        return self.vault / st._new_note_path(uid)
+
+    def put(self, uid, text, rel=None):
+        path = self.vault / rel if rel else self.path(uid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def text(self, uid):
+        return self.path(uid).read_text(encoding="utf-8")
+
+    def values(self, uid):
+        return st.note_values(self.text(uid))
+
+    def save(self):
+        self.state_path.write_text(st.serialize(self.state), encoding="utf-8")
+
+    def load(self):
+        return json.loads(self.state_path.read_text(encoding="utf-8"))
+
+    def run(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = st.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def commit(self, cand=None, ops=None):
+        (self.dir / "state.next.json").write_text(st.serialize(cand if cand is not None else self.load()), encoding="utf-8")
+        argv = ["commit", "--state", str(self.state_path), "--candidate", str(self.dir / "state.next.json")]
+        if ops is not None:
+            (self.dir / "state.next.notes.json").write_text(json.dumps(ops, ensure_ascii=False), encoding="utf-8")
+            argv += ["--notes", str(self.dir / "state.next.notes.json")]
+        code, out, err = self.run(*argv)
+        return code, (json.loads(out) if code == 0 else None), err
+
+    def scan(self):
+        code, out, err = self.run("notes-scan", "--state", str(self.state_path))
+        assert code == 0, err
+        return json.loads(out)
+
+
+def failing_writes(fail_on, exc=Crash):
+    """Patch _write_note so that its calls numbered in fail_on (1-based) raise exc."""
+    real, calls = st._write_note, []
+
+    def write(path, text):
+        calls.append(path)
+        if len(calls) in fail_on:
+            raise exc("stopped")
+        return real(path, text)
+    return mock.patch.object(st, "_write_note", write), calls
+
+
+class NoteCommitTest(unittest.TestCase):
+    def setUp(self):
+        self.env = VaultEnv(self)
+        self.env.add_task("T-0020", "w-0020", U1)
+        self.env.add_task("T-0021", "w-0021", U2)
+        find(self.env.state["workers"], "w-0021").update(cwd="/repo/b", branch="claude/b-x1", worktree_path="/repo/b/.claude/worktrees/b-x1")
+        self.env.save()
+
+    def test_chat_task_note_is_created_with_the_state(self):
+        code, out, err = self.env.run("new-note", "--state", str(self.env.state_path), "--kind", "task")
+        reserved = json.loads(out)
+        self.assertEqual(reserved["path"], st._new_note_path(reserved["uid"]))
+        cand = self.env.load()
+        git_task(cand, "T-0022", "w-0022")
+        find(cand["workers"], "w-0022").update(cwd="/repo/c", intended_state="pending", observed_state="none", session_id=None)
+        to_v2(find(cand["tasks"], "T-0022"), "tasks", reserved["uid"])
+        code, out, err = self.env.commit(cand, {reserved["uid"]: [
+            {"op": "create", "uid": reserved["uid"], "title": "README の typo", "kind": "task", "status": "in progress",
+             "assignee": "agent", "request": "README の typo を直して"}]})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["notes_written"], [reserved["path"]])
+        text = (self.env.vault / reserved["path"]).read_text(encoding="utf-8")
+        self.assertEqual(note_section(text, "概要").strip(), "README の typo を直して")
+        task = find(self.env.load()["tasks"], "T-0022")
+        self.assertEqual((task["note"], task["note_seen"]), (reserved["path"], st.note_values(text)))
+        self.assertEqual(self.env.scan(), {"events": [], "warnings": []})
+
+    def test_pickup_writes_the_derived_props_with_the_ack(self):
+        text = st.new_note_text(U3, "思いつき", "task", "backlog", "agent", NOTE_NOW, "やって")
+        self.env.put(U3, text)
+        events = self.env.scan()["events"]
+        self.assertEqual([(e["event"], e["uid"], e["request"]) for e in events], [("pickup", U3, "やって")])
+        cand = self.env.load()
+        git_task(cand, "T-0022", "w-0022")
+        find(cand["workers"], "w-0022").update(cwd="/repo/c")
+        to_v2(find(cand["tasks"], "T-0022"), "tasks", U3)["note_seen"] = events[0]["ack"]
+        code, out, err = self.env.commit(cand, {U3: [{"op": "log", "text": "受領しました"}]})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(st.parse_frontmatter(self.env.text(U3))[0]["status"], "in progress")
+        self.assertIn("受領しました", note_section(self.env.text(U3), "ログ"))
+        self.assertEqual(self.env.scan()["events"], [])
+
+    def test_uidless_note_gets_its_uid_at_pickup(self):
+        text = "---\ntitle: 思いつき\ntags:\n  - task\nstatus: backlog\nassignee: agent\n---\n## 概要\n\nやって\n"
+        self.env.put(None, text, rel="Untitled.md")
+        event = self.env.scan()["events"][0]
+        uid = event["proposed_uid"]
+        cand = self.env.load()
+        git_task(cand, "T-0022", "w-0022")
+        find(cand["workers"], "w-0022").update(cwd="/repo/c")
+        to_v2(find(cand["tasks"], "T-0022"), "tasks", uid)["note_seen"] = event["ack"]
+        code, out, err = self.env.commit(cand, {uid: [{"op": "assign_uid", "uid": uid, "path": "Untitled.md"}]})
+        self.assertEqual(code, 0, err)
+        props = st.parse_frontmatter((self.env.vault / "Untitled.md").read_text(encoding="utf-8"))[0]
+        self.assertEqual((props["uid"], props["status"], props["assignee"]), (uid, "in progress", "agent"))
+        self.assertEqual(find(self.env.load()["tasks"], "T-0022")["note"], "Untitled.md")
+
+    def test_a_note_changed_after_the_scan_is_deferred(self):
+        self.env.put(U1, self.env.text(U1).replace('status: "in progress"', 'status: "pending"').replace('assignee: "agent"', 'assignee: "user"'))
+        code, out, err = self.env.commit(None, {U1: [{"op": "ua_add", "ua": {"kind": "ask", "description": "どちらにしますか"}}]})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["notes_deferred"], [st._new_note_path(U1)])
+        self.assertEqual(st._pair(self.env.values(U1)), ("pending", "user"))
+        self.assertIn("UA-0001 どちらにしますか", self.env.text(U1))
+        events = self.env.scan()["events"]
+        self.assertEqual([(e["uid"], e["event"]) for e in events], [(U1, "pause")])
+
+    def test_ack_of_a_note_changed_after_the_scan_is_rejected(self):
+        self.env.put(U1, self.env.text(U1).replace('status: "in progress"', 'status: "backlog"'))
+        event = self.env.scan()["events"][0]
+        self.assertEqual(event["event"], "restore")
+        self.env.put(U1, self.env.text(U1).replace('status: "backlog"', 'status: "pending"'))
+        cand = self.env.load()
+        find(cand["tasks"], "T-0020")["note_seen"] = event["ack"]
+        code, _, err = self.env.commit(cand)
+        self.assertEqual(code, 1)
+        self.assertIn("changed after notes-scan", err)
+        self.env.put(U1, self.env.text(U1).replace('status: "pending"', 'status: "backlog"'))
+        self.assertEqual(self.env.commit(cand)[0], 0)
+        # #12: the same commit that acks a restore writes the derived in progress back.
+        self.assertEqual(st._pair(self.env.values(U1)), ("in progress", "agent"))
+
+    def test_resume_with_an_open_action_left_writes_in_progress_user_at_once(self):
+        ops = {U1: [{"op": "ua_add", "ua": {"kind": "ask", "description": "q1"}},
+                    {"op": "ua_add", "ua": {"kind": "ask", "description": "q2"}}]}
+        self.assertEqual(self.env.commit(None, ops)[0], 0)
+        self.assertEqual(st._pair(self.env.values(U1)), ("in progress", "user"))
+        self.env.put(U1, self.env.text(U1).replace("- [ ] UA-0001", "- [x] UA-0001").replace('assignee: "user"', 'assignee: "agent"'))
+        event = self.env.scan()["events"][0]
+        self.assertEqual((event["event"], event["row"]), ("resume", 11))
+        self.assertTrue(next(u for u in event["user_actions"] if u["id"] == "UA-0001")["checked"])
+        cand = self.env.load()
+        find(cand["tasks"], "T-0020")["note_seen"] = event["ack"]
+        code, out, err = self.env.commit(cand, {U1: [{"op": "ua_ack", "id": "UA-0001"}, {"op": "log", "text": "q2 が残っています"}]})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(st._pair(self.env.values(U1)), ("in progress", "user"))
+        self.assertEqual(self.env.scan()["events"], [])
+
+    def test_kanban_done_drag_cancels_and_confirms_in_the_same_commit(self):
+        self.env.put(U1, self.env.text(U1).replace('status: "in progress"', 'status: "done"'))
+        event = self.env.scan()["events"][0]
+        self.assertEqual((event["event"], event["row"]), ("cancel", 15))
+        cand = self.env.load()
+        task = find(cand["tasks"], "T-0020")
+        task.update(note_seen=event["ack"], cancel={"at": NOW, "reason": "Obsidian で done"}, confirmed={"at": NOW})
+        find(cand["workers"], "w-0020").update(intended_state="archived", observed_state="archived")
+        code, out, err = self.env.commit(cand)
+        self.assertEqual(code, 0, err)
+        props = st.parse_frontmatter(self.env.text(U1))[0]
+        self.assertEqual((props["status"], props["assignee"]), ("done", "user"))
+        self.assertRegex(props["completed_at"], r"^\d{4}-\d{2}-\d{2}$")
+        stub = self.env.load()["archived"][0]
+        self.assertEqual((stub["uid"], stub["note_seen"]["status"]), (U1, "done"))
+        self.assertEqual(self.env.scan()["events"], [])
+
+    def test_finished_task_gets_done_agent_when_archived(self):
+        nongit = self.env.load()
+        nongit_task(nongit, "T-0030", "w-0030", "/Users/example/notes", "archived", "idle")
+        v2_note({}, U3)
+        notes = {}
+        v2_note(notes, U3, groups=[[{"n": 1, "kind": "file", "path": "/Users/example/notes/a.txt"}]])
+        self.env.put(U3, notes[U3])
+        to_v2(find(nongit["tasks"], "T-0030"), "tasks", U3)["note_seen"] = st.note_values(notes[U3])
+        self.env.state = nongit
+        self.env.save()
+        cand = self.env.load()
+        find(cand["workers"], "w-0030")["observed_state"] = "archived"
+        code, out, err = self.env.commit(cand)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(st._pair(self.env.values(U3)), ("done", "agent"))
+        self.assertEqual(self.env.load()["archived"][0]["uid"], U3)
+
+    def crash_ops(self):
+        return {U1: [{"op": "log", "text": "検証しました"}, {"op": "ua_add", "ua": {"kind": "ask", "description": "push?"}}],
+                U2: [{"op": "log", "text": "成果物を記録"}, {"op": "art_add", "items": [
+                    {"kind": "pr", "url": "https://github.com/org/repo-b/pull/7"}]}]}
+
+    def assert_replayed_once(self, before_rev):
+        self.assertEqual(self.env.scan()["events"], [])
+        writes, calls = failing_writes(set())
+        with writes:
+            code, out, err = self.env.commit()
+        self.assertEqual(code, 0, err)
+        for uid, needle in ((U1, "検証しました"), (U2, "成果物を記録")):
+            self.assertEqual(self.env.text(uid).count(needle), 1, uid)
+        self.assertEqual(self.env.text(U1).count("^ua-0001"), 1)
+        self.assertEqual(self.env.text(U2).count("^sv-art-1"), 1)
+        self.assertEqual(st._pair(self.env.values(U1)), ("in progress", "user"))
+        self.assertEqual(self.env.scan()["events"], [])
+        texts = (self.env.text(U1), self.env.text(U2))
+        self.assertEqual(self.env.commit()[0], 0)
+        self.assertEqual((self.env.text(U1), self.env.text(U2)), texts)
+        self.assertEqual(self.env.load()["rev"], before_rev + 3)
+        return calls
+
+    def test_crash_after_the_state_write_before_any_note(self):
+        before = (self.env.text(U1), self.env.text(U2))
+        writes, _ = failing_writes({1})
+        with writes, self.assertRaises(Crash):
+            self.env.commit(None, self.crash_ops())
+        self.assertEqual((self.env.text(U1), self.env.text(U2)), before)
+        self.assertEqual(len(self.env.load()["supervisor"]["note_journal"]["entries"]), 2)
+        self.assertEqual(self.env.scan()["warnings"], [])
+        calls = self.assert_replayed_once(0)
+        self.assertEqual(len(calls), 2)
+
+    def test_crash_after_the_first_note(self):
+        writes, _ = failing_writes({2})
+        with writes, self.assertRaises(Crash):
+            self.env.commit(None, self.crash_ops())
+        self.assertIn("検証しました", self.env.text(U1))
+        self.assertNotIn("成果物を記録", self.env.text(U2))
+        calls = self.assert_replayed_once(0)
+        self.assertEqual([Path(c).name for c in calls], [f"{U2}.md"])
+
+    def test_replay_does_not_restore_what_the_user_removed(self):
+        ops = {U1: [{"op": "ua_add", "ua": {"kind": "ask", "description": "q"}}, {"op": "ua_check", "id": "UA-0001"},
+                    {"op": "log", "text": "追記"}]}
+        writes, _ = failing_writes({1})
+        with writes, self.assertRaises(Crash):
+            self.env.commit(None, ops)
+        # The user applies an older copy of the write by hand (e.g. sync), then deletes the log line and unchecks the box.
+        text = st.apply_note_ops(self.env.text(U1), st.number_note_ops(ops, 1, {})[U1], NOW, 1)[0]
+        text = "\n".join(l for l in text.split("\n") if "追記" not in l).replace("- [x] UA-0001", "- [ ] UA-0001")
+        self.env.put(U1, text)
+        self.assertEqual(self.env.commit()[0], 0)
+        self.assertEqual(self.env.text(U1), text)
+
+    def test_failed_replays_are_carried_then_dropped(self):
+        writes, _ = failing_writes({1})
+        with writes, self.assertRaises(Crash):
+            self.env.commit(None, {U1: [{"op": "log", "text": "x"}]})
+        for tries, expect_warning in ((1, False), (2, True)):
+            writes, _ = failing_writes({1}, OSError)
+            with writes:
+                code, out, err = self.env.commit()
+            self.assertEqual(code, 0, err)
+            journal = self.env.load()["supervisor"]["note_journal"]
+            self.assertEqual(bool(out.get("warnings")), expect_warning)
+            self.assertEqual(journal and [e["tries"] for e in journal["entries"]], None if expect_warning else [tries])
+        self.assertEqual(self.env.commit()[0], 0)
+        self.assertNotIn("^sv-log-r1-0", self.env.text(U1))
+
+    def test_note_saved_during_the_commit_is_built_upon(self):
+        real = st._write_state_and_dashboard
+
+        def user_saves(*a, **kw):
+            result = real(*a, **kw)
+            self.env.put(U1, self.env.text(U1).replace("fix the LICENSE year", "fix the LICENSE year (edited)"))
+            return result
+        with mock.patch.object(st, "_write_state_and_dashboard", user_saves):
+            code, out, err = self.env.commit(None, {U1: [{"op": "log", "text": "済"}]})
+        self.assertEqual(code, 0, err)
+        self.assertIn("(edited)", self.env.text(U1))
+        self.assertIn("済 ^sv-log-r1-0", self.env.text(U1))
+
+    def test_v1_state_rejects_notes(self):
+        self.env.state_path.write_text(st.serialize(fixture_state()), encoding="utf-8")
+        code, _, err = self.env.commit(fixture_state(), {})
+        self.assertEqual(code, 1)
+        self.assertIn("--notes needs a schema_version 2 state", err)
+
+    def test_artifact_rows_written_before_a_crash_do_not_quarantine(self):
+        writes, _ = failing_writes({1})
+        with writes, self.assertRaises(Crash):
+            self.env.commit(None, {U2: [{"op": "art_add", "items": [{"kind": "pr", "url": "https://github.com/org/repo-b/pull/7"}]}]})
+        self.assertEqual(self.env.scan()["events"], [])
+        self.assertEqual(self.env.commit()[0], 0)
+        self.assertEqual(self.env.scan()["events"], [])
+        self.assertEqual(self.env.load()["tasks"][1]["last_artifact_number"], 1)
+
+
+class NotesScanCliTest(unittest.TestCase):
+    def setUp(self):
+        self.env = VaultEnv(self)
+        self.env.add_task("T-0020", "w-0020", U1)
+        self.env.save()
+
+    def test_unmanaged_notes(self):
+        self.env.put(None, "---\ntitle: メモ\ntags: [idea]\nstatus: backlog\nassignee: agent\n---\n", rel="memo.md")
+        self.env.put(None, "---\ntitle: 自分の\ntags: [task]\nstatus: new\nassignee: user\n---\n", rel="mine.md")
+        bad = "---\nuid: \"20261110_100000\"\ntitle: x\ntags: [task]\nstatus: \"in progress\"\nassignee: agent\n---\n"
+        self.env.put(None, bad, rel="bad.md")
+        events = self.env.scan()["events"]
+        self.assertEqual([(e["path"], e["event"], e["row"]) for e in events], [("bad.md", "invalid", 3)])
+        state = self.env.load()
+        state["supervisor"]["note_warnings"] = {events[0]["warning_key"]: events[0]["warning_sha"]}
+        self.env.state = state
+        self.env.save()
+        self.assertEqual(self.env.scan()["events"], [])
+
+    def test_duplicate_uid_and_missing_note(self):
+        self.env.put(None, self.env.text(U1), rel="copy.md")
+        events = self.env.scan()["events"]
+        self.assertEqual([(e["event"], e["row"]) for e in events], [("invalid", 4)])
+        for rel in ("copy.md", st._new_note_path(U1)):
+            (self.env.vault / rel).unlink()
+        self.assertEqual(self.env.scan(), {"events": [], "warnings": [f"T-0020: note {U1} ({st._new_note_path(U1)}) not found"]})
+
+    def test_artifacts_broken_lists_the_needs(self):
+        env = VaultEnv(self)
+        env.add_task("T-0020", "w-0020", U1, intended="archived", observed="archived", uas=[ua(1, PUSH_DESC)],
+                     groups=[[dict(BRANCH_A, n=1), dict(COMMIT_A, n=2)]])
+        env.save()
+        env.put(U1, drop_line(env.text(U1), "sv-art-2"))
+        event = env.scan()["events"][0]
+        self.assertEqual((event["event"], event["row"]), ("artifacts_broken", 23))
+        self.assertIn("UA-0001 の対象 w-0020 の branch claude/license-x1 と直後の commit", event["needs"])
+
+    def test_v1_state_is_refused(self):
+        self.env.state_path.write_text(st.serialize(fixture_state()), encoding="utf-8")
+        code, _, err = self.env.run("notes-scan", "--state", str(self.env.state_path))
+        self.assertEqual(code, 1)
+        self.assertIn("is not a schema_version 2 state", err)
+
+    def test_note_show(self):
+        code, out, _ = self.env.run("note-show", "--state", str(self.env.state_path), "--uid", U1)
+        shown = json.loads(out)
+        self.assertEqual((shown["path"], shown["props"]["uid"], shown["sections"]["概要"].strip()),
+                         (st._new_note_path(U1), U1, "fix the LICENSE year"))
+        self.assertEqual(self.env.run("note-show", "--state", str(self.env.state_path), "--uid", "nope")[0], 1)
+
+
+class NewNoteCliTest(unittest.TestCase):
+    def test_reserves_a_free_uid_without_writing(self):
+        env = VaultEnv(self)
+        env.add_task("T-0020", "w-0020", "20261110_090000")
+        env.save()
+
+        class Fixed(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 11, 10, 9, 0, 0)
+        with mock.patch.object(st, "datetime", Fixed):
+            code, out, _ = env.run("new-note", "--state", str(env.state_path), "--kind", "project")
+        self.assertEqual(json.loads(out), {"uid": "20261110_090001", "path": "2026/11/20261110_090001.md", "kind": "project"})
+        self.assertFalse((env.vault / "2026/11/20261110_090001.md").exists())
+
+
+class VaultGuardTest(unittest.TestCase):
+    def test_vault_writes_are_blocked_and_the_rest_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sup = os.path.realpath(tmp)
+            for tool, key in (("Edit", "file_path"), ("Write", "file_path"), ("MultiEdit", "file_path"), ("NotebookEdit", "notebook_path")):
+                message = st.guard_decision({"tool_name": tool, "tool_input": {key: f"{sup}/vault/2026/11/x.md"}, "cwd": sup}, sup, {})
+                self.assertIn("vault notes are written only by state_tool commit", message)
+            self.assertIn("vault notes are written only by state_tool commit",
+                          st.guard_decision({"tool_name": "Write", "tool_input": {"file_path": "vault/Supervisor.md"}, "cwd": sup}, sup, {}))
+            self.assertIsNone(st.guard_decision({"tool_name": "Write", "tool_input": {"file_path": f"{sup}/notes.md"}, "cwd": sup}, sup, {}))
+            self.assertIsNone(st.guard_decision({"tool_name": "Write", "tool_input": {"file_path": f"{sup}/vaults/x.md"}, "cwd": sup}, sup, {}))
+            self.assertIn("written only by setup or commit",
+                          st.guard_decision({"tool_name": "Write", "tool_input": {"file_path": f"{sup}/state.json"}, "cwd": sup}, sup, {}))
+
+
+class SetupVaultTest(unittest.TestCase):
+    def test_creates_the_vault_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "sup"
+            proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            vault = target / "vault"
+            self.assertIn('type: kanban', (vault / "Supervisor.md").read_text(encoding="utf-8"))
+            self.assertIn("groupOrder: [backlog, in progress, pending, done, archived]", (vault / "Supervisor.md").read_text(encoding="utf-8"))
+            self.assertEqual(json.loads((vault / ".obsidian" / "templates.json").read_text(encoding="utf-8")), {"folder": "_templates"})
+            for kind in ("task", "project"):
+                template = (vault / "_templates" / f"{kind}.md").read_text(encoding="utf-8")
+                self.assertIn("created_at: {{date:YYYY-MM-DD}} {{time:HH:mm:ss}}\n", template)
+                template = template.replace("{{date:YYYY-MM-DD}} {{time:HH:mm:ss}}", "2026-11-10 09:00:00")
+                props, body, errors = st.parse_frontmatter(template)
+                self.assertEqual(errors, [])
+                self.assertEqual((props["uid"], props["tags"], props["status"], props["assignee"]),
+                                 ("{{date:YYYYMMDD}}_{{time:HHmmss}}", [kind], "backlog", "user"))
+                self.assertEqual(list(st.parse_sections(body)), list(st.NOTE_SECTIONS))
+            self.assertIn("vault/", (target / "CLAUDE.md").read_text(encoding="utf-8"))
+            (vault / "Supervisor.md").write_text("mine\n", encoding="utf-8")
+            proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
+            self.assertTrue(all(l.startswith("exists:") for l in proc.stdout.splitlines()), proc.stdout)
+            self.assertEqual((vault / "Supervisor.md").read_text(encoding="utf-8"), "mine\n")
+            self.assertEqual(st._index_vault(str(vault)), ({}, {}))
+
+
+class JoinViewRenderTest(unittest.TestCase):
+    def test_dashboard_is_rendered_from_the_notes(self):
+        env = VaultEnv(self)
+        env.add_task("T-0020", "w-0020", U1)
+        env.save()
+        body, _ = st.render(st.join_view(env.state, {U1: env.text(U1)}), TEMPLATE)
+        self.assertIn(f"task {U1}", body)
+        code, out, err = env.commit()
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"task {U1}", (env.dir / "dashboard.html").read_text(encoding="utf-8"))
+        code, out, _ = env.run("roster", "--state", str(env.state_path), "--project", "P-0001")
+        self.assertEqual(code, 1)
+
+
+class DigestFallbackTest(unittest.TestCase):
+    def test_missing_vault_and_held_notes(self):
+        env = VaultEnv(self)
+        task = env.add_task("T-0020", "w-0020", U1)
+        task["user_hold"] = {"at": NOW, "status": "in progress", "assignee": "bot", "reason": "invalid"}
+        env.save()
+        proc = subprocess.run([sys.executable, str(SCRIPT), "digest", "--state", str(env.state_path)], capture_output=True, text=True)
+        self.assertIn(f"task {U1}", proc.stdout)
+        self.assertIn("notes on hold (invalid values):", proc.stdout)
+        shutil.rmtree(env.vault)
+        proc = subprocess.run([sys.executable, str(SCRIPT), "digest", "--state", str(env.state_path)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn(f"{U1} ({st._new_note_path(U1)})", proc.stdout)
+
+
+class ProjectContextDocTest(unittest.TestCase):
+    def test_project_waits_for_its_context_document(self):
+        state, notes = v2_state()
+        project = to_v2(add_project(state), "projects", U3)
+        project["manager"].update(session_id=None, started_by=None, intended_state="pending", observed_state="none", observed_at=None)
+        v2_note(notes, U3, kind="project", request="MCP サーバを作る", uas=[ua(1, "context document の URL を教えてください", answer_required=True)])
+        view = st.join_view(state, notes)
+        self.assertIsNone(view["projects"][0]["context_doc_url"])
+        self.assertEqual(st.validate(view), [])
+        notes[U3] = st.apply_note_ops(notes[U3], [{"op": "ua_ack", "id": "UA-0001"}], NOW, 2)[0]
+        self.assertIn("project P-0001: context_doc_url must be http(s)", st.validate(st.join_view(state, notes)))
+        notes[U3] = notes[U3].replace("MCP サーバを作る", "MCP サーバを作る https://github.com/org/repo/issues/1")
+        self.assertEqual(st.join_view(state, notes)["projects"][0]["context_doc_url"], "https://github.com/org/repo/issues/1")
 
 
 if __name__ == "__main__":
