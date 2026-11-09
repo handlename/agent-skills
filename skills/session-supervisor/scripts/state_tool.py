@@ -2,6 +2,7 @@
 """State tool for the session-supervisor skill.
 
 Functional core: validate, next_state, render, digest, parse_report, cwd_busy, serialize,
+parse_project_report, plan_actions, roster, waits, manager_reconcile,
 guard_decision (bash_violations, path_violation), parse_follow_ups, new_pr_urls, follow_up_actions,
 parse_locations, default_locations, add_missing_locations, clone_url_parts.
 Imperative shell: the argparse subcommands at the bottom of this file.
@@ -38,13 +39,24 @@ SUPERVISOR_MODEL = "opus"
 ACTIVE_OBSERVED = ("running", "idle", "needs_input", "missing")
 TASK_STATUSES = ("needs_user", "running", "waiting", "done")
 ARTIFACT_KINDS = ("branch", "commit", "pr", "ci", "file")
-REPORT_STATUSES = ("done", "in_progress", "needs_input", "blocked", "failed")
+REPORT_STATUSES = ("done", "in_progress", "needs_input", "blocked", "failed", "awaiting_manager")
+REVIEW_STATES = ("requested", "superseded", "rejected", "approved", "waived")
+MANAGER_REPORT_STATUSES = ("idle", "needs_input")
+HUB_WAIT_MINUTES = 30
+REVIEW_WAIT_MINUTES = 120
+PROJECT_ID_RE = re.compile(r"^P-(\d{4,})$")
+REVIEW_ID_RE = re.compile(r"^R-(\d{4,})$")
+PROJECT_REPORT_RE = re.compile(r"```project-report[ \t]*\r?\n(.*?)\r?\n[ \t]*```", re.S)
 REPORT_FIELDS = ("task_id", "worker_id", "status", "summary", "artifacts", "blockers", "next_action")
 REPORT_ARTIFACT_KEYS = ("branch", "commit", "pr", "ci")
 
 FOOTER_RE = re.compile(r"<!--sv-footer-->.*?<!--/sv-footer-->", re.S)
 REPORT_RE = re.compile(r"```supervisor-report[ \t]*\r?\n(.*?)\r?\n[ \t]*```", re.S)
 UA_ID_RE = re.compile(r"^UA-(\d+)$")
+HUB_WAIT_PREFIX = "Hub wait {wid} ("
+REVIEW_WAIT_PREFIX = "Review wait {wid} ("
+READ_ACTION_PREFIX = "Read the result of "
+FINDING_KEYS = ("worker_id", "session_id", "title", "summary", "message_ref", "at")
 
 FOLLOW_UP_HEADING = "## Follow-ups"
 FOLLOW_UP_RULE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
@@ -58,7 +70,8 @@ PR_URL_RE = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)/?$", re.I)
 LOCATIONS_HEADING = "## Locations"
 LOCATION_KEYS = ("clone_root", "work_root")
 LOCATIONS_NOTE = ("`python3 .supervisor/state_tool.py prepare-dir` is the only command that writes outside this directory: "
-                  "it clones repositories into `clone_root/<host>/<owner>/<repo>` and creates work directories under `work_root`. "
+                  "it clones repositories into `clone_root/<host>/<owner>/<repo>` and creates work directories "
+                  "and project directories (with a guard hook) under `work_root`. "
                   "A missing key uses its default.")
 CLONE_URL_RES = (
     re.compile(r"^https://([^/]+)/([^/]+)/([^/]+?)(?:\.git)?/?$"),
@@ -67,6 +80,7 @@ CLONE_URL_RES = (
 CLONE_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 CLONE_TIMEOUT = 300
 WORK_NAME_RE = re.compile(r"^T-\d{4,}-[a-z0-9-]{1,40}$")
+PROJECT_NAME_RE = re.compile(r"^P-\d{4,}-[a-z0-9-]{1,40}$")
 
 GUARD_MATCHER = "Edit|MultiEdit|Write|NotebookEdit|Bash"
 GUARD_INPUT_KEYS = {"Edit": "file_path", "MultiEdit": "file_path", "Write": "file_path", "NotebookEdit": "notebook_path", "Bash": "command"}
@@ -153,10 +167,12 @@ def empty_state(supervisor_dir):
             "session_ids": [],
             "archive_consent": None,
             "dashboard": {"url": None, "path": os.path.join(supervisor_dir, "dashboard.html")},
+            "last_project_number": 0,
         },
         "tasks": [],
         "workers": [],
         "archived": [],
+        "projects": [],
     }
 
 
@@ -193,8 +209,37 @@ def _cwds_overlap(a, b):
     return _under(a, b) or _under(b, a)
 
 
+def _projects(state):
+    projects = state.get("projects")
+    return projects if isinstance(projects, list) else []
+
+
+def _project_dirs(state):
+    return [p["dir"] for p in _projects(state) if isinstance(p, dict) and isinstance(p.get("dir"), str)]
+
+
 def cwd_busy(state, cwd):
+    # A project directory belongs to its manager session for the project's whole life.
+    if any(_cwds_overlap(d, cwd) for d in _project_dirs(state)):
+        return True
     return any(_occupies_cwd(w) and _cwds_overlap(w["cwd"], cwd) for w in state.get("workers", []))
+
+
+def _ua_ids(state):
+    """Every user action id; task and project user actions share one numbering."""
+    owners = list(state.get("tasks", [])) + _projects(state)
+    return [ua.get("id") for o in owners if isinstance(o, dict) and isinstance(o.get("user_actions", []), list)
+            for ua in o.get("user_actions", []) if isinstance(ua, dict)]
+
+
+def _next_ua_number(state):
+    used = [int(m.group(1)) for i in _ua_ids(state) if isinstance(i, str) and (m := UA_ID_RE.match(i))]
+    return max(used, default=0) + 1
+
+
+def _id_number(regex, value):
+    m = regex.match(value) if isinstance(value, str) else None
+    return int(m.group(1)) if m else None
 
 
 def _shell_tokens(command):
@@ -360,7 +405,13 @@ def path_violation(path, cwd, supervisor_dir, config_dir, tmp_dirs):
     return f"{full} (outside the supervisor directory)"
 
 
-def guard_decision(payload, supervisor_dir, env):
+GUARD_TAILS = {
+    None: "The supervisor does not change repositories: send it to a worker session, or ask an observer subagent for read-only facts.",
+    "manager": "The project manager only reads: answer or forward through send_message, or return a plan in your project-report.",
+}
+
+
+def guard_decision(payload, supervisor_dir, env, role=None):
     """Return the block message for a PreToolUse payload, or None to allow it."""
     tool = payload.get("tool_name")
     tool_input = payload.get("tool_input")
@@ -377,8 +428,7 @@ def guard_decision(payload, supervisor_dir, env):
         violations = [f"{tool} {found}"] if found else []
     if not violations:
         return None
-    return (f"[session-supervisor guard] blocked: {'; '.join(violations)}. The supervisor does not change repositories: "
-            "send it to a worker session, or ask an observer subagent for read-only facts.")
+    return f"[session-supervisor guard] blocked: {'; '.join(violations)}. {GUARD_TAILS[role]}"
 
 
 def _archived_externally(worker):
@@ -398,8 +448,12 @@ def derive_status(task, workers_by_id):
     if any(o == "none" for o in observed):
         return "waiting"
     # Workers given up as missing deliver nothing, and a replaced worker was never verified;
-    # without one verified archive the task needs a replacement or a cancel.
-    if not any(w.get("observed_state") == "archived" and not w.get("replaced_by") for w in workers):
+    # without one verified archive the task needs a replacement or a cancel. An investigation
+    # worker that went missing while held has its verified findings, so it counts as finished.
+    finding_ids = {f.get("worker_id") for f in task.get("findings", [])}
+    if not any((w.get("observed_state") == "archived"
+                or (w.get("observed_state") == "missing" and w.get("intended_state") == "archived" and w["id"] in finding_ids))
+               and not w.get("replaced_by") for w in workers):
         return "needs_user"
     return "done"
 
@@ -447,7 +501,30 @@ def _validate_last_report(prefix, report):
                 errors.append(f"{prefix}: last_report requires {key}")
     else:
         errors.append(f"{prefix}: last_report has invalid status {status!r}")
+    errors += [f"{prefix}: last_report {e}" for e in _read_confirmed_errors(report)]
     return errors
+
+
+def _read_confirmed_errors(report):
+    if "read_confirmed" not in report:
+        return []
+    if not isinstance(report["read_confirmed"], bool):
+        return ["read_confirmed must be a boolean"]
+    if report["read_confirmed"] and report.get("status") != "done":
+        return ["read_confirmed is allowed only with status done"]
+    return []
+
+
+def _read_action_worker(ua):
+    """The worker id a read-the-result user action names, or None for any other user action."""
+    description = ua.get("description")
+    if ua.get("follow_up") is not None or not isinstance(description, str) or not description.startswith(READ_ACTION_PREFIX + "w-"):
+        return None
+    return description[len(READ_ACTION_PREFIX):].split(" (", 1)[0]
+
+
+def _held_ids(task):
+    return {wid for wid in map(_read_action_worker, task.get("user_actions", [])) if wid}
 
 
 def _no_result_ids(task):
@@ -495,6 +572,12 @@ def _shape_errors(state):
         if not isinstance(no_result, list) or not all(
                 isinstance(n, dict) and all(isinstance(n.get(k), str) and n.get(k) for k in ("worker_id", "summary", "at")) for n in no_result):
             errors.append(f"{prefix}: no_result must be a list of {{worker_id, summary, at}} with non-empty strings")
+        findings = owner.get("findings", [])
+        if not isinstance(findings, list) or not all(
+                isinstance(f, dict) and all(isinstance(f.get(k), str) and f.get(k) for k in FINDING_KEYS) for f in findings):
+            errors.append(f"{prefix}: findings must be a list of {{{', '.join(FINDING_KEYS)}}} with non-empty strings")
+        if "investigation" in owner and owner["investigation"] is not True:
+            errors.append(f"{prefix}: investigation must be true when present")
     for s in state["archived"]:
         if s.get("request") is not None and not isinstance(s["request"], str):
             errors.append(f"archived {s['id']}: request must be a string")
@@ -509,6 +592,9 @@ def _shape_errors(state):
         cancel = t.get("cancel")
         if cancel is not None and not (isinstance(cancel, dict) and all(isinstance(cancel.get(k), str) and cancel.get(k) for k in ("at", "reason"))):
             errors.append(f"task {t['id']}: cancel must be null or {{at, reason}} with non-empty strings")
+        derived = t.get("derived_from")
+        if derived is not None and not (isinstance(derived, dict) and all(_str(derived.get(k)) for k in ("task_id", "context"))):
+            errors.append(f"task {t['id']}: derived_from must be {{task_id, context}} with non-empty strings")
     for w in state["workers"]:
         for key in ("task_id", "cwd"):
             if not isinstance(w.get(key), str):
@@ -520,14 +606,150 @@ def _shape_errors(state):
         continues = w.get("continues", 0)
         if not isinstance(continues, int) or isinstance(continues, bool) or continues < 0:
             errors.append(f"worker {w['id']}: continues must be a non-negative integer")
+    errors += _project_shape_errors(state)
     if not errors:
-        ua_ids = [ua.get("id") for t in state["tasks"] for ua in t.get("user_actions", [])]
-        if not all(isinstance(i, str) for i in ua_ids):
+        if not all(isinstance(i, str) for i in _ua_ids(state)):
             errors.append("user_action ids must be strings")
         for t in state["tasks"]:
             for ua in t.get("user_actions", []):
                 if ua.get("follow_up") is not None and not isinstance(ua["follow_up"], dict):
                     errors.append(f"task {t['id']}: user_action {ua.get('id')} follow_up must be an object or absent")
+                if "proposal" in ua:
+                    errors.append(f"task {t['id']}: user_action {ua.get('id')} proposal belongs to a project user action")
+    return errors
+
+
+def _str(value):
+    return isinstance(value, str) and bool(value)
+
+
+def _nonneg_int(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _fields_ok(obj, keys):
+    return isinstance(obj, dict) and all(_str(obj.get(k)) for k in keys)
+
+
+def _redos_ok(redos):
+    return isinstance(redos, list) and all(
+        _fields_ok(r, ("text", "at", "from")) and (r.get("review_id") is None or _str(r.get("review_id"))) for r in redos)
+
+
+def _review_shape_errors(prefix, review):
+    if not isinstance(review, dict):
+        return [f"{prefix}: review must be an object"]
+    errors = []
+    state = review.get("state")
+    if _id_number(REVIEW_ID_RE, review.get("id")) is None:
+        errors.append(f"{prefix}: review.id must be R-NNNN")
+    if state not in REVIEW_STATES:
+        errors.append(f"{prefix}: review.state must be one of {list(REVIEW_STATES)}")
+    if not _str(review.get("at")):
+        errors.append(f"{prefix}: review.at must be a non-empty string")
+    if state in ("requested", "superseded", "rejected", "approved") and not _str(review.get("message_ref")):
+        errors.append(f"{prefix}: {state} review requires message_ref")
+    if state == "waived" and not _str(review.get("reason")):
+        errors.append(f"{prefix}: waived review requires reason")
+    for key in ("message_ref", "ref", "reason", "stale_notified"):
+        if review.get(key) is not None and not isinstance(review[key], str):
+            errors.append(f"{prefix}: review.{key} must be a string")
+    pending = review.get("pending_verdict")
+    if pending is not None:
+        if not (_fields_ok(pending, ("message_ref", "at")) and pending.get("verdict") == "approve"):
+            errors.append(f"{prefix}: review.pending_verdict must be {{verdict: approve, message_ref, at}}")
+        elif state != "requested" or pending["message_ref"] != review.get("message_ref"):
+            errors.append(f"{prefix}: review.pending_verdict is allowed only on a requested review with the same message_ref")
+    return errors
+
+
+def _manager_shape_errors(prefix, m):
+    errors = []
+    for key in ("session_id", "started_by", "handle", "observed_at"):
+        if m.get(key) is not None and not isinstance(m[key], str):
+            errors.append(f"{prefix}: manager.{key} must be a string or null")
+    if not _str(m.get("title")):
+        errors.append(f"{prefix}: manager.title must be a non-empty string")
+    if m.get("intended_state") not in INTENDED_STATES:
+        errors.append(f"{prefix}: manager has invalid intended_state {m.get('intended_state')!r}")
+    if m.get("observed_state") not in OBSERVED_STATES:
+        errors.append(f"{prefix}: manager has invalid observed_state {m.get('observed_state')!r}")
+    if m.get("model") is not None and m["model"] not in MODELS:
+        errors.append(f"{prefix}: manager.model must be one of {', '.join(MODELS)}")
+    prev = m.get("previous_session_ids", [])
+    if not isinstance(prev, list) or not all(_str(i) for i in prev):
+        errors.append(f"{prefix}: manager.previous_session_ids must be a list of strings")
+    if not _nonneg_int(m.get("replacements", 0)):
+        errors.append(f"{prefix}: manager.replacements must be a non-negative integer")
+    report = m.get("last_report")
+    if report is not None:
+        status = report.get("status") if isinstance(report, dict) else None
+        if status == "unparsed":
+            ok = _fields_ok(report, ("message_ref", "error", "at"))
+        else:
+            ok = (status in MANAGER_REPORT_STATUSES and _fields_ok(report, ("message_ref", "at"))
+                  and isinstance(report.get("summary"), str))
+        if not ok:
+            errors.append(f"{prefix}: manager.last_report must be null, {{message_ref, status (idle | needs_input), summary, at}} "
+                          "or {message_ref, status: unparsed, error, at}")
+    return errors
+
+
+def _project_shape_errors(state):
+    errors = []
+    if not _nonneg_int(state["supervisor"].get("last_project_number", 0)):
+        errors.append("supervisor.last_project_number must be a non-negative integer")
+    projects = state.get("projects", [])
+    if not isinstance(projects, list):
+        return errors + ["projects must be a list"]
+    for i, p in enumerate(projects):
+        if not isinstance(p, dict) or _id_number(PROJECT_ID_RE, p.get("id")) is None:
+            errors.append(f"projects[{i}] must be an object with an id P-NNNN")
+            continue
+        prefix = f"project {p['id']}"
+        if not _str(p.get("name")):
+            errors.append(f"{prefix}: name must be a non-empty string")
+        if not _is_http_url(p.get("context_doc_url")):
+            errors.append(f"{prefix}: context_doc_url must be http(s)")
+        if not isinstance(p.get("dir"), str) or not os.path.isabs(p["dir"]):
+            errors.append(f"{prefix}: dir must be an absolute path")
+        if not _str(p.get("created_at")):
+            errors.append(f"{prefix}: created_at must be a non-empty string")
+        if not _nonneg_int(p.get("last_review_number")):
+            errors.append(f"{prefix}: last_review_number must be a non-negative integer")
+        if p.get("close") is not None and not _fields_ok(p["close"], ("at", "reason")):
+            errors.append(f"{prefix}: close must be null or {{at, reason}} with non-empty strings")
+        uas = p.get("user_actions", [])
+        if not isinstance(uas, list) or not all(isinstance(ua, dict) for ua in uas):
+            errors.append(f"{prefix}: user_actions must be a list of objects")
+        else:
+            for ua in uas:
+                if not _str(ua.get("id")) or not _str(ua.get("description")):
+                    errors.append(f"{prefix}: user_action requires id and a description string")
+                if "proposal" in ua and not _fields_ok(ua["proposal"], ("title", "text", "message_ref")):
+                    errors.append(f"{prefix}: user_action {ua.get('id')} proposal must be {{title, text, message_ref}} with non-empty strings")
+                if "follow_up" in ua:
+                    errors.append(f"{prefix}: user_action {ua.get('id')} follow_up belongs to a task user action")
+        if not isinstance(p.get("manager"), dict):
+            errors.append(f"{prefix}: manager must be an object")
+        else:
+            errors += _manager_shape_errors(prefix, p["manager"])
+    owners = [(f"task {t['id']}", t) for t in state["tasks"]] + [(f"archived {s['id']}", s) for s in state["archived"]]
+    for prefix, owner in owners:
+        if owner.get("project_id") is not None and not isinstance(owner["project_id"], str):
+            errors.append(f"{prefix}: project_id must be a string")
+        if "proposal" in owner and not _fields_ok(owner["proposal"], ("title", "text", "from", "message_ref")):
+            errors.append(f"{prefix}: proposal must be {{title, text, from, message_ref}} with non-empty strings")
+        if "redos" in owner and not _redos_ok(owner["redos"]):
+            errors.append(f"{prefix}: redos must be a list of {{text, at, from, review_id?}} with non-empty strings")
+    for s in state["archived"]:
+        if "project" in s and not _fields_ok(s["project"], ("id", "name")):
+            errors.append(f"archived {s['id']}: project must be {{id, name}}")
+    for w in state["workers"]:
+        if "review" in w:
+            errors += _review_shape_errors(f"worker {w['id']}", w["review"])
+        if w.get("awaiting_since") is not None and not _str(w["awaiting_since"]):
+            errors.append(f"worker {w['id']}: awaiting_since must be a non-empty string")
     return errors
 
 
@@ -585,7 +807,7 @@ def validate(state):
     tasks, workers = state["tasks"], state["workers"]
     task_ids = [t.get("id") for t in tasks]
     worker_ids = [w.get("id") for w in workers]
-    ua_ids = [ua.get("id") for t in tasks for ua in t.get("user_actions", [])]
+    ua_ids = _ua_ids(state)
     for label, ids in (("task", task_ids), ("worker", worker_ids), ("user_action", ua_ids)):
         dupes = sorted({i for i in ids if ids.count(i) > 1}, key=str)
         if dupes:
@@ -613,14 +835,35 @@ def validate(state):
             for wid in task.get("worker_ids", []):
                 if workers_by_id.get(wid, {}).get("intended_state") == "running":
                     errors.append(f"{prefix}: cancelled but worker {wid} is still intended running")
-        # A no_result entry exempts its worker from delivery artifacts, so it must stay tied to that finished worker.
+        # A no_result entry exempts its worker from delivery artifacts, so it must stay tied to that finished or held worker.
+        held = _held_ids(task)
         seen = set()
         for entry in task.get("no_result", []):
             wid = entry["worker_id"]
             w = workers_by_id.get(wid)
             if (wid in seen or w is None or w.get("task_id") != tid
-                    or w.get("intended_state") != "archived" or w.get("replaced_by")):
+                    or (w.get("intended_state") != "archived" and wid not in held) or w.get("replaced_by")):
                 errors.append(f"{prefix}: no_result {wid} must name an archived, non-replaced worker of the task once")
+            seen.add(wid)
+        seen = set()
+        for entry in task.get("findings", []):
+            wid = entry["worker_id"]
+            w = workers_by_id.get(wid)
+            if (wid in seen or not task.get("investigation") or w is None or w.get("task_id") != tid
+                    or w.get("session_id") != entry["session_id"]):
+                errors.append(f"{prefix}: findings {wid} must name a worker of an investigation task by its session_id, once")
+            seen.add(wid)
+        # A held worker stays running only while the user still has to read its verified result.
+        finding_ids = {f["worker_id"] for f in task.get("findings", [])}
+        seen = set()
+        for wid in filter(None, map(_read_action_worker, task.get("user_actions", []))):
+            w = workers_by_id.get(wid) or {}
+            review_ok = not task.get("project_id") or (w.get("review") or {}).get("state") in ("approved", "waived")
+            if (wid in seen or not task.get("investigation") or w.get("task_id") != tid
+                    or w.get("intended_state") != "running" or w.get("observed_state") in ("archived", "missing")
+                    or wid not in finding_ids or not review_ok):
+                errors.append(f"{prefix}: read action for {wid} needs a live, approved or waived (project) worker "
+                              "of an investigation task with findings, once")
             seen.add(wid)
         cwds = [w["cwd"] for w in workers if w.get("task_id") == tid and w.get("cwd")]
         for i, artifact in enumerate(task.get("artifacts", [])):
@@ -692,6 +935,70 @@ def validate(state):
     for stub in state["archived"]:
         for i, artifact in enumerate(stub.get("artifacts", [])):
             errors += _validate_artifact(f"archived {stub.get('id')} artifact[{i}]", artifact, None)
+    errors += _project_errors(state, tasks_by_id)
+    return errors
+
+
+def _project_errors(state, tasks_by_id):
+    errors = []
+    projects = _projects(state)
+    projects_by_id = {p["id"]: p for p in projects}
+    last = state["supervisor"].get("last_project_number", 0)
+    ids = [p["id"] for p in projects]
+    dupes = sorted({i for i in ids if ids.count(i) > 1})
+    if dupes:
+        errors.append(f"duplicate project ids: {dupes}")
+    for p in projects:
+        if _id_number(PROJECT_ID_RE, p["id"]) > last:
+            errors.append(f"project {p['id']}: number exceeds supervisor.last_project_number {last}")
+        if p.get("close") and p["manager"].get("intended_state") != "archived":
+            errors.append(f"project {p['id']}: a closed project's manager must be intended archived")
+    for t in state["tasks"]:
+        pid = t.get("project_id")
+        if pid is not None and (pid not in projects_by_id or projects_by_id[pid].get("close")):
+            errors.append(f"task {t['id']}: project_id {pid} must name an open project")
+        if "proposal" in t and t["proposal"].get("from") != pid:
+            errors.append(f"task {t['id']}: proposal.from must equal project_id")
+        if t.get("redos") and pid is None:
+            errors.append(f"task {t['id']}: redos belong to a project task")
+
+    seen_reviews = {}
+    for w in state["workers"]:
+        prefix = f"worker {w['id']}"
+        task = tasks_by_id.get(w.get("task_id")) or {}
+        pid = task.get("project_id")
+        review = w.get("review")
+        if review is not None:
+            if pid is None:
+                errors.append(f"{prefix}: review belongs to a project task worker")
+            elif pid in projects_by_id:
+                key = (pid, review["id"])
+                if key in seen_reviews:
+                    errors.append(f"{prefix}: review id {review['id']} is also used by {seen_reviews[key]} in {pid}")
+                seen_reviews[key] = w["id"]
+                limit = projects_by_id[pid].get("last_review_number", 0)
+                if _id_number(REVIEW_ID_RE, review["id"]) > limit:
+                    errors.append(f"{prefix}: review id {review['id']} exceeds last_review_number {limit} of {pid}")
+        # The approval gate is a state invariant, so a candidate that records a newer report while
+        # keeping an approved worker intended archived is refused until the archive is rolled back.
+        report = w.get("last_report") if isinstance(w.get("last_report"), dict) else None
+        if (pid is not None and w.get("intended_state") == "archived" and not w.get("replaced_by")
+                and not task.get("cancel")):
+            state_ = (review or {}).get("state")
+            ok = state_ == "waived" or (state_ == "approved" and (
+                report is None or report.get("message_ref") == review.get("message_ref")))
+            if not ok:
+                errors.append(f"{prefix}: archived project worker needs an approved review of its latest report "
+                              "(or waived / cancel / replaced_by)")
+        awaiting = (report or {}).get("status") == "awaiting_manager"
+        if awaiting and pid is None:
+            errors.append(f"{prefix}: awaiting_manager is reported only by project task workers")
+        if awaiting != (w.get("awaiting_since") is not None):
+            errors.append(f"{prefix}: awaiting_since is required exactly while last_report.status is awaiting_manager")
+        if w.get("kind") == "non-git" and isinstance(w.get("cwd"), str):
+            for p in projects:
+                if isinstance(p.get("dir"), str) and _cwds_overlap(w["cwd"], p["dir"]):
+                    errors.append(f"{prefix}: cwd overlaps the directory of project {p['id']}")
     return errors
 
 
@@ -725,6 +1032,14 @@ def _deletion_errors(current, candidate):
     for w in current["workers"]:
         if w.get("session_id") and w["id"] not in cand_workers:
             errors.append(f"worker {w['id']} has a session_id and was removed")
+    cand_projects = {p["id"]: p for p in _projects(candidate)}
+    for p in _projects(current):
+        if p["id"] not in cand_projects:
+            errors.append(f"project {p['id']} was removed; projects leave only by being closed")
+        elif cand_projects[p["id"]].get("last_review_number", 0) < p.get("last_review_number", 0):
+            errors.append(f"project {p['id']}: last_review_number must not decrease")
+    if candidate["supervisor"].get("last_project_number", 0) < current["supervisor"].get("last_project_number", 0):
+        errors.append("supervisor.last_project_number must not decrease")
     return errors
 
 
@@ -747,6 +1062,35 @@ def _transition_errors(current, candidate):
         task = tasks.get(w["task_id"], {})
         if w["delivery"] == "commit" and not task.get("cancel") and w["observed_state"] != "missing" and not w.get("replaced_by") and w["id"] not in _no_result_ids(task) and not _pushed_at_head(task, w) and not any(_is_push_decision(ua, w) for ua in task.get("user_actions", [])):
             errors.append(f"worker {w['id']}: commit delivery archive requires a push-decision user_action")
+    return errors + _project_transition_errors(current, candidate)
+
+
+def _project_transition_errors(current, candidate):
+    """Numbers are issued once: a new P-id or R-id must be above the counter of the current state."""
+    errors = []
+    cur_projects = {p["id"]: p for p in _projects(current)}
+    cur_last = current["supervisor"].get("last_project_number", 0)
+    for p in _projects(candidate):
+        cur = cur_projects.get(p["id"])
+        if cur is None and _id_number(PROJECT_ID_RE, p["id"]) <= cur_last:
+            errors.append(f"project {p['id']}: a new project id must be above last_project_number {cur_last}")
+        manager, cur_manager = p["manager"], (cur or {}).get("manager", {})
+        if (manager.get("intended_state") == "archived" and cur_manager.get("intended_state") != "archived"
+                and not p.get("close") and manager.get("observed_state") not in ("archived", "missing")):
+            errors.append(f"project {p['id']}: the manager is archived only when the project is closed or the session is gone")
+    tasks = {t["id"]: t for t in candidate["tasks"]}
+    for t in current["tasks"]:
+        if t["id"] in tasks and tasks[t["id"]].get("project_id") != t.get("project_id"):
+            errors.append(f"task {t['id']}: project_id must not change")
+    cur_workers = {w["id"]: w for w in current["workers"]}
+    for w in candidate["workers"]:
+        rid = (w.get("review") or {}).get("id")
+        if rid is None or rid == (cur_workers.get(w["id"], {}).get("review") or {}).get("id"):
+            continue
+        pid = tasks.get(w["task_id"], {}).get("project_id")
+        limit = cur_projects.get(pid, {}).get("last_review_number", 0)
+        if _id_number(REVIEW_ID_RE, rid) <= limit:
+            errors.append(f"worker {w['id']}: a new review id must be above last_review_number {limit} of {pid}")
     return errors
 
 
@@ -794,8 +1138,7 @@ def _sync_waiting_start_actions(current, state, now):
     # waiting task is surfaced as a user action and started on the next user message.
     # The action is dropped as soon as no worker of the task is startable any more
     # (it was started, removed, or its cwd is held again), so it never pins needs_user.
-    used = [int(m.group(1)) for t in state["tasks"] for ua in t.get("user_actions", []) if (m := UA_ID_RE.match(ua["id"]))]
-    next_num = max(used, default=0) + 1
+    next_num = _next_ua_number(state)
     workers_by_id = {w["id"]: w for w in state["workers"]}
     for task in state["tasks"]:
         desc = waiting_start_description(task["id"])
@@ -831,6 +1174,7 @@ def next_state(current, candidate, now):
     done = [t for t in state["tasks"] if t["status"] == "done"]
     done_ids = {t["id"] for t in done}
     old_stubs = {s["id"]: s for s in state["archived"]}
+    projects_by_id = {p["id"]: p for p in _projects(state)}
     stubs = []
     for t in done:
         # A revived task replaces its old stub; keeping the order makes the last group the newest generation.
@@ -841,12 +1185,28 @@ def next_state(current, candidate, now):
         no_result = old_stubs.get(t["id"], {}).get("no_result", []) + t.get("no_result", [])
         if no_result:
             stub["no_result"] = no_result
+        findings = old_stubs.get(t["id"], {}).get("findings", []) + t.get("findings", [])
+        if findings:
+            stub["findings"] = findings
+        if t.get("investigation"):
+            stub["investigation"] = True
         if t.get("cancel"):
             stub.update(cancelled=True, reason=t["cancel"]["reason"])
+        project = projects_by_id.get(t.get("project_id"))
+        if project is not None:
+            stub["project"] = {"id": project["id"], "name": project["name"]}
+        for key in ("proposal", "redos"):
+            if t.get(key):
+                stub[key] = t[key]
         stubs.append(stub)
     state["archived"] = (list(reversed(stubs)) + [s for s in state["archived"] if s["id"] not in done_ids])[:ARCHIVED_KEEP]
     state["tasks"] = [t for t in state["tasks"] if t["id"] not in done_ids]
     state["workers"] = [w for w in state["workers"] if w["task_id"] not in done_ids]
+    if "projects" in state:
+        # The P-id stays used through last_project_number, so dropping a finished project never frees it.
+        referenced = {t.get("project_id") for t in state["tasks"]}
+        state["projects"] = [p for p in state["projects"]
+                             if not (p.get("close") and _finished(p["manager"]) and p["id"] not in referenced)]
 
     state["rev"] = current["rev"] + 1
     state["updated_at"] = now
@@ -966,11 +1326,18 @@ def _render_artifact_list(artifacts):
             f'<ul class="artifacts">{items}</ul></details>')
 
 
+def _in_review(worker):
+    return (worker.get("review") or {}).get("state") in ("requested", "superseded", "rejected")
+
+
 def _task_attention(task, workers):
     """Everything in one task waiting on the user: its user actions, needs_input / missing workers, and workers archived outside the supervisor."""
     items = [("user", ua) for ua in task.get("user_actions", [])]
     for w in workers:
-        if w.get("observed_state") in ("missing", "needs_input"):
+        # A worker under review keeps its review even when its session is gone, so it does not read as unchecked.
+        if _in_review(w) and (w.get("observed_state") == "missing" or _archived_externally(w)):
+            items.append(("review", w))
+        elif w.get("observed_state") in ("missing", "needs_input"):
             items.append(("worker", w))
         elif _archived_externally(w):
             items.append(("external", w))
@@ -987,8 +1354,12 @@ def _render_attention_row(kind, obj):
                 f'<div class="act__text md">{_md(obj.get("description"))}</div>'
                 f'<p class="act__meta"><span class="id">{_esc(obj.get("id"))}</span>'
                 f'<span>since {_time(obj.get("since"))}</span>{open_link}</p></li>')
-    text = (f'is {_chip(obj["observed_state"])}' if kind == "worker"
-            else "was archived outside the supervisor; its results need checking")
+    if kind == "review":
+        text = f'is waiting for review {_esc(obj["review"]["id"])} of the project manager'
+    elif kind == "worker":
+        text = f'is {_chip(obj["observed_state"])}'
+    else:
+        text = "was archived outside the supervisor; its results need checking"
     return (f'<li class="act" data-kind="{kind}"><span class="act__kind">Worker</span>'
             f'<p class="act__text"><span class="id">{_esc(obj["id"])}</span> {_esc(obj.get("title"))} {text} '
             f'<code>{_esc(obj.get("cwd"))}</code></p></li>')
@@ -1001,13 +1372,21 @@ def _segment_state(worker):
     return "external" if _archived_externally(worker) else worker.get("observed_state")
 
 
-def _render_report(r):
+def _render_report(r, awaiting_since=None):
     if r is None:
         return '<p class="wk__report" data-report="none">No report yet</p>'
     if r.get("status") == "unparsed":
         return f'<p class="wk__report" data-report="unparsed"><span class="wk__rs">unparsed</span> {_esc(r.get("error"))}</p>'
+    since = f' <span class="wk__since">since {_time(awaiting_since)}</span>' if r.get("status") == "awaiting_manager" else ""
     return (f'<p class="wk__report" data-report="{_esc(r.get("status"))}"><span class="wk__rs">{_esc(r.get("status"))}</span> '
-            f'{_esc(r.get("summary"))}</p>')
+            f'{_esc(r.get("summary"))}{since}</p>')
+
+
+def _render_finding(f, with_summary):
+    sid = _esc(f["session_id"])
+    summary = f'<p class="finding__summary">{_esc(f["summary"])}</p>' if with_summary else ""
+    return (f'<div class="finding"><p class="finding__link"><span class="label">Result</span> '
+            f'<a href="#local_{sid}">{_esc(f["title"])}</a> <code>{sid}</code></p>{summary}</div>')
 
 
 def _copy_id(cls, text):
@@ -1016,23 +1395,75 @@ def _copy_id(cls, text):
             f'title="クリックでコピー">{_esc(text)}</button>')
 
 
+_REVIEW_CHIPS = {"requested": "review", "rejected": "rejected", "superseded": "superseded", "waived": "review waived"}
+
+
 def _render_worker(w):
     seg = _segment_state(w)
+    label = _REVIEW_CHIPS.get((w.get("review") or {}).get("state"))
+    review = f' {_chip(label)} <span class="id">{_esc(w["review"]["id"])}</span>' if label else ""
     branch = f' · <code>{_esc(w.get("branch"))}</code>' if w.get("branch") else ""
     model = f' · {_esc(w.get("model"))}' if w.get("model") else ""
     return (
         f'<li class="wk" data-state="{_esc(seg)}"><span class="dot" data-state="{_esc(seg)}" aria-hidden="true"></span>'
-        f'<div class="wk__body"><p class="wk__title"><span class="id">{_esc(w.get("id"))}</span> {_esc(w.get("title"))} {_chip(w.get("observed_state"))}</p>'
+        f'<div class="wk__body"><p class="wk__title"><span class="id">{_esc(w.get("id"))}</span> {_esc(w.get("title"))} {_chip(w.get("observed_state"))}{review}</p>'
         f'<p class="wk__meta"><code>{_esc(w.get("cwd"))}</code>{branch} · {_esc(w.get("delivery"))}{model}</p>'
-        f'{_render_report(w.get("last_report"))}</div></li>')
+        f'{_render_report(w.get("last_report"), w.get("awaiting_since"))}</div></li>')
 
 
 def _render_tasks(state):
     tasks = state["tasks"]
+    workers_by_id = {w["id"]: w for w in state["workers"]}
+    projects = _projects(state)
+    if projects:
+        groups = [_render_project(p, [t for t in tasks if t.get("project_id") == p["id"]], workers_by_id) for p in projects]
+        rest = [t for t in tasks if not t.get("project_id")]
+        groups.append(f'<section class="project" id="project-none" data-project="none"><header class="project__head">'
+                      f'<h3 class="project__title">Outside projects</h3></header>{_task_list(rest, workers_by_id)}</section>')
+        body = f'<div class="project-list">{"".join(groups)}</div>'
+    else:
+        body = _task_list(tasks, workers_by_id)
+    return (f'<section class="tasks" id="tasks" aria-labelledby="tasks-label"><h2 class="section-label" id="tasks-label">'
+            f'Tasks <span class="count">{len(tasks)}</span></h2>{body}</section>')
+
+
+def _render_index(state):
+    """Jump links to each project group; empty without projects, so such dashboards keep their header."""
+    projects = _projects(state)
+    if not projects:
+        return ""
+    tasks = state["tasks"]
+    links = [(f'project-{p["id"]}', f'{p["id"]} {p["name"]}', sum(1 for t in tasks if t.get("project_id") == p["id"]))
+             for p in projects]
+    links.append(("project-none", "Outside projects", sum(1 for t in tasks if not t.get("project_id"))))
+    items = "".join(f'<a href="#{_esc(anchor)}" data-jump>{_esc(text)} <span class="count">{n}</span></a>'
+                    for anchor, text, n in links)
+    return f'<nav class="pindex" aria-label="Projects">{items}</nav>'
+
+
+def _render_project(project, tasks, workers_by_id):
+    m = project["manager"]
+    sid = m.get("session_id")
+    title = f'{project["id"]} {project["name"]}'
+    manager = (f'manager <a href="#local_{_esc(sid)}">{_esc(title)}</a> <code>{_esc(sid)}</code>' if sid
+               else f'manager {_esc(title)} <span class="id">not started</span>')
+    closed = f' {_chip("closed")}' if project.get("close") else ""
+    attention = ""
+    if project.get("user_actions"):
+        rows = "".join(_render_attention_row("user", ua) for ua in project["user_actions"])
+        attention = (f'<div class="task__attention"><span class="label">Needs you</span>'
+                     f'<ul class="task__attention-list">{rows}</ul></div>')
+    return (f'<section class="project" id="project-{_esc(project["id"])}" data-project="{_esc(project["id"])}"><header class="project__head">'
+            f'{_copy_id("id project__id", project["id"])}<h3 class="project__title">{_esc(project["name"])}</h3>'
+            f'{_chip(m.get("observed_state"))}{closed}</header>'
+            f'<p class="project__meta">{manager} · {_a(project["context_doc_url"], "context doc ↗")}</p>'
+            f'{attention}{_task_list(tasks, workers_by_id)}</section>')
+
+
+def _task_list(tasks, workers_by_id):
     if not tasks:
         cards = '<p class="empty">No active tasks.</p>'
     else:
-        workers_by_id = {w["id"]: w for w in state["workers"]}
         entries = []
         for task in tasks:
             workers = [workers_by_id[wid] for wid in task.get("worker_ids", []) if wid in workers_by_id]
@@ -1049,6 +1480,10 @@ def _render_tasks(state):
                                      f'<ul class="task__attention-list">{rows}</ul></div>')
             else:
                 next_or_attention = f'<p class="task__next"><span class="label">Next</span> {_esc(task.get("next_action"))}</p>'
+            # The worker row already shows its latest summary; repeat the recorded conclusion only when it differs.
+            summaries = {w["id"]: (w.get("last_report") or {}).get("summary") for w in workers}
+            findings = "".join(_render_finding(f, f["summary"] != summaries.get(f["worker_id"]))
+                               for f in task.get("findings", []))
             cancel = ""
             if task.get("cancel"):
                 cancel = f'<p class="task__cancel">{_chip("cancelled")} {_esc(task["cancel"].get("reason"))}</p>'
@@ -1062,10 +1497,9 @@ def _render_tasks(state):
                 f'<p class="task__elapsed">started {_time(task.get("created_at"))}</p></div>'
                 f'{next_or_attention}'
                 f'<ul class="task__workers">{"".join(_render_worker(w) for w in workers)}</ul>'
-                f'{_render_artifact_list(task.get("artifacts", []))}</article>')
+                f'{findings}{_render_artifact_list(task.get("artifacts", []))}</article>')
         cards = "".join(out)
-    return (f'<section class="tasks" id="tasks" aria-labelledby="tasks-label"><h2 class="section-label" id="tasks-label">'
-            f'Tasks <span class="count">{len(tasks)}</span></h2><div class="task-list">{cards}</div></section>')
+    return f'<div class="task-list">{cards}</div>'
 
 
 def _render_archived(state):
@@ -1080,10 +1514,14 @@ def _render_archived(state):
                 cancelled = f' {_chip("cancelled")} <span class="arc__reason">{_esc(stub.get("reason"))}</span>'
             no_result = stub.get("no_result", [])
             chip = f' {_chip("no result")}' if no_result else ""
+            findings = stub.get("findings", [])
+            finding_ids = {f["worker_id"] for f in findings}
             notes = "".join(f'<p class="arc__note"><span class="id">{_esc(n["worker_id"])}</span> {_esc(n["summary"])}</p>'
-                            for n in no_result)
+                            for n in no_result if n["worker_id"] not in finding_ids)
+            notes += "".join(_render_finding(f, True) for f in findings)
+            project = f'<span class="id">{_esc(stub["project"]["id"])}</span> ' if stub.get("project") else ""
             items.append(
-                f'<li class="arc"{" data-cancelled" if stub.get("cancelled") else ""}><p class="arc__title">{_copy_id("id", stub["id"])} '
+                f'<li class="arc"{" data-cancelled" if stub.get("cancelled") else ""}><p class="arc__title">{_copy_id("id", stub["id"])} {project}'
                 f'{_esc(stub.get("title"))}{cancelled}{chip}</p><p class="arc__meta">archived {_time(stub.get("archived_at"))}</p>'
                 f'{notes}{_render_artifact_list(stub.get("artifacts", []))}</li>')
         rows = f'<ul class="arc-list">{"".join(items)}</ul>'
@@ -1094,7 +1532,8 @@ def _render_archived(state):
 def render(state, template):
     """Return (body, footer). body keeps the {{FOOTER}} slot so it can be hashed without rev/updated_at."""
     body = (
-        template.replace("{{TASKS}}", _render_tasks(state))
+        template.replace("{{INDEX}}", _render_index(state))
+        .replace("{{TASKS}}", _render_tasks(state))
         .replace("{{ARCHIVED}}", _render_archived(state))
     )
     rev = _esc(state.get("rev"))
@@ -1137,9 +1576,22 @@ def digest(state, state_path, limit=DIGEST_LIMIT):
         f"archived tasks: {len(state.get('archived', []))}",
         "user actions:",
     ]
-    actions = [f"- {t.get('id')} {ua.get('id')}: {ua.get('description')}{_digest_follow_up(ua)}"
-               for t in state.get("tasks", []) for ua in t.get("user_actions", [])]
+    projects = [p for p in _projects(state) if isinstance(p, dict)]
+    actions = [f"- {p.get('id')} {ua.get('id')}: {ua.get('description')}" for p in projects for ua in p.get("user_actions", [])]
+    actions += [f"- {t.get('id')} {ua.get('id')}: {ua.get('description')}{_digest_follow_up(ua)}"
+                for t in state.get("tasks", []) for ua in t.get("user_actions", [])]
     lines += actions or ["- (none)"]
+    if projects:
+        lines.append("projects:")
+        for p in projects:
+            m = p.get("manager") or {}
+            pid = p.get("id")
+            mine = [t for t in state.get("tasks", []) if t.get("project_id") == pid]
+            reviews = [(w.get("review") or {}).get("id") for w in state.get("workers", [])
+                       if any(w.get("task_id") == t.get("id") for t in mine) and (w.get("review") or {}).get("state") == "requested"]
+            closed = " | closed" if p.get("close") else ""
+            lines.append(f"- {pid} {p.get('name')} | manager {m.get('session_id')} {m.get('observed_state')} | doc {p.get('context_doc_url')}"
+                         f" | open reviews: {', '.join(reviews) or '(none)'} | tasks: {', '.join(t.get('id') for t in mine) or '(none)'}{closed}")
     lines.append("tasks:")
     task_lines = []
     for t in state.get("tasks", []):
@@ -1147,7 +1599,8 @@ def digest(state, state_path, limit=DIGEST_LIMIT):
             f"{wid} {workers_by_id.get(wid, {}).get('session_id')} {workers_by_id.get(wid, {}).get('observed_state')}"
             for wid in t.get("worker_ids", [])
         )
-        task_lines.append(f"- {t.get('id')} [{t.get('status')}] {t.get('title')} | next: {t.get('next_action')} | workers: {ws}")
+        project = f"[{t['project_id']}] " if t.get("project_id") else ""
+        task_lines.append(f"- {project}{t.get('id')} [{t.get('status')}] {t.get('title')} | next: {t.get('next_action')} | workers: {ws}")
     lines += task_lines or ["- (none)"]
     text = "\n".join(lines)
     if len(text) <= limit:
@@ -1156,7 +1609,7 @@ def digest(state, state_path, limit=DIGEST_LIMIT):
     return text[: limit - len(marker)] + marker
 
 
-def parse_report(text, expect_task=None, expect_worker=None):
+def parse_report(text, expect_task=None, expect_worker=None, allow_awaiting_manager=False):
     blocks = REPORT_RE.findall(text)
     if not blocks:
         return {"ok": False, "error": "no supervisor-report block found"}
@@ -1169,7 +1622,8 @@ def parse_report(text, expect_task=None, expect_worker=None):
     missing = [f for f in REPORT_FIELDS if f not in report]
     if missing:
         return {"ok": False, "error": f"missing fields: {missing}"}
-    if not isinstance(report["status"], str) or report["status"] not in REPORT_STATUSES:
+    if (not isinstance(report["status"], str) or report["status"] not in REPORT_STATUSES
+            or (report["status"] == "awaiting_manager" and not allow_awaiting_manager)):
         return {"ok": False, "error": f"invalid status {report['status']!r}"}
     for key in ("task_id", "worker_id", "summary", "next_action"):
         if not isinstance(report[key], str):
@@ -1185,8 +1639,11 @@ def parse_report(text, expect_task=None, expect_worker=None):
     files = artifacts.get("files", [])
     if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
         return {"ok": False, "error": "artifacts.files must be a list of strings"}
-    if report["status"] in ("needs_input", "blocked") and not report["blockers"]:
+    if report["status"] in ("needs_input", "blocked", "awaiting_manager") and not report["blockers"]:
         return {"ok": False, "error": f"status {report['status']} requires at least one blocker"}
+    confirmed = _read_confirmed_errors(report)
+    if confirmed:
+        return {"ok": False, "error": confirmed[0]}
     if expect_task is not None and report["task_id"] != expect_task:
         return {"ok": False, "error": f"task_id {report['task_id']!r} does not match {expect_task!r}"}
     if expect_worker is not None and report["worker_id"] != expect_worker:
@@ -1413,9 +1870,7 @@ def follow_up_actions(state, task_id, url, rules, now, closed=False):
     label = follow_up_label(artifact, url)
     have = {(ua["follow_up"].get("rule"), ua["follow_up"].get("url"))
             for ua in task.get("user_actions", []) if isinstance(ua.get("follow_up"), dict)}
-    used = [int(m.group(1)) for t in state.get("tasks", []) for ua in t.get("user_actions", [])
-            if isinstance(ua.get("id"), str) and (m := UA_ID_RE.match(ua["id"]))]
-    next_num = max(used, default=0) + 1
+    next_num = _next_ua_number(state)
     actions = []
     for rule in rules:
         if (rule["id"], url) in have or (closed and rule["done"] == "pr_closed"):
@@ -1428,6 +1883,250 @@ def follow_up_actions(state, task_id, url, rules, now, closed=False):
         })
         next_num += 1
     return actions
+
+
+def _project(state, project_id):
+    project = next((p for p in _projects(state) if p.get("id") == project_id), None)
+    if project is None:
+        raise StateError(f"project {project_id} not found")
+    return project
+
+
+def parse_project_report(text, expect_project=None):
+    """Extract the last project-report block of a project manager's message."""
+    blocks = PROJECT_REPORT_RE.findall(text)
+    if not blocks:
+        return {"ok": False, "error": "no project-report block found"}
+    try:
+        report = json.loads(blocks[-1])
+    except json.JSONDecodeError as e:
+        return {"ok": False, "error": f"invalid JSON in project-report block: {e}"}
+    if not isinstance(report, dict):
+        return {"ok": False, "error": "project-report must be a JSON object"}
+    missing = [f for f in ("project_id", "status", "summary", "reviews", "plans", "questions") if f not in report]
+    if missing:
+        return {"ok": False, "error": f"missing fields: {missing}"}
+    if report["status"] not in MANAGER_REPORT_STATUSES:
+        return {"ok": False, "error": f"invalid status {report['status']!r}"}
+    if not isinstance(report["project_id"], str) or not isinstance(report["summary"], str):
+        return {"ok": False, "error": "project_id and summary must be strings"}
+    if not isinstance(report["questions"], list) or not all(isinstance(q, str) and q for q in report["questions"]):
+        return {"ok": False, "error": "questions must be a list of non-empty strings"}
+    if report["status"] == "needs_input" and not report["questions"]:
+        return {"ok": False, "error": "status needs_input requires at least one question"}
+    if not isinstance(report["reviews"], list) or not isinstance(report["plans"], list):
+        return {"ok": False, "error": "reviews and plans must be lists"}
+    for r in report["reviews"]:
+        if not isinstance(r, dict) or _id_number(REVIEW_ID_RE, r.get("review_id")) is None:
+            return {"ok": False, "error": "each review needs review_id R-NNNN"}
+        if r.get("verdict") not in ("approve", "reject"):
+            return {"ok": False, "error": f"review {r['review_id']}: verdict must be approve or reject"}
+        if not all(isinstance(r.get(k, ""), str) for k in ("comment", "redo")):
+            return {"ok": False, "error": f"review {r['review_id']}: comment and redo must be strings"}
+        if r["verdict"] == "reject" and not r.get("redo", "").strip():
+            return {"ok": False, "error": f"review {r['review_id']}: reject requires a non-empty redo"}
+    for plan in report["plans"]:
+        kind = plan.get("kind") if isinstance(plan, dict) else None
+        keys = {"redo": ("task_id", "text"), "new": ("title", "text")}.get(kind)
+        if keys is None:
+            return {"ok": False, "error": "each plan needs kind redo or new"}
+        if not _fields_ok(plan, keys) or not isinstance(plan.get("worker_id", ""), str):
+            return {"ok": False, "error": f"a {kind} plan needs non-empty {' and '.join(keys)} (worker_id, when given, a string)"}
+    if expect_project is not None and report["project_id"] != expect_project:
+        return {"ok": False, "error": f"project_id {report['project_id']!r} does not match {expect_project!r}"}
+    return {"ok": True, "report": report}
+
+
+def _live(worker):
+    # A worker that can take a message right now.
+    return worker.get("intended_state") == "running" and worker.get("observed_state") in ("running", "idle", "needs_input")
+
+
+def _review_action(worker, verdict, running):
+    review = worker["review"]
+    if review.get("state") == "requested" and not worker.get("replaced_by"):
+        matches = ((worker.get("last_report") or {}).get("message_ref") == review.get("message_ref")
+                   or worker.get("observed_state") in ("archived", "missing"))
+        if matches and worker["id"] not in running:
+            return f"{verdict}_ok"
+        if review.get("stale_notified") != review.get("message_ref"):
+            return "stale_notify"
+    return "stale_silent"
+
+
+def plan_actions(state, project_id, report, running=()):
+    """Turn a project-report's reviews and plans into the operations the supervisor performs. Does not modify state.
+    `running` holds the worker ids the supervisor just found running with get."""
+    project = _project(state, project_id)
+    tasks = {t["id"]: t for t in state.get("tasks", [])}
+    workers_by_id = {w["id"]: w for w in state.get("workers", [])}
+    by_review = {w["review"]["id"]: w for w in state.get("workers", [])
+                 if isinstance(w.get("review"), dict) and tasks.get(w.get("task_id"), {}).get("project_id") == project_id}
+    actions = []
+    for r in report.get("reviews", []):
+        base = {"review_id": r["review_id"], "verdict": r["verdict"], "comment": r.get("comment", ""), "redo": r.get("redo", "")}
+        w = by_review.get(r["review_id"])
+        if w is None or tasks[w["task_id"]].get("cancel"):
+            reason = "no such review in this project" if w is None else "the task was cancelled"
+            actions.append(dict(base, kind="stale_silent", reason=reason))
+            continue
+        actions.append(dict(base, kind=_review_action(w, r["verdict"], set(running)), worker_id=w["id"], task_id=w["task_id"]))
+    stubs = {s["id"]: s for s in state.get("archived", [])}
+    open_titles = {ua["proposal"]["title"] for ua in project.get("user_actions", []) if isinstance(ua.get("proposal"), dict)}
+    seen_redos = set()
+    for plan in report.get("plans", []):
+        if plan["kind"] == "new":
+            dup = plan["title"] in open_titles
+            open_titles.add(plan["title"])
+            actions.append({"kind": "proposal_dup" if dup else "proposal_add", "title": plan["title"], "text": plan["text"]})
+            continue
+        tid, text = plan["task_id"], plan["text"]
+        action = {"task_id": tid, "text": text}
+        task = tasks.get(tid)
+        if task is None:
+            mine = (stubs.get(tid, {}).get("project") or {}).get("id") == project_id
+            actions.append(dict(action, kind="redo_archived" if mine else "redo_foreign"))
+            continue
+        if task.get("project_id") != project_id:
+            actions.append(dict(action, kind="redo_foreign"))
+            continue
+        if (tid, text) in seen_redos or any(x.get("text") == text for x in task.get("redos", [])):
+            actions.append(dict(action, kind="redo_dup"))
+            continue
+        seen_redos.add((tid, text))
+        live = [w for w in (workers_by_id.get(wid) for wid in task.get("worker_ids", [])) if w and _live(w)]
+        target = next((w for w in live if w["id"] == plan.get("worker_id")), None)
+        if target is None and len(live) == 1:
+            target = live[0]
+        if target is not None:
+            actions.append(dict(action, kind="redo_send", worker_id=target["id"]))
+        else:
+            actions.append(dict(action, kind="redo_ambiguous" if live else "redo_start",
+                                worker_ids=[w["id"] for w in live]))
+    return actions
+
+
+def _cell(value):
+    return ("-" if value in (None, "") else str(value)).replace("|", "\\|").replace("\n", " ")
+
+
+def roster(state, project_id):
+    """Markdown roster of a project's workers and open reviews, sent to its manager session."""
+    project = _project(state, project_id)
+    tasks = {t["id"]: t for t in state.get("tasks", []) if t.get("project_id") == project_id}
+    workers = [w for w in state.get("workers", []) if w.get("task_id") in tasks]
+    lines = [f"### Workers of {project_id} {project['name']}", ""]
+    if not workers:
+        lines.append("(no workers)")
+    else:
+        lines += ["| worker | task | task title | worker title | cwd | session_id | observed | report | review |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+        for w in workers:
+            review = w.get("review") or {}
+            rv = f"{review['id']} {review['state']}" if review else ""
+            lines.append("| " + " | ".join(_cell(v) for v in (
+                w["id"], w["task_id"], tasks[w["task_id"]].get("title"), w.get("title"), w.get("cwd"), w.get("session_id"),
+                w.get("observed_state"), (w.get("last_report") or {}).get("status"), rv)) + " |")
+    lines += ["", "### Open reviews", ""]
+    open_reviews = [w for w in workers if (w.get("review") or {}).get("state") == "requested" and not w.get("replaced_by")
+                    and not tasks[w["task_id"]].get("cancel")]
+    if not open_reviews:
+        lines.append("(none)")
+    else:
+        lines += ["| review | worker | task | ref | requested at |", "| --- | --- | --- | --- | --- |"]
+        for w in open_reviews:
+            r = w["review"]
+            lines.append("| " + " | ".join(_cell(v) for v in (r["id"], w["id"], w["task_id"], r.get("ref"), r.get("at"))) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def _parse_time(value):
+    try:
+        t = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+    return t if t.tzinfo else t.astimezone()
+
+
+def waits(state, now, hub_minutes=HUB_WAIT_MINUTES, review_minutes=REVIEW_WAIT_MINUTES):
+    """Workers whose wait for their project manager crossed a threshold and has no wait user action yet."""
+    now_t = _parse_time(now)
+    if now_t is None:
+        raise StateError(f"--now {now!r} is not an ISO time")
+    tasks = {t["id"]: t for t in state.get("tasks", []) if t.get("project_id")}
+    found = []
+    for w in state.get("workers", []):
+        task = tasks.get(w.get("task_id"))
+        if task is None or task.get("cancel") or w.get("replaced_by"):
+            continue
+        descs = [ua.get("description", "") for ua in task.get("user_actions", [])]
+        base = {"worker_id": w["id"], "task_id": task["id"], "project_id": task["project_id"]}
+        report = w.get("last_report") or {}
+        if (report.get("status") == "awaiting_manager" and w.get("observed_state") in ("idle", "needs_input")
+                and not any(d.startswith(HUB_WAIT_PREFIX.format(wid=w["id"])) for d in descs)):
+            since = _parse_time(w.get("awaiting_since"))
+            if since and (now_t - since).total_seconds() > hub_minutes * 60:
+                found.append(dict(base, kind="hub", since=w["awaiting_since"]))
+        review = w.get("review") or {}
+        if review.get("state") == "requested" and not any(d.startswith(REVIEW_WAIT_PREFIX.format(wid=w["id"])) for d in descs):
+            since = _parse_time(review.get("at"))
+            if since and (now_t - since).total_seconds() > review_minutes * 60:
+                found.append(dict(base, kind="review", review_id=review["id"], since=review["at"]))
+    return found
+
+
+def _row_value(row, *keys):
+    return next((row[k] for k in keys if k in row), None)
+
+
+def _row_is(row, flag):
+    keys = {"archived": ("isArchived", "archived"), "running": ("isRunning", "running")}[flag]
+    return bool(_row_value(row, *keys)) or row.get("status") == flag
+
+
+def manager_reconcile(manager, rows, events=None):
+    """Decisions for one manager session from list rows (include_archived) and an optional summary of its latest events.
+    rows: objects with sessionId (or session_id / id), startedBy, and running / archived flags.
+    events: {"last_message_ref": str | null, "pending_approval": bool}; without it, handle_turn and pending_approval are not judged."""
+    sid = manager.get("session_id")
+    previous = set(manager.get("previous_session_ids", []))
+    decisions = []
+    row = None
+    for r in rows:
+        rid = _row_value(r, "sessionId", "session_id", "id")
+        archived = _row_is(r, "archived")
+        # Listed until archived, so its user action is resolved by observing the archive.
+        if _row_value(r, "startedBy", "started_by") in previous | {sid} - {None} and not archived:
+            decisions.append({"decision": "foreign_session", "session_id": rid})
+        if rid in previous and not archived:
+            decisions.append({"decision": "stale_previous", "session_id": rid})
+        if sid is not None and rid == sid:
+            row = r
+    if sid is None or manager.get("intended_state") == "pending":
+        return decisions
+    if row is None:
+        if manager.get("intended_state") == "archived":
+            if manager.get("observed_state") not in ("archived", "missing"):
+                decisions.append({"decision": "update", "observed_state": "missing"})
+        else:
+            decisions.append({"decision": "missing", "session_id": sid})
+        return decisions
+    if _row_is(row, "archived"):
+        if manager.get("intended_state") == "archived":
+            decisions.append({"decision": "update", "observed_state": "archived"})
+        else:
+            decisions.append({"decision": "external_archive", "session_id": sid})
+        return decisions
+    running = _row_is(row, "running")
+    observed = "running" if running else "idle"
+    if not running and events and events.get("pending_approval"):
+        observed = "needs_input"
+        decisions.append({"decision": "pending_approval", "session_id": sid})
+    decisions.append({"decision": "update", "observed_state": observed})
+    last = (events or {}).get("last_message_ref")
+    if not running and last and last != (manager.get("last_report") or {}).get("message_ref"):
+        decisions.append({"decision": "handle_turn", "message_ref": last})
+    return decisions
 
 
 # ---------------------------------------------------------------- imperative shell
@@ -1515,7 +2214,7 @@ def cmd_digest(args):
 
 def cmd_parse_report(args):
     text = Path(args.file).read_text(encoding="utf-8") if args.file != "-" else sys.stdin.read()
-    result = parse_report(text, args.expect_task, args.expect_worker)
+    result = parse_report(text, args.expect_task, args.expect_worker, args.allow_awaiting_manager)
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result["ok"] else 1
 
@@ -1564,22 +2263,7 @@ def cmd_setup(args):
     old_md = claude_md.read_text(encoding="utf-8") if claude_md.exists() else None
     new_md = add_missing_locations(CLAUDE_MD if old_md is None else old_md, str(target))
     settings_path = target / ".claude" / "settings.json"
-    settings = {}
-    if settings_path.exists():
-        try:
-            settings = json.loads(settings_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
-            raise StateError(f"{settings_path} is not valid JSON ({e}); fix it and rerun setup")
-        if not isinstance(settings, dict):
-            raise StateError(f"{settings_path} must contain a JSON object")
-        hooks = settings.get("hooks", {})
-        for event in ("SessionStart", "PreToolUse"):
-            entries = hooks.get(event, []) if isinstance(hooks, dict) else None
-            if not isinstance(entries, list) or not all(
-                isinstance(e, dict) and isinstance(e.get("hooks", []), list) and all(isinstance(h, dict) for h in e.get("hooks", []))
-                for e in entries
-            ):
-                raise StateError(f"{settings_path}: hooks.{event} must be a list of hook entries; fix it and rerun setup")
+    settings = _read_settings(settings_path, ("SessionStart", "PreToolUse"), "setup")
 
     report = []
     sv_dir = target / ".supervisor"
@@ -1593,29 +2277,13 @@ def cmd_setup(args):
         report.append((status, dest))
 
     state_path = target / "state.json"
-    script = shlex.quote(str(sv_dir / Path(__file__).name))
-    # The guard exits 3 on a block; anything else (missing script, stale copy, crash) must not block the call.
+    script = sv_dir / Path(__file__).name
     wanted = (
-        ("SessionStart", "startup|resume|clear|compact", f"python3 {script} digest --state {shlex.quote(str(state_path))}"),
-        ("PreToolUse", GUARD_MATCHER, f"python3 {script} guard --dir {shlex.quote(str(target))}; [ $? -eq 3 ] && exit 2; exit 0"),
+        ("SessionStart", "startup|resume|clear|compact", f"python3 {shlex.quote(str(script))} digest --state {shlex.quote(str(state_path))}"),
+        ("PreToolUse", GUARD_MATCHER, guard_hook_command(script, target)),
     )
-    changed = False
-    for event, matcher, command in wanted:
-        entries = settings.setdefault("hooks", {}).setdefault(event, [])
-        if not any(h.get("command") == command for e in entries for h in e.get("hooks", [])):
-            entries.append({"matcher": matcher, "hooks": [{"type": "command", "command": command}]})
-            changed = True
     # A model the user already chose is kept; the Capability check reports a non-opus supervisor.
-    if "model" not in settings:
-        settings["model"] = SUPERVISOR_MODEL
-        changed = True
-    if not changed:
-        report.append(("exists", settings_path))
-    else:
-        existed = settings_path.exists()
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_atomic(str(settings_path), json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
-        report.append(("updated" if existed else "created", settings_path))
+    report.append((_install_hooks(settings_path, settings, wanted, {"model": SUPERVISOR_MODEL}), settings_path))
 
     if state_path.exists():
         report.append(("exists", state_path))
@@ -1637,9 +2305,59 @@ def cmd_setup(args):
     return 0
 
 
+def guard_hook_command(script, directory, role=None):
+    # The guard exits 3 on a block; anything else (missing script, stale copy, crash) must not block the call.
+    role_arg = f" --role {role}" if role else ""
+    return (f"python3 {shlex.quote(str(script))} guard --dir {shlex.quote(str(directory))}{role_arg}; "
+            "[ $? -eq 3 ] && exit 2; exit 0")
+
+
+def _read_settings(settings_path, events, rerun):
+    settings_path = Path(settings_path)
+    if not settings_path.exists():
+        return {}
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise StateError(f"{settings_path} is not valid JSON ({e}); fix it and rerun {rerun}")
+    if not isinstance(settings, dict):
+        raise StateError(f"{settings_path} must contain a JSON object")
+    hooks = settings.get("hooks", {})
+    for event in events:
+        entries = hooks.get(event, []) if isinstance(hooks, dict) else None
+        if not isinstance(entries, list) or not all(
+            isinstance(e, dict) and isinstance(e.get("hooks", []), list) and all(isinstance(h, dict) for h in e.get("hooks", []))
+            for e in entries
+        ):
+            raise StateError(f"{settings_path}: hooks.{event} must be a list of hook entries; fix it and rerun {rerun}")
+    return settings
+
+
+def _install_hooks(settings_path, settings, wanted, defaults=None):
+    """Add each missing (event, matcher, command) hook and each missing default key, keeping existing entries.
+    Returns created, updated or exists."""
+    changed = False
+    for event, matcher, command in wanted:
+        entries = settings.setdefault("hooks", {}).setdefault(event, [])
+        if not any(h.get("command") == command for e in entries for h in e.get("hooks", [])):
+            entries.append({"matcher": matcher, "hooks": [{"type": "command", "command": command}]})
+            changed = True
+    for key, value in (defaults or {}).items():
+        if key not in settings:
+            settings[key] = value
+            changed = True
+    if not changed:
+        return "exists"
+    settings_path = Path(settings_path)
+    existed = settings_path.exists()
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_atomic(str(settings_path), json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+    return "updated" if existed else "created"
+
+
 def cmd_guard(args):
     try:
-        message = guard_decision(json.loads(sys.stdin.read()), args.dir, dict(os.environ))
+        message = guard_decision(json.loads(sys.stdin.read()), args.dir, dict(os.environ), args.role)
         if message:
             print(message, file=sys.stderr)
             return 3
@@ -1787,6 +2505,8 @@ def cmd_prepare_dir(args):
         return 0
     if args.clone is not None:
         return _clone(args.clone, roots["clone_root"][0], sup)
+    if args.project is not None:
+        return _prepare_project_dir(args.project, roots["work_root"][0], sup)
     if not WORK_NAME_RE.match(args.work):
         raise StateError(f"--work {args.work!r} must match T-<number>-<slug> (lowercase letters, digits and '-', up to 40 characters)")
     root = roots["work_root"][0]
@@ -1795,6 +2515,60 @@ def cmd_prepare_dir(args):
     existed = os.path.isdir(dest)
     os.makedirs(dest, exist_ok=True)
     print(f"{'exists' if existed else 'created'}: {dest}")
+    return 0
+
+
+def _prepare_project_dir(name, root, sup):
+    if not PROJECT_NAME_RE.match(name):
+        raise StateError(f"--project {name!r} must match P-<number>-<slug> (lowercase letters, digits and '-', up to 40 characters)")
+    dest = os.path.join(root, name)
+    _check_dest(dest, root, sup)
+    settings_path = Path(dest) / ".claude" / "settings.json"
+    settings = _read_settings(settings_path, ("PreToolUse",), "prepare-dir")
+    existed = os.path.isdir(dest)
+    os.makedirs(dest, exist_ok=True)
+    print(f"{'exists' if existed else 'created'}: {dest}")
+    script = Path(sup) / ".supervisor" / Path(__file__).name
+    wanted = (("PreToolUse", GUARD_MATCHER, guard_hook_command(script, dest, "manager")),)
+    print(f"{_install_hooks(settings_path, settings, wanted)}: {settings_path}")
+    return 0
+
+
+def _read_text_arg(path):
+    return Path(path).read_text(encoding="utf-8") if path != "-" else sys.stdin.read()
+
+
+def cmd_parse_project_report(args):
+    result = parse_project_report(_read_text_arg(args.file), args.expect_project)
+    print(json.dumps(result, ensure_ascii=False))
+    return 0 if result["ok"] else 1
+
+
+def cmd_plan_actions(args):
+    result = parse_project_report(_read_text_arg(args.file), args.project)
+    if not result["ok"]:
+        raise StateError(result["error"])
+    print(json.dumps(plan_actions(_read_json(args.state), args.project, result["report"], args.running), ensure_ascii=False))
+    return 0
+
+
+def cmd_roster(args):
+    print(roster(_read_json(args.state), args.project), end="")
+    return 0
+
+
+def cmd_waits(args):
+    print(json.dumps(waits(_read_json(args.state), args.now or _now(), args.hub_minutes, args.review_minutes), ensure_ascii=False))
+    return 0
+
+
+def cmd_manager_reconcile(args):
+    project = _project(_read_json(args.state), args.project)
+    rows = _read_json(args.rows)
+    if isinstance(rows, dict):
+        rows = rows.get("sessions", rows.get("rows", []))
+    events = _read_json(args.events) if args.events else None
+    print(json.dumps(manager_reconcile(project["manager"], rows, events), ensure_ascii=False))
     return 0
 
 
@@ -1825,10 +2599,43 @@ def build_parser():
     p.add_argument("--file", required=True, help="text file with the worker's latest messages, or - for stdin")
     p.add_argument("--expect-task")
     p.add_argument("--expect-worker")
+    p.add_argument("--allow-awaiting-manager", action="store_true", help="accept awaiting_manager (project task workers only)")
     p.set_defaults(func=cmd_parse_report)
+
+    p = sub.add_parser("parse-project-report", help="extract the last project-report block of a project manager")
+    p.add_argument("--file", required=True, help="text file with the manager's latest message, or - for stdin")
+    p.add_argument("--expect-project")
+    p.set_defaults(func=cmd_parse_project_report)
+
+    p = sub.add_parser("plan-actions", help="turn a project-report into the operations the supervisor performs (JSON)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--project", required=True)
+    p.add_argument("--file", required=True, help="text file with the manager's latest message, or - for stdin")
+    p.add_argument("--running", action="append", default=[], metavar="WORKER_ID", help="a worker found running by get (repeatable)")
+    p.set_defaults(func=cmd_plan_actions)
+
+    p = sub.add_parser("roster", help="print the markdown roster of a project's workers and open reviews")
+    p.add_argument("--state", required=True)
+    p.add_argument("--project", required=True)
+    p.set_defaults(func=cmd_roster)
+
+    p = sub.add_parser("waits", help="list project workers whose hub or review wait crossed its threshold (JSON)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--now", help="ISO time (default: now)")
+    p.add_argument("--hub-minutes", type=int, default=HUB_WAIT_MINUTES)
+    p.add_argument("--review-minutes", type=int, default=REVIEW_WAIT_MINUTES)
+    p.set_defaults(func=cmd_waits)
+
+    p = sub.add_parser("manager-reconcile", help="judge a project manager session from list rows and its latest events (JSON)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--project", required=True)
+    p.add_argument("--rows", required=True, help="JSON file with the list rows (include_archived)")
+    p.add_argument("--events", help='JSON file {"last_message_ref": ..., "pending_approval": bool} summarizing the latest events')
+    p.set_defaults(func=cmd_manager_reconcile)
 
     p = sub.add_parser("guard", help="PreToolUse hook: exit 3 with a reason on stderr when the call is blocked, else 0")
     p.add_argument("--dir", required=True)
+    p.add_argument("--role", choices=("manager",), help="manager: the guard of a project directory")
     p.set_defaults(func=cmd_guard)
 
     p = sub.add_parser("validate-follow-ups", help="check the ## Follow-ups section of CLAUDE.md (exit 1 with error lines when invalid)")
@@ -1851,6 +2658,7 @@ def build_parser():
     mode.add_argument("--show", action="store_true", help="print clone_root and work_root as absolute paths (read-only)")
     mode.add_argument("--work", metavar="NAME", help="create work_root/NAME (NAME is T-NNNN-<slug>)")
     mode.add_argument("--clone", metavar="URL", help="clone URL into clone_root/<host>/<owner>/<repo>")
+    mode.add_argument("--project", metavar="NAME", help="create work_root/NAME with the manager guard hook (NAME is P-NNNN-<slug>)")
     p.set_defaults(func=cmd_prepare_dir)
 
     p = sub.add_parser("check-cwd", help="print busy or free for a non-git cwd")

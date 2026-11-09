@@ -9,7 +9,9 @@ Field names are agent-neutral:
 - `session_id`: the session identifier issued by the runtime (the value the start capability returns).
 - `handle`: the `[a-z0-9-]` name (24 characters or fewer) given to the session at start, e.g. `t0003-w0004`.
 - `branch` / `worktree_path`: decided by the app (it adds a prefix and a suffix to the requested slug). Fill them from the get capability after start; never guess them.
-- `task.id`: `T-NNNN`. `worker.id`: `w-NNNN`. `user_actions[].id`: `UA-NNNN`. Allocate the next number after the highest one in the current `tasks` / `workers` / `user_actions`; for task ids also count the `archived` stubs, which keep their task id (a revived task reuses its stub's id, see archived[]). Stubs keep no worker or user-action ids, so those numbers may be reused after a task is archived; uniqueness is checked only within the current state.
+- `task.id`: `T-NNNN`. `worker.id`: `w-NNNN`. `user_actions[].id`: `UA-NNNN`. Allocate the next number after the highest one in the current `tasks` / `workers` / `user_actions`; for task ids also count the `archived` stubs, which keep their task id (a revived task reuses its stub's id, see archived[]). Stubs keep no worker or user-action ids, so those numbers may be reused after a task is archived; uniqueness is checked only within the current state. User-action numbers are allocated across the user actions of `tasks` and `projects` together, so a task and a project never share one.
+- `project.id`: `P-NNNN`, allocated as `supervisor.last_project_number + 1`; the counter is raised in the same candidate and never reused, even after the project is removed.
+- `review.id`: `R-NNNN`, allocated per project as `projects[].last_review_number + 1`; the counter is raised in the same candidate, and a review id is unique within its project (two projects may both have `R-0001`).
 
 ## Example
 
@@ -22,14 +24,45 @@ Field names are agent-neutral:
     "dir": "/Users/handlename/supervisor",
     "session_ids": ["sess_sup_01", "sess_sup_02"],
     "archive_consent": { "text": "成果を確認できた worker は確認なしでアーカイブしてよい", "at": "2026-10-16T08:50:00+09:00" },
-    "dashboard": { "url": "https://claude.ai/code/artifact/xxxxxxxx", "path": "/Users/handlename/supervisor/dashboard.html" }
+    "dashboard": { "url": "https://claude.ai/code/artifact/xxxxxxxx", "path": "/Users/handlename/supervisor/dashboard.html" },
+    "last_project_number": 1
   },
+  "projects": [
+    {
+      "id": "P-0001",
+      "name": "Uploader reliability",
+      "context_doc_url": "https://github.com/org/repo-a/issues/30",
+      "dir": "/Users/handlename/supervisor-work/P-0001-uploader-reliability",
+      "created_at": "2026-10-17T08:55:00+09:00",
+      "last_review_number": 1,
+      "manager": {
+        "session_id": "sess_mgr01",
+        "started_by": "sess_sup_01",
+        "handle": "p0001-manager",
+        "title": "P-0001 Uploader reliability",
+        "intended_state": "running",
+        "observed_state": "idle",
+        "observed_at": "2026-10-17T10:41:00+09:00",
+        "model": "opus",
+        "last_report": { "message_ref": "msg_01HMGR", "status": "idle", "summary": "R-0001 を差し戻し", "at": "2026-10-17T10:15:00+09:00" },
+        "previous_session_ids": [],
+        "replacements": 0
+      },
+      "user_actions": [
+        { "id": "UA-0004", "description": "Approve new task proposal of P-0001 (`Uploader reliability`): Add upload metrics", "since": "2026-10-17T10:15:00+09:00", "proposal": { "title": "Add upload metrics", "text": "uploader の成功・失敗数をメトリクスとして出す", "message_ref": "msg_01HMGR" } }
+      ]
+    }
+  ],
   "tasks": [
     {
       "id": "T-0003",
       "title": "Add retry to uploader",
       "request": "repo-a と repo-b の uploader にリトライを追加して。push して PR を作ってよい",
       "push_consent": { "text": "push して PR を作ってよい", "at": "2026-10-17T09:00:00+09:00" },
+      "project_id": "P-0001",
+      "redos": [
+        { "text": "タイムアウトも再試行の対象にする", "at": "2026-10-17T10:15:00+09:00", "from": "P-0001", "review_id": "R-0001" }
+      ],
       "followups": [
         { "text": "repo-a の方は指数バックオフにして", "at": "2026-10-17T10:20:00+09:00" }
       ],
@@ -80,7 +113,8 @@ Field names are agent-neutral:
       "observed_at": "2026-10-17T10:41:00+09:00",
       "model": "sonnet",
       "continues": 1,
-      "last_report": { "message_ref": "msg_01HXYZ", "status": "in_progress", "summary": "retry 実装中", "next_action": "テストを追加" }
+      "last_report": { "message_ref": "msg_01HXYZ", "status": "in_progress", "summary": "retry 実装中", "next_action": "テストを追加" },
+      "review": { "id": "R-0001", "state": "rejected", "at": "2026-10-17T10:15:00+09:00", "message_ref": "msg_01HXW1", "ref": "2b7e01d4c9" }
     },
     {
       "id": "w-0007",
@@ -119,6 +153,33 @@ The example is a snapshot for illustration: `w-0005` and `w-0006` are elided, so
 | `session_ids` | Every session that has acted as this supervisor. Add your own id during the Capability check. Used to match `started_by`. |
 | `archive_consent` | `null`, or `{text, at}` holding the user's verbatim answer to the one-time archive question. Required before a worker that is neither observed `archived` nor `missing` may become `intended_state: archived`. |
 | `dashboard` | `{url, path}`: the published artifact URL (`null` until first publish) and the local HTML path. |
+| `last_project_number` | Optional integer >= 0 (absent counts as 0): the highest project number ever allocated. Never decreases. |
+
+### projects[]
+
+Optional (absent counts as an empty list). A project groups tasks under one project manager session (SKILL.md 6.10). The manager is recorded here, never in `workers`.
+
+| Field | Meaning |
+| :--- | :--- |
+| `id`, `name` | `P-NNNN` (at most `supervisor.last_project_number`) and a non-empty display name. |
+| `context_doc_url` | http(s) URL of the context document (a GitHub issue or a Notion page). The manager only reads it. |
+| `dir` | Absolute path of the project directory `<work_root>/P-NNNN-<slug>`, created by `prepare-dir --project` with the manager guard hook. No non-git worker's `cwd` may overlap it. |
+| `created_at` | ISO 8601 timestamp with offset. |
+| `last_review_number` | Integer >= 0: the highest review number allocated in this project. Never decreases. |
+| `manager` | The project manager session (below). |
+| `user_actions[]` | Same shape as a task's user actions, plus an optional `proposal: {title, text, message_ref}` (non-empty strings) on the action that asks the user to approve a new task proposed by the manager. `proposal` is not allowed on a task's user actions. A project's user actions do not change any task's status. |
+| `close` | Optional `{at, reason}` once the user closed the project in the supervisor chat; then `manager.intended_state` is `archived`. A closed project whose manager is finished and that no task references is removed by `commit`. |
+
+`manager`:
+
+| Field | Meaning |
+| :--- | :--- |
+| `session_id`, `started_by`, `handle`, `title` | As for workers. `handle` is `pNNNN-manager`, `title` is `P-NNNN <name>` (also the sidebar title). |
+| `intended_state`, `observed_state`, `observed_at` | Same ranges as for workers. The manager becomes `intended_state: archived` only when the project has `close` or the manager is observed `archived` or `missing`. |
+| `model` | Optional, as for workers. |
+| `last_report` | `null`, `{message_ref, status, summary, at}` with `status` `idle` or `needs_input`, or `{message_ref, status: "unparsed", error, at}`. `message_ref` makes the manager's turn-end handling idempotent (SKILL.md 6.11). |
+| `previous_session_ids[]` | Session ids of earlier managers of this project. Their turns and reports are ignored. |
+| `replacements` | Integer >= 0: how many times the manager was replaced (SKILL.md 6.12). |
 
 ### tasks[]
 
@@ -135,7 +196,13 @@ The example is a snapshot for illustration: `w-0005` and `w-0006` are elided, so
 | `worker_ids[]` | Workers that belong to this task. |
 | `created_at` | ISO 8601 timestamp with offset. |
 | `cancel` | Optional. `{at, reason}` once the user cancelled the task (see Cancellation). |
-| `no_result[]` | Optional. `{worker_id, summary, at}` entries (all non-empty strings), one per worker of the task whose `done` was verified as No result (SKILL.md 6.3 step 5): `summary` is that report's `summary` copied as is, `at` the time the supervisor recorded it. The named worker is exempt from the delivery artifact and push-decision requirements (see Invariants). Carried into the `archived` stub when non-empty; task cards do not show it. |
+| `project_id` | Optional. The id of an open project (no `close`) this task belongs to. Without it the task behaves as before projects existed. |
+| `proposal` | Optional. `{title, text, from, message_ref}` (non-empty strings) when the task was created from a manager's proposal the user approved (SKILL.md 6.1); `from` equals `project_id`. `request` holds the user's approval verbatim. Carried into the `archived` stub. |
+| `redos[]` | Optional, project tasks only. `{text, at, from, review_id?}` entries, oldest first: redo work returned by the project manager (a `reject` verdict or a `redo` plan, SKILL.md 6.11). They are the manager's words, not the user's, so they are kept apart from `followups`. Carried into the `archived` stub when non-empty. |
+| `no_result[]` | Optional. `{worker_id, summary, at}` entries (all non-empty strings), one per worker of the task whose `done` was verified as No result (SKILL.md 6.3 step 5): `summary` is that report's `summary` copied as is, `at` the time the supervisor recorded it. The named worker is exempt from the delivery artifact and push-decision requirements (see Invariants). It may also name a held investigation worker (one with a read user action), recorded at verification before the archive. Carried into the `archived` stub when non-empty; task cards do not show it. |
+| `investigation` | Optional, `true` when present. Set at intake (SKILL.md 6.1) when the request only asks for investigation; never changed while the task lives. Its workers (except push-only workers) are held, not archived, after a verified `done` until the user has read the result (SKILL.md 6.3 step 6). Copied into the `archived` stub and back on revival. |
+| `findings[]` | Optional, investigation tasks only. `{worker_id, session_id, title, summary, message_ref, at}` entries (all non-empty strings), at most one per worker, replaced on every verified `done` of that worker (SKILL.md 6.3 step 6): `session_id` is the worker's observed session id, `title` its sidebar title when recorded (`<prefix> <workers[].title>`, SKILL.md 6.2.2; after a retitle the old one shows until the next verification), `summary` the verified report's `summary` (`No summary reported; read the session.` when empty), `message_ref` that report's `message_ref`. The task card shows each entry as a `Result` link to `#local_<session_id>` labelled with `title`, with the session id in code, and the summary only when it differs from the worker's `last_report.summary`. Concatenated into the `archived` stub like `no_result`. |
+| `derived_from` | Optional. `{task_id, context}` (non-empty strings) on a task created from a change request to an investigation task (SKILL.md 6.7): `task_id` is the investigation task, `context` its `request` and each `findings` `summary` with its sidebar title, copied when the task is created. Worker briefs are rebuilt from it alone, so `task_id` is not checked against `tasks` or `archived`. Not copied into the `archived` stub. |
 
 ### workers[]
 
@@ -143,7 +210,7 @@ The example is a snapshot for illustration: `w-0005` and `w-0006` are elided, so
 | :--- | :--- |
 | `id`, `task_id` | Worker id and owning task. |
 | `session_id`, `started_by` | Runtime session id and the supervisor session that started it (`null` while pending). |
-| `handle`, `title` | Start-time name (`[a-z0-9-]`, 24 characters or fewer) and display title (52 characters or fewer, always set; the session's sidebar title is `<task id> <title>`, SKILL.md 6.2.2). |
+| `handle`, `title` | Start-time name (`[a-z0-9-]`, 24 characters or fewer) and display title (52 characters or fewer, always set; the session's sidebar title is `<task id>|<worker id> <title>`, or `<project id>|<task id>|<worker id> <title>` for a project task, SKILL.md 6.2.2). |
 | `cwd` | Repo root (git) or target directory (non-git), absolute. |
 | `kind` | `git` or `non-git`. |
 | `delivery` | `push_pr`, `commit`, or `files` (see Value ranges). |
@@ -153,6 +220,8 @@ The example is a snapshot for illustration: `w-0005` and `w-0006` are elided, so
 | `observed_state`, `observed_at` | What the supervisor last observed, and when. |
 | `last_report` | Last processed report (see last_report). |
 | `replaced_by` | Optional worker id, or null. Marks this worker as replaced by another worker of the same task (SKILL.md 6.8): the id of a different, existing worker with the same `task_id`. Allowed only with `intended_state: archived`. Following `replaced_by` from worker to worker must end at a worker without `replaced_by` (no cycles). The replacement count of a `cwd` is the number of workers of the task with that `cwd` and a `replaced_by`. A worker with `replaced_by` is exempt from the delivery artifact and push-decision requirements (see Invariants) but not from `archive_consent`, and `derive_status` does not count it as verified-archived (see Derivation). |
+| `review` | Optional, workers of project tasks only. `{id, state, at, message_ref?, ref?, reason?, stale_notified?, pending_verdict?}` (see Reviews). |
+| `awaiting_since` | Optional string, required exactly while `last_report.status` is `awaiting_manager`: when the worker started waiting for the project manager. Kept while the worker reports `awaiting_manager` again with the same `blockers`. |
 | `continues` | Optional integer >= 0: consecutive "continue" nudges sent for unchanged `in_progress` reports. Reset to 0 when the report's `summary` or `next_action` changes; at 3 the supervisor stops nudging and adds a user action. |
 
 Later push workers (SKILL.md 6.3 step 7):
@@ -160,15 +229,32 @@ Later push workers (SKILL.md 6.3 step 7):
 - A task may gain a `push_pr` worker after its `commit` workers were archived.
 - A reused worker's `delivery` may change from `commit` to `push_pr` together with `intended_state` from `archived` back to `running` (only workers that newly become archived are checked), in the candidate that sets `push_consent`.
 
+### Reviews
+
+A worker of a project task gets a `review` once its `done` is verified (SKILL.md 6.3 step 5). The review ties the manager's verdict to the report it was given for.
+
+| `review.state` | Meaning |
+| :--- | :--- |
+| `requested` | Sent to the manager; awaiting its verdict. |
+| `superseded` | The worker reported something other than `done` after the request. The next `done` gets a new review id. |
+| `rejected` | The manager asked for a redo (`task.redos`). |
+| `approved` | The manager approved; the worker may be archived. |
+| `waived` | No review needed: a push-only worker (`reason` `push-only after R-NNNN`) or the user said so in the supervisor chat (`reason` = the user's words). A held investigation worker archived outside the supervisor or missing after reporting past its approval moves from `approved` to `waived` with the same id (`reason` `session closed while holding R-NNNN; later turns were not reviewed`, SKILL.md 6.4). |
+
+- `id` and `at` are required in every state. `message_ref` is required for `requested`, `superseded`, `rejected`, and `approved`: the `last_report.message_ref` the review was requested for, or `external:<observed_at>` for a worker archived outside the supervisor with `last_report` null. `reason` is required for `waived`.
+- `ref`: the verified head sha (git) or the reported files (non-git) the review covers.
+- `stale_notified`: the `message_ref` for which a Stale verdict was already sent, so it is sent once per `(id, message_ref)`.
+- `pending_verdict`: `{verdict: "approve", message_ref, at}`, an approval held until the next user turn because the result had to be observed again (SKILL.md 6.3 step 6). Allowed only while `state` is `requested`, with `message_ref` equal to `review.message_ref`.
+
 ### archived[]
 
-Stubs of finished tasks: `{id, title, request, artifacts, archived_at}`, plus `followups` (copied from the task, only when non-empty), `no_result` (only when non-empty), and `cancelled: true` and `reason` (copied from `cancel.reason`) for cancelled tasks; newest first, at most 20. `request` is always present on stubs written by `commit`; a stub without `request` is an older stub. The dashboard lists them with their artifact links, a cancelled badge, and a `no result` badge followed by each `no_result` summary. Task cards list their own artifacts. A stub's `no_result[].worker_id` is for display only: worker numbers are reused, so it is not checked against `workers`.
+Stubs of finished tasks: `{id, title, request, artifacts, archived_at}`, plus `followups` (copied from the task, only when non-empty), `no_result` and `findings` (only when non-empty), `investigation` (when the task had it), `project: {id, name}`, `proposal`, and `redos` (only when the task had them), and `cancelled: true` and `reason` (copied from `cancel.reason`) for cancelled tasks; newest first, at most 20. `request` is always present on stubs written by `commit`; a stub without `request` is an older stub. The dashboard lists them with their artifact links, a cancelled badge, and a `no result` badge followed by each `no_result` summary, and each `findings` entry as a `Result` link with its summary (a `no_result` summary of a worker that also has a `findings` entry is not repeated). Task cards list their own artifacts. A stub's `no_result[].worker_id` and `findings[]` `worker_id`, `session_id`, and `message_ref` are for display only: worker numbers are reused, so they are not checked against `workers` (only the shape of stub `findings` is checked).
 
 Revival (SKILL.md 6.7 (c)):
 
 - A user request that continues an archived task revives it as a task with the **same id** as its stub. `commit` accepts a task id that is also in `archived` only when the stub has a `request`, is not `cancelled`, and its `request` equals the task's `request`. Otherwise it rejects: `task T-xxxx: id is an archived stub; revive only a non-cancelled stub with the same request`.
 - The stub stays in `archived` while the task is alive, so the same id shows both on a task card and in the archived list. The revived task starts with empty `artifacts` and `push_consent: null`; nothing is copied from the stub, so earlier deliveries are never re-reported or re-verified.
-- When the revived task is archived again, `commit` replaces the old stub with a new one. The new stub's `artifacts` are the old stub's `artifacts` followed by the task's `artifacts`, order preserved and without deduplication, so the last `branch` artifact of a directory is always the newest generation. `no_result` is concatenated the same way; the revived task starts with none.
+- When the revived task is archived again, `commit` replaces the old stub with a new one. The new stub's `artifacts` are the old stub's `artifacts` followed by the task's `artifacts`, order preserved and without deduplication, so the last `branch` artifact of a directory is always the newest generation. `no_result` and `findings` are concatenated the same way; the revived task starts with none of them. The revived task copies `investigation` from the stub.
 - A stub that fell out of the 20-stub window while its task was revived has lost its artifacts: the new stub holds only the task's `artifacts`.
 - A cancelled stub never revives: a continuing request starts a new task. A revived task that is cancelled can never be revived again.
 
@@ -180,6 +266,9 @@ Revival (SKILL.md 6.7 (c)):
   - `files`: kind is `non-git`
 - `worker.intended_state`: `pending` | `running` | `archived`
 - `worker.observed_state`: `none` | `running` | `idle` | `needs_input` | `archived` | `missing`
+- `manager.intended_state` / `manager.observed_state`: the same ranges as for workers
+- `manager.last_report.status`: `idle` | `needs_input` | `unparsed`
+- `worker.review.state`: `requested` | `superseded` | `rejected` | `approved` | `waived`
 - `worker.model` (optional): `opus` | `sonnet` | `haiku`, or absent / null
 - `task.artifacts[].kind`: `branch` | `commit` | `pr` | `ci` | `file`
   - `pr` / `ci`: `url` (http or https) is required
@@ -191,7 +280,7 @@ Revival (SKILL.md 6.7 (c)):
 
 `null`, or one of two shapes. `message_ref` is required in both: it is the identifier of the latest message the report was read from (the message UUID or cursor that the event-reading capability returns).
 
-- Parsed: `{message_ref, status, summary, next_action}`, where `status` is the report block's value.
+- Parsed: `{message_ref, status, summary, next_action, read_confirmed?}`, where `status` is the report block's value. `awaiting_manager` is allowed only for workers of project tasks, and then `awaiting_since` is set. `read_confirmed` is copied from the report when present: a boolean, `true` only with `status` `done` (the user said in the worker session that they read an investigation result). Keeping it here lets a deferred verification or a pending review still see the mark.
 - Parse failure: `{message_ref, status: "unparsed", error, at}`.
 
 Idempotency uses `message_ref`: if the latest message's id equals `last_report.message_ref`, the turn is already processed. Stall detection uses `continues` (see workers[]).
@@ -204,7 +293,7 @@ Idempotency uses `message_ref`: if the latest message's id equals `last_report.m
 1. `needs_user`: the task's `user_actions` is not empty, or some worker is observed `archived` while its `intended_state` is not `archived` (archived outside the supervisor; cleared when the supervisor verifies the result and sets `intended_state: archived`).
 2. `running`: some worker has `observed_state` in `running` / `idle` / `needs_input`, or is `missing` while its `intended_state` is not `archived`. A `missing` worker with `intended_state: archived` counts as finished.
 3. `waiting`: only unstarted workers (`observed_state == none`) remain.
-4. `done`: every worker is finished: observed `archived`, or `missing` with `intended_state: archived`. A worker with `replaced_by` is not counted as verified-archived by the final fallback of this rule: a task whose only remaining workers are replaced external-archive workers and replacements that gave up as `missing` derives `needs_user`, not `done`.
+4. `done`: every worker is finished: observed `archived`, or `missing` with `intended_state: archived`. A worker with `replaced_by` is not counted as verified-archived by the final fallback of this rule: a task whose only remaining workers are replaced external-archive workers and replacements that gave up as `missing` derives `needs_user`, not `done`. A `missing` worker with `intended_state: archived`, no `replaced_by`, and an entry in its task's `findings` (a held investigation worker that vanished, SKILL.md 6.4) counts as verified-archived. Its `findings` entry carried into the stub is its last verified conclusion, or the previous generation's when it vanished during later work.
 
 Before deriving, `commit` maintains one automatic user action, the only one the supervisor never edits. When a non-git `cwd` is occupied in current and free in the candidate, every task with a `pending` / `none` non-git worker on that `cwd` gets `Waiting task T-xxxx can start now: send any message to the supervisor to start it.` (added once, matched by exact description). `commit` removes it from a task as soon as that task has no startable worker (non-git, `pending` / `none`, `cwd` free in the candidate): the worker was started or removed, or the `cwd` is busy again because another waiting task on it started. The supervisor never adds or removes this user action itself.
 
@@ -216,6 +305,8 @@ Consequences:
 - A `commit`-delivery task carries the push-decision user action, so it stays `needs_user` after its workers are archived, until the user decides. A worker whose verified head was observed pushed (its `commit` artifact has the commit `url`) adds none, and neither does a worker in `no_result`.
 - A follow-up user action makes its task `needs_user` like any other, even before the archive is observed and even while another worker of the task is `running`.
 - A task whose only remaining user actions are follow-ups stays in `tasks`, together with its archived workers, until the last follow-up is removed; then `commit` moves it to an `archived` stub.
+- A project worker under review that is archived outside the supervisor keeps its task `needs_user`, and one that went `missing` keeps it `running`: it is not `intended_state: archived` until its review is approved or waived (see Invariants), so the task does not finish.
+- A held investigation worker (verified, `intended_state: running`, with a read user action) keeps its task `needs_user`. Its push decision is added only in the candidate that releases it (SKILL.md 6.3 step 6).
 
 ## Cancellation
 
@@ -237,11 +328,15 @@ Single-state checks (`validate`):
   - `commit`: `branch` + `commit`
   - `files`: at least one `file`
   - A worker named in its task's `no_result` needs none of these.
-- Each `no_result` entry of a task names a worker in that task's `worker_ids` whose `intended_state` is `archived` and that has no `replaced_by`, and no worker appears twice. A worker set back to `running` (SKILL.md 6.4, 6.7 (a)) must lose its entry in the same candidate. Otherwise: `task T-xxxx: no_result w-xxxx must name an archived, non-replaced worker of the task once`.
+- Each `no_result` entry of a task names a worker in that task's `worker_ids` whose `intended_state` is `archived` or that a read user action names (held), that has no `replaced_by`, and no worker appears twice. A worker set back to `running` (SKILL.md 6.4, 6.7 (a)), or a held worker whose read user action is removed without archiving it, must lose its entry in the same candidate. Otherwise: `task T-xxxx: no_result w-xxxx must name an archived, non-replaced worker of the task once`.
+- `investigation`, when present on a task or a stub, is `true`: `task T-xxxx: investigation must be true when present`.
+- `findings`, on a task or a stub, is a list of objects whose `worker_id`, `session_id`, `title`, `summary`, `message_ref`, and `at` are all non-empty strings: `task T-xxxx: findings must be a list of {worker_id, session_id, title, summary, message_ref, at} with non-empty strings` (a stub's error starts with its own prefix). On a task (not on a stub) it also requires `investigation`, and each entry names a worker in `worker_ids` whose `session_id` equals the entry's, at most once: `task T-xxxx: findings w-xxxx must name a worker of an investigation task by its session_id, once`.
+- `derived_from`, when present, is an object whose `task_id` and `context` are non-empty strings: `task T-xxxx: derived_from must be {task_id, context} with non-empty strings`. The task it names is not looked up.
+- Read user action: a user action without `follow_up` whose description starts with `Read the result of w-` (the reserved prefix `Read the result of w-NNNN (`, the worker id ending before `(`). Its task has `investigation`; its worker belongs to the task, has `intended_state: running`, is observed neither `archived` nor `missing`, and has a `findings` entry; no worker has two; and on a project task the worker's `review.state` is `approved` or `waived`. Otherwise: `task T-xxxx: read action for w-xxxx needs a live, approved or waived (project) worker of an investigation task with findings, once`. Putting a held worker back to review (`requested`, `rejected`, `superseded`) therefore must remove its read user action in the same candidate.
 - `replaced_by`, when present, names a different existing worker of the same task; its worker has `intended_state: archived`; following the chain ends at a worker without `replaced_by`.
 - `followups[]`, when present, is a list of objects with non-empty string `text` and `at`; a stub's `request` and `followups` have the same shapes.
 - A task id that is also in `archived` is a revival: the stub has a `request`, is not `cancelled`, and its `request` equals the task's `request`.
-- `last_report`, when not null, has `message_ref`.
+- `last_report`, when not null, has `message_ref`. Its `read_confirmed`, when present, is a boolean, and `true` only with `status` `done`.
 - A task with `cancel` has no worker with `intended_state: running`.
 - `continues`, when present, is an integer >= 0.
 - A `file` artifact's `path` lies under the `cwd` of a worker of that task.
@@ -251,6 +346,12 @@ Single-state checks (`validate`):
 - Within one task, no two follow-ups share the same `(rule, url)`.
 - A user action with `follow_up` has a non-empty string `since`.
 - None of these checks reads `CLAUDE.md`: `commit` does not know the rules, only the shape.
+- Project ids are unique and their numbers are at most `supervisor.last_project_number`. A closed project's `manager.intended_state` is `archived`.
+- A task's `project_id` names a project in `projects` without `close`: `task T-xxxx: project_id P-xxxx must name an open project`. `proposal.from` equals `project_id`, and `redos` appears only on a task with `project_id`.
+- `review` appears only on workers of tasks with `project_id`. Review ids are unique within a project, and their numbers are at most that project's `last_review_number`.
+- Approval gate: a worker of a project task with `intended_state: archived`, no `replaced_by`, and a task without `cancel` has `review.state` `approved` or `waived`; `approved` also needs `last_report` null or `last_report.message_ref` equal to `review.message_ref`. Being observed `archived` or `missing` exempts nothing. Otherwise: `worker w-xxxx: archived project worker needs an approved review of its latest report (or waived / cancel / replaced_by)`. A candidate that records a newer report on an approved worker must also set it back to `intended_state: running` (SKILL.md 6.4).
+- `last_report.status` `awaiting_manager` is allowed only on workers of project tasks and requires `awaiting_since`; `awaiting_since` is not allowed otherwise.
+- A non-git worker's `cwd`, in any `intended_state` (`pending` included), does not overlap any project's `dir` (equal, ancestor, or descendant). `check-cwd` reports such a `cwd` as busy.
 
 Checks against the current state (`next_state`):
 
@@ -261,6 +362,8 @@ Checks against the current state (`next_state`):
   - if its delivery is `commit`, the task is not cancelled, the worker has no `replaced_by` and is not in the task's `no_result`, and its group is not pushed at its verified head (the `commit` artifact right after the last `branch` artifact `<cwd>#<branch>` of that worker has a `url` ending in `/commit/<its ref>`; SKILL.md 6.3 step 6), the candidate task must contain the push-decision user action. A group's `commit` always directly follows its `branch`; a `pr` artifact is appended after the group
   - `supervisor.archive_consent` must not be null, unless the worker is already observed `archived` or `missing` (no archive call follows); a worker with `replaced_by` is not exempt from this
 - A worker already `intended_state: archived` without `replaced_by` in current (its result was verified and recorded, or its task was cancelled) must not get `replaced_by` in the candidate.
+- Projects are never removed by the supervisor, and `last_project_number` and `last_review_number` never decrease. A project id absent from current has a number above current's `last_project_number`; a review id that is new or changed on a worker has a number above current's `last_review_number` of its project (above 0 for a new project), so ids are never issued again.
+- The manager may newly become `intended_state: archived` only when its project has `close` or it is observed `archived` or `missing`.
 - The automatic waiting-task user action is never offered for a worker that is the `replaced_by` target of another worker, so a replacement waits for the supervisor's next user turn instead of prompting the user.
 - Removing the push-decision user action from a candidate whose workers are already `archived` (or whose archive was refused and the worker remains) is accepted: the transition checks apply only to workers that newly become archived.
 - Push consent from a later message: for each candidate task whose `push_consent.message` is new or differs from the current task's, the task must exist in current, current must hold a push-decision user action for it (naming the branch of one of its git workers; a user action with `follow_up` is never a push decision), and the candidate must no longer hold that user action. Otherwise: `task T-xxxx: push_consent.message may be set only while resolving a pending push decision`.

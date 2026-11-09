@@ -1,9 +1,11 @@
+import argparse
 import contextlib
 import copy
 import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -2726,6 +2728,1027 @@ class StdlibOnlyTest(unittest.TestCase):
         source = SCRIPT.read_text(encoding="utf-8")
         modules = set(re.findall(r"^(?:import|from) ([a-zA-Z_]+)", source, re.M))
         self.assertTrue(modules <= set(sys.stdlib_module_names), modules - set(sys.stdlib_module_names))
+
+
+
+PROJECT_DIR = "/Users/handlename/supervisor-work/P-0001-nature-mcp"
+
+
+def add_project(state, pid="P-0001", name="Nature MCP", directory=PROJECT_DIR, last_review=0):
+    state["supervisor"]["last_project_number"] = max(state["supervisor"].get("last_project_number", 0), int(pid[2:]))
+    state.setdefault("projects", []).append({
+        "id": pid, "name": name, "context_doc_url": "https://github.com/org/repo/issues/1", "dir": directory,
+        "created_at": NOW, "last_review_number": last_review, "user_actions": [],
+        "manager": {
+            "session_id": f"sess_mgr_{pid}", "started_by": "sess_sup_01", "handle": f"{pid.lower().replace('-', '')}-manager",
+            "title": f"{pid} {name}", "intended_state": "running", "observed_state": "idle", "observed_at": NOW,
+            "last_report": None, "previous_session_ids": [], "replacements": 0,
+        },
+    })
+    return state["projects"][-1]
+
+
+def project_worker(state, task_id="T-0020", worker_id="w-0020", pid="P-0001", **kw):
+    git_task(state, task_id, worker_id, **kw)
+    find(state["tasks"], task_id)["project_id"] = pid
+    return find(state["workers"], worker_id)
+
+
+def rep(ref, status="done"):
+    return {"message_ref": ref, "status": status, "summary": "s", "next_action": ""}
+
+
+def review(rid="R-0001", state="requested", ref="m1", **extra):
+    return dict({"id": rid, "state": state, "at": NOW, "message_ref": ref, "ref": "abc123"}, **extra)
+
+
+class ProjectStateTest(unittest.TestCase):
+    def setUp(self):
+        self.current = fixture_state()
+        add_project(self.current, last_review=1)
+        w = project_worker(self.current)
+        w["last_report"], w["review"] = rep("m1"), review()
+
+    def cand(self):
+        return copy.deepcopy(self.current)
+
+    def assertRejected(self, candidate, pattern, current=None):
+        with self.assertRaises(st.StateError) as ctx:
+            st.next_state(current or self.current, candidate, NOW)
+        self.assertRegex(str(ctx.exception), pattern)
+
+    def archive(self, cand, wid="w-0020", tid="T-0020"):
+        find(cand["workers"], wid)["intended_state"] = "archived"
+        commit_artifacts(cand, tid)
+        push_decision(cand, tid)
+        return find(cand["workers"], wid)
+
+    def test_states_without_projects_pass(self):
+        state = fixture_state()
+        self.assertNotIn("projects", state)
+        self.assertEqual(st.validate(state), [])
+        empty = st.empty_state("/sup")
+        self.assertEqual((empty["projects"], empty["supervisor"]["last_project_number"]), ([], 0))
+        self.assertEqual(st.validate(empty), [])
+        self.assertEqual(st.validate(self.current), [])
+
+    def test_project_shape_errors(self):
+        for mutate, pattern in (
+            (lambda p: p.update(context_doc_url="file:///x"), "context_doc_url must be http"),
+            (lambda p: p.update(dir="relative/dir"), "dir must be an absolute path"),
+            (lambda p: p.update(id="P-0009"), "exceeds supervisor.last_project_number"),
+            (lambda p: p["manager"].update(intended_state="gone"), "invalid intended_state"),
+            (lambda p: p["manager"].update(last_report={"message_ref": "x", "status": "done", "summary": "", "at": NOW}), "manager.last_report"),
+            (lambda p: p.update(user_actions=[{"id": "UA-0900", "description": "x", "proposal": {"title": "t"}}]), "proposal must be"),
+        ):
+            state = self.cand()
+            mutate(state["projects"][0])
+            self.assertRegex("; ".join(st.validate(state)), pattern)
+        state = self.cand()
+        state["projects"].append(copy.deepcopy(state["projects"][0]))
+        self.assertRegex("; ".join(st.validate(state)), "duplicate project ids")
+
+    def test_project_id_must_name_an_open_project(self):
+        state = self.cand()
+        find(state["tasks"], "T-0020")["project_id"] = "P-0002"
+        self.assertIn("task T-0020: project_id P-0002 must name an open project", st.validate(state))
+        state = self.cand()
+        state["projects"][0]["close"] = {"at": NOW, "reason": "done"}
+        state["projects"][0]["manager"]["intended_state"] = "archived"
+        self.assertIn("task T-0020: project_id P-0001 must name an open project", st.validate(state))
+        state = self.cand()
+        find(state["tasks"], "T-0020")["proposal"] = {"title": "t", "text": "x", "from": "P-0002", "message_ref": "m"}
+        self.assertRegex("; ".join(st.validate(state)), "proposal.from must equal project_id")
+        state = self.cand()
+        find(state["tasks"], "T-0003")["redos"] = [{"text": "again", "at": NOW, "from": "P-0001"}]
+        self.assertRegex("; ".join(st.validate(state)), "redos belong to a project task")
+
+    def test_user_action_numbers_are_shared(self):
+        state = self.cand()
+        state["projects"][0]["user_actions"] = [{"id": "UA-0002", "description": "x", "since": NOW}]
+        self.assertRegex("; ".join(st.validate(state)), "duplicate user_action ids")
+        state["projects"][0]["user_actions"][0]["id"] = "UA-0950"
+        self.assertEqual(st.validate(state), [])
+        self.assertEqual(st._next_ua_number(state), 951)
+        actions = st.follow_up_actions(state, "T-0020", "https://github.com/o/r/pull/1",
+                                       [{"id": "review-pr", "text": "Review {label}", "done": "pr_closed"}], NOW)
+        self.assertEqual(actions[0]["id"], "UA-0951")
+
+    def test_waiting_start_action_avoids_project_numbers(self):
+        current = fixture_state()
+        add_project(current)["user_actions"] = [{"id": "UA-0950", "description": "x", "since": NOW}]
+        nongit_task(current, "T-0005", "w-0006", "/Users/handlename/notes", "archived", "idle")
+        find(current["tasks"], "T-0005")["artifacts"] = [{"kind": "file", "path": "/Users/handlename/notes/a.txt"}]
+        cand = copy.deepcopy(current)
+        find(cand["workers"], "w-0006")["observed_state"] = "archived"
+        new = st.next_state(current, cand, NOW)
+        ids = [ua["id"] for ua in find(new["tasks"], "T-0004")["user_actions"]]
+        self.assertEqual(ids, ["UA-0951"])
+
+    def test_approval_gate(self):
+        for state_, ok in (("requested", False), ("rejected", False), ("superseded", False), ("approved", True)):
+            cand = self.cand()
+            w = self.archive(cand)
+            w["review"]["state"] = state_
+            if ok:
+                st.next_state(self.current, cand, NOW)
+            else:
+                self.assertRejected(cand, r"worker w-0020: archived project worker needs an approved review of its latest report")
+        cand = self.cand()
+        self.archive(cand)["review"] = review("R-0001", "waived", reason="the user said no review")
+        st.next_state(self.current, cand, NOW)
+        cand = self.cand()
+        del self.archive(cand)["review"]
+        self.assertRejected(cand, "needs an approved review")
+
+    def test_gate_holds_for_archived_or_missing_sessions(self):
+        for observed in ("archived", "missing"):
+            cand = self.cand()
+            w = self.archive(cand)
+            w["observed_state"] = observed
+            del w["review"]
+            self.assertRejected(cand, "needs an approved review")
+
+    def test_cancel_and_replaced_by_are_exempt(self):
+        cand = self.cand()
+        find(cand["tasks"], "T-0020")["cancel"] = {"at": NOW, "reason": "stop"}
+        w = find(cand["workers"], "w-0020")
+        w["intended_state"] = "archived"
+        del w["review"]
+        st.next_state(self.current, cand, NOW)
+        cand = self.cand()
+        w = find(cand["workers"], "w-0020")
+        succ = copy.deepcopy(w)
+        succ.update(id="w-0021", session_id=None, intended_state="pending", observed_state="none", last_report=None)
+        del succ["review"]
+        cand["workers"].append(succ)
+        find(cand["tasks"], "T-0020")["worker_ids"].append("w-0021")
+        w.update(intended_state="archived", replaced_by="w-0021")
+        st.next_state(self.current, cand, NOW)
+
+    def test_gate_is_not_applied_outside_projects(self):
+        cand = self.cand()
+        find(cand["workers"], "w-0004")["intended_state"] = "archived"
+        self.assertNotRegex("; ".join(st.validate(cand)), "approved review")
+
+    def test_approval_binds_to_the_latest_report(self):
+        current = self.cand()
+        w = find(current["workers"], "w-0020")
+        w["review"]["state"] = "approved"
+        commit_artifacts(current, "T-0020")
+        push_decision(current, "T-0020")
+        w["intended_state"] = "archived"
+        self.assertEqual(st.validate(current), [])
+        cand = copy.deepcopy(current)
+        find(cand["workers"], "w-0020")["last_report"] = rep("m2", "in_progress")
+        self.assertRejected(cand, "needs an approved review of its latest report", current)
+        cand_w = find(cand["workers"], "w-0020")
+        cand_w["intended_state"], cand_w["review"]["state"] = "running", "superseded"
+        st.next_state(current, cand, NOW)
+        ext = copy.deepcopy(current)
+        ext_w = find(ext["workers"], "w-0020")
+        ext_w.update(last_report=None, observed_state="archived")
+        ext_w["review"]["message_ref"] = "external:" + NOW
+        self.assertEqual(st.validate(ext), [])
+
+    def test_push_only_waived(self):
+        cand = self.cand()
+        cand["projects"][0]["last_review_number"] = 2
+        find(cand["tasks"], "T-0020")["push_consent"] = {"text": "fix the LICENSE"}
+        w = find(cand["workers"], "w-0020")
+        w.update(delivery="push_pr")
+        w["review"] = {"id": "R-0002", "state": "waived", "at": NOW, "reason": "push-only after R-0001"}
+        st.next_state(self.current, cand, NOW)
+        bad = copy.deepcopy(cand)
+        del find(bad["workers"], "w-0020")["review"]["at"]
+        self.assertRegex("; ".join(st.validate(bad)), "review.at")
+        bad = copy.deepcopy(cand)
+        del find(bad["workers"], "w-0020")["review"]["id"]
+        self.assertRegex("; ".join(st.validate(bad)), "review.id")
+
+    def test_reuse_push_after_approval(self):
+        current = self.cand()
+        w = find(current["workers"], "w-0020")
+        w["review"]["state"], w["intended_state"] = "approved", "archived"
+        commit_artifacts(current, "T-0020")
+        push_decision(current, "T-0020")
+        find(current["tasks"], "T-0020")["push_consent"] = {"text": "push it", "message": "push it please"}
+        reuse = copy.deepcopy(current)
+        rw = find(reuse["workers"], "w-0020")
+        rw.update(delivery="push_pr", intended_state="running")
+        reuse["projects"][0]["last_review_number"] = 2
+        rw["review"] = {"id": "R-0002", "state": "waived", "at": NOW, "reason": "push-only after R-0001"}
+        reused = st.next_state(current, reuse, NOW)
+        done = copy.deepcopy(reused)
+        dw = find(done["workers"], "w-0020")
+        dw["last_report"], dw["intended_state"] = rep("m3"), "archived"
+        find(done["tasks"], "T-0020")["artifacts"][0]["url"] = "https://github.com/o/r/tree/claude/license-x1"
+        st.next_state(reused, done, NOW)
+        kept = copy.deepcopy(done)
+        find(kept["workers"], "w-0020")["review"] = review("R-0001", "approved")
+        self.assertRegex("; ".join(st.validate(kept)), "needs an approved review")
+
+    def test_pending_verdict(self):
+        state = self.cand()
+        w = find(state["workers"], "w-0020")
+        w["review"]["pending_verdict"] = {"verdict": "approve", "message_ref": "m1", "at": NOW}
+        self.assertEqual(st.validate(state), [])
+        w["review"]["pending_verdict"]["message_ref"] = "m0"
+        self.assertRegex("; ".join(st.validate(state)), "pending_verdict")
+        w["review"]["pending_verdict"]["message_ref"] = "m1"
+        w["review"]["state"] = "rejected"
+        self.assertRegex("; ".join(st.validate(state)), "pending_verdict")
+
+    def test_review_shape_and_numbers(self):
+        state = self.cand()
+        find(state["workers"], "w-0004")["review"] = review()
+        self.assertRegex("; ".join(st.validate(state)), "w-0004: review belongs to a project task worker")
+        state = self.cand()
+        del find(state["workers"], "w-0020")["review"]["message_ref"]
+        self.assertRegex("; ".join(st.validate(state)), "requested review requires message_ref")
+        state = self.cand()
+        find(state["workers"], "w-0020")["review"] = {"id": "R-0001", "state": "waived", "at": NOW}
+        self.assertRegex("; ".join(st.validate(state)), "waived review requires reason")
+        state = self.cand()
+        project_worker(state, "T-0021", "w-0021")["review"] = review()
+        self.assertRegex("; ".join(st.validate(state)), "R-0001 is also used by w-0020")
+        add_project(state, "P-0002", directory="/Users/handlename/supervisor-work/P-0002-other", last_review=1)
+        find(state["tasks"], "T-0021")["project_id"] = "P-0002"
+        self.assertEqual(st.validate(state), [])
+        state = self.cand()
+        find(state["workers"], "w-0020")["review"]["id"] = "R-0002"
+        self.assertRegex("; ".join(st.validate(state)), "exceeds last_review_number 1")
+        cand = self.cand()
+        project_worker(cand, "T-0021", "w-0021")
+        find(cand["workers"], "w-0020")["review"]["id"] = "R-0001"
+        find(cand["workers"], "w-0021")["review"] = review("R-0001")
+        del find(cand["workers"], "w-0020")["review"]
+        self.assertRejected(cand, "w-0021: a new review id must be above last_review_number 1")
+
+    def test_awaiting_manager(self):
+        state = self.cand()
+        w = find(state["workers"], "w-0020")
+        w["last_report"] = rep("m2", "awaiting_manager")
+        w["review"]["state"] = "superseded"
+        self.assertRegex("; ".join(st.validate(state)), "awaiting_since is required")
+        w["awaiting_since"] = NOW
+        self.assertEqual(st.validate(state), [])
+        other = find(state["workers"], "w-0004")
+        other["last_report"], other["awaiting_since"] = rep("m9", "awaiting_manager"), NOW
+        self.assertRegex("; ".join(st.validate(state)), "w-0004: awaiting_manager is reported only by project task workers")
+        state = self.cand()
+        find(state["workers"], "w-0020")["awaiting_since"] = NOW
+        self.assertRegex("; ".join(st.validate(state)), "awaiting_since is required exactly")
+
+    def test_nongit_cwd_must_not_overlap_project_dir(self):
+        state = self.cand()
+        nongit_task(state, "T-0030", "w-0030", PROJECT_DIR + "/sub", "pending", "none", session_id=None)
+        self.assertRegex("; ".join(st.validate(state)), "w-0030: cwd overlaps the directory of project P-0001")
+        self.assertTrue(st.cwd_busy(self.current, PROJECT_DIR))
+        self.assertTrue(st.cwd_busy(self.current, PROJECT_DIR + "/x"))
+        self.assertFalse(st.cwd_busy(self.current, "/Users/handlename/elsewhere"))
+
+    def test_project_removal_and_numbering(self):
+        cand = self.cand()
+        cand["projects"] = []
+        del find(cand["tasks"], "T-0020")["project_id"]
+        del find(cand["workers"], "w-0020")["review"]
+        self.assertRejected(cand, "project P-0001 was removed")
+        cand = self.cand()
+        cand["projects"][0]["last_review_number"] = 0
+        find(cand["workers"], "w-0020")["review"]["id"] = "R-0000"
+        self.assertRejected(cand, "last_review_number must not decrease")
+        cand = self.cand()
+        cand["supervisor"]["last_project_number"] = 0
+        cand["projects"][0]["id"] = "P-0000"
+        find(cand["tasks"], "T-0020")["project_id"] = "P-0000"
+        self.assertRejected(cand, "last_project_number must not decrease")
+        current = fixture_state()
+        current["supervisor"]["last_project_number"] = 1
+        cand = copy.deepcopy(current)
+        add_project(cand)
+        self.assertRejected(cand, "a new project id must be above last_project_number 1", current)
+
+    def test_closed_project_is_dropped_when_finished(self):
+        current = fixture_state()
+        add_project(current)
+        cand = copy.deepcopy(current)
+        p = cand["projects"][0]
+        p["close"] = {"at": NOW, "reason": "close it"}
+        p["manager"]["intended_state"] = "archived"
+        new = st.next_state(current, cand, NOW)
+        self.assertEqual(len(new["projects"]), 1)
+        cand = copy.deepcopy(new)
+        cand["projects"][0]["manager"]["observed_state"] = "archived"
+        newer = st.next_state(new, cand, NOW)
+        self.assertEqual(newer["projects"], [])
+        self.assertEqual(newer["supervisor"]["last_project_number"], 1)
+
+    def test_manager_archive_needs_close_or_gone(self):
+        cand = self.cand()
+        cand["projects"][0]["manager"]["intended_state"] = "archived"
+        self.assertRejected(cand, "the manager is archived only when")
+        cand["projects"][0]["manager"]["observed_state"] = "missing"
+        st.next_state(self.current, cand, NOW)
+
+    def test_stub_carries_project_proposal_and_redos(self):
+        cand = self.cand()
+        t = find(cand["tasks"], "T-0020")
+        t["proposal"] = {"title": "t", "text": "x", "from": "P-0001", "message_ref": "m0"}
+        t["redos"] = [{"text": "again", "at": NOW, "from": "P-0001", "review_id": "R-0001"}]
+        w = self.archive(cand)
+        w["review"]["state"], w["observed_state"] = "approved", "archived"
+        t["user_actions"] = []
+        t["artifacts"][1]["url"] = "https://github.com/o/r/commit/abc123"
+        new = st.next_state(self.current, cand, NOW)
+        stub = find(new["archived"], "T-0020")
+        self.assertEqual(stub["project"], {"id": "P-0001", "name": "Nature MCP"})
+        self.assertEqual(stub["proposal"]["title"], "t")
+        self.assertEqual(stub["redos"][0]["text"], "again")
+
+    def test_reviewing_worker_gone_keeps_task_open(self):
+        cand = self.cand()
+        find(cand["workers"], "w-0020")["observed_state"] = "archived"
+        new = st.next_state(self.current, cand, NOW)
+        self.assertEqual(find(new["tasks"], "T-0020")["status"], "needs_user")
+        cand = self.cand()
+        find(cand["workers"], "w-0020")["observed_state"] = "missing"
+        new = st.next_state(self.current, cand, NOW)
+        self.assertEqual(find(new["tasks"], "T-0020")["status"], "running")
+
+
+PROJECT_REPORT = """done.
+
+```project-report
+{body}
+```
+"""
+
+
+def project_report(**overrides):
+    body = {"project_id": "P-0001", "status": "idle", "summary": "ok", "reviews": [], "plans": [], "questions": []}
+    body.update(overrides)
+    return PROJECT_REPORT.format(body=json.dumps(body))
+
+
+class ProjectCliTest(unittest.TestCase):
+    def setUp(self):
+        self.state = fixture_state()
+        add_project(self.state, last_review=1)
+        w = project_worker(self.state)
+        w["last_report"], w["review"] = rep("m1"), review()
+
+    def actions(self, report, running=(), state=None):
+        parsed = st.parse_project_report(report, "P-0001")
+        self.assertTrue(parsed["ok"], parsed)
+        return st.plan_actions(state or self.state, "P-0001", parsed["report"], running)
+
+    def test_parse_report_awaiting_manager(self):
+        text = "```supervisor-report\n" + json.dumps({
+            "task_id": "T-0020", "worker_id": "w-0020", "status": "awaiting_manager", "summary": "asked",
+            "artifacts": {}, "blockers": ["which API?"], "next_action": ""}) + "\n```"
+        self.assertEqual(st.parse_report(text)["error"], "invalid status 'awaiting_manager'")
+        self.assertTrue(st.parse_report(text, allow_awaiting_manager=True)["ok"])
+        self.assertIn("requires at least one blocker",
+                      st.parse_report(text.replace('["which API?"]', "[]"), allow_awaiting_manager=True)["error"])
+
+    def test_parse_project_report(self):
+        self.assertTrue(st.parse_project_report(project_report(), "P-0001")["ok"])
+        for report, pattern in (
+            (project_report(reviews=[{"review_id": "R-0001", "verdict": "reject", "comment": ""}]), "reject requires a non-empty redo"),
+            (project_report(status="needs_input"), "needs_input requires at least one question"),
+            (project_report(project_id="P-0002"), "does not match"),
+            ("no block", "no project-report block"),
+            (project_report(plans=[{"kind": "redo", "text": "x"}]), "redo plan needs"),
+        ):
+            result = st.parse_project_report(report, "P-0001")
+            self.assertFalse(result["ok"])
+            self.assertRegex(result["error"], pattern)
+
+    def kinds(self, actions):
+        return [a["kind"] for a in actions]
+
+    def test_review_verdicts(self):
+        approve = project_report(reviews=[{"review_id": "R-0001", "verdict": "approve", "comment": "good"}])
+        reject = project_report(reviews=[{"review_id": "R-0001", "verdict": "reject", "comment": "", "redo": "fix x"}])
+        self.assertEqual(self.kinds(self.actions(approve)), ["approve_ok"])
+        self.assertEqual(self.kinds(self.actions(reject)), ["reject_ok"])
+        self.assertEqual(self.kinds(self.actions(approve, running=["w-0020"])), ["stale_notify"])
+        w = find(self.state["workers"], "w-0020")
+        w["review"]["stale_notified"] = "m1"
+        self.assertEqual(self.kinds(self.actions(approve, running=["w-0020"])), ["stale_silent"])
+        del w["review"]["stale_notified"]
+        w["last_report"] = rep("m2", "in_progress")
+        self.assertEqual(self.kinds(self.actions(approve)), ["stale_notify"])
+        w["observed_state"] = "archived"
+        self.assertEqual(self.kinds(self.actions(approve)), ["approve_ok"])
+        for state_ in ("superseded", "rejected", "approved", "waived"):
+            w["review"]["state"] = state_
+            self.assertEqual(self.kinds(self.actions(approve)), ["stale_silent"])
+        w["review"]["state"], w["replaced_by"] = "requested", "w-0099"
+        self.assertEqual(self.kinds(self.actions(approve)), ["stale_silent"])
+        unknown = project_report(reviews=[{"review_id": "R-0007", "verdict": "approve"}])
+        self.assertEqual(self.kinds(self.actions(unknown)), ["stale_silent"])
+
+    def test_superseded_review_drops_out(self):
+        w = find(self.state["workers"], "w-0020")
+        w["last_report"], w["awaiting_since"] = rep("m2", "awaiting_manager"), NOW
+        w["review"]["state"] = "superseded"
+        self.assertEqual(st.validate(self.state), [])
+        approve = project_report(reviews=[{"review_id": "R-0001", "verdict": "approve"}])
+        self.assertEqual(self.kinds(self.actions(approve)), ["stale_silent"])
+        self.assertIn("(none)", st.roster(self.state, "P-0001").split("### Open reviews")[1])
+        self.assertEqual([x for x in st.waits(self.state, "2026-10-17T15:00:00+09:00") if x["kind"] == "review"], [])
+
+    def test_same_review_id_in_another_project_does_not_match(self):
+        add_project(self.state, "P-0002", directory="/Users/handlename/supervisor-work/P-0002-other", last_review=1)
+        w = project_worker(self.state, "T-0021", "w-0021", pid="P-0002")
+        w["last_report"], w["review"] = rep("m5"), review(ref="m5")
+        result = st.plan_actions(self.state, "P-0002", st.parse_project_report(
+            project_report(project_id="P-0002", reviews=[{"review_id": "R-0001", "verdict": "approve"}]))["report"])
+        self.assertEqual([(a["kind"], a["worker_id"]) for a in result], [("approve_ok", "w-0021")])
+
+    def test_redo_plans(self):
+        plan = lambda **kw: project_report(plans=[dict({"kind": "redo", "task_id": "T-0020", "text": "redo it"}, **kw)])
+        self.assertEqual([(a["kind"], a.get("worker_id")) for a in self.actions(plan())], [("redo_send", "w-0020")])
+        w2 = project_worker(self.state, "T-0022", "w-0022")
+        task = find(self.state["tasks"], "T-0020")
+        task["worker_ids"].append("w-0022")
+        w2["task_id"] = "T-0020"
+        self.state["tasks"].remove(find(self.state["tasks"], "T-0022"))
+        self.assertEqual(self.kinds(self.actions(plan())), ["redo_ambiguous"])
+        self.assertEqual([(a["kind"], a.get("worker_id")) for a in self.actions(plan(worker_id="w-0022"))], [("redo_send", "w-0022")])
+        for w in (find(self.state["workers"], "w-0020"), w2):
+            w["observed_state"] = "missing"
+        self.assertEqual(self.kinds(self.actions(plan())), ["redo_start"])
+        task["redos"] = [{"text": "redo it", "at": NOW, "from": "P-0001"}]
+        self.assertEqual(self.kinds(self.actions(plan())), ["redo_dup"])
+        self.assertEqual(self.kinds(self.actions(plan(task_id="T-0003"))), ["redo_foreign"])
+        self.state["archived"].insert(0, {"id": "T-0040", "title": "old", "request": "r", "artifacts": [], "archived_at": NOW,
+                                          "project": {"id": "P-0001", "name": "Nature MCP"}})
+        self.assertEqual(self.kinds(self.actions(plan(task_id="T-0040"))), ["redo_archived"])
+        self.assertEqual(self.kinds(self.actions(plan(task_id="T-9999"))), ["redo_foreign"])
+
+    def test_proposals(self):
+        new = project_report(plans=[{"kind": "new", "title": "Add docs", "text": "write docs"},
+                                    {"kind": "new", "title": "Add docs", "text": "again"}])
+        self.assertEqual(self.kinds(self.actions(new)), ["proposal_add", "proposal_dup"])
+        self.state["projects"][0]["user_actions"] = [{"id": "UA-0900", "description": "Approve", "since": NOW,
+                                                      "proposal": {"title": "Add docs", "text": "x", "message_ref": "m"}}]
+        self.assertEqual(self.kinds(self.actions(new)), ["proposal_dup", "proposal_dup"])
+
+    def test_roster(self):
+        text = st.roster(self.state, "P-0001")
+        self.assertIn("| w-0020 | T-0020 |", text)
+        self.assertIn("| R-0001 | w-0020 | T-0020 | abc123 |", text)
+        find(self.state["workers"], "w-0020")["review"]["state"] = "rejected"
+        self.assertIn("(none)", st.roster(self.state, "P-0001").split("### Open reviews")[1])
+        add_project(self.state, "P-0002", directory="/Users/handlename/supervisor-work/P-0002-other")
+        self.assertIn("(no workers)", st.roster(self.state, "P-0002"))
+
+    def test_waits(self):
+        w = find(self.state["workers"], "w-0020")
+        w["review"]["state"] = "superseded"
+        w["last_report"], w["awaiting_since"] = rep("m2", "awaiting_manager"), "2026-10-17T11:00:00+09:00"
+        self.assertEqual(st.waits(self.state, "2026-10-17T11:29:00+09:00"), [])
+        found = st.waits(self.state, "2026-10-17T11:31:00+09:00")
+        self.assertEqual([(x["kind"], x["worker_id"]) for x in found], [("hub", "w-0020")])
+        w["observed_state"] = "running"
+        self.assertEqual(st.waits(self.state, "2026-10-17T11:31:00+09:00"), [])
+        w["observed_state"] = "idle"
+        find(self.state["tasks"], "T-0020")["user_actions"].append(
+            {"id": "UA-0900", "description": "Hub wait w-0020 (T-0020 `w-0020`): no answer", "since": NOW})
+        self.assertEqual(st.waits(self.state, "2026-10-17T11:31:00+09:00"), [])
+        find(self.state["tasks"], "T-0020")["user_actions"] = []
+        w["last_report"], w["review"] = rep("m3"), review(ref="m3")
+        del w["awaiting_since"]
+        w["review"]["at"] = "2026-10-17T11:00:00+09:00"
+        self.assertEqual(st.waits(self.state, "2026-10-17T12:59:00+09:00"), [])
+        self.assertEqual([x["kind"] for x in st.waits(self.state, "2026-10-17T13:01:00+09:00")], ["review"])
+        for state_ in ("rejected", "superseded"):
+            w["review"]["state"] = state_
+            self.assertEqual(st.waits(self.state, "2026-10-17T15:00:00+09:00"), [])
+
+    def test_manager_reconcile(self):
+        m = self.state["projects"][0]["manager"]
+        row = {"sessionId": "sess_mgr_P-0001", "startedBy": "sess_sup_01", "isRunning": False, "isArchived": False}
+        decide = lambda rows, events=None, manager=m: [d["decision"] for d in st.manager_reconcile(manager, rows, events)]
+        self.assertEqual(decide([row]), ["update"])
+        self.assertEqual(decide([row], {"last_message_ref": "mm1", "pending_approval": False}), ["update", "handle_turn"])
+        m["last_report"] = {"message_ref": "mm1", "status": "idle", "summary": "", "at": NOW}
+        self.assertEqual(decide([row], {"last_message_ref": "mm1"}), ["update"])
+        self.assertEqual(decide([row], {"pending_approval": True}), ["pending_approval", "update"])
+        self.assertEqual(decide([]), ["missing"])
+        self.assertEqual(decide([dict(row, isArchived=True)]), ["external_archive"])
+        m["previous_session_ids"] = ["sess_old"]
+        self.assertEqual(decide([row, {"sessionId": "sess_old", "startedBy": "sess_sup_01", "isArchived": False}]),
+                         ["stale_previous", "update"])
+        self.assertEqual(decide([row, {"sessionId": "sess_rogue", "startedBy": "sess_mgr_P-0001"}]),
+                         ["foreign_session", "update"])
+        self.assertEqual(decide([dict(row, isRunning=True)], {"last_message_ref": "mm9"}), ["update"])
+
+    def test_cli_commands(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "state.json"
+            path.write_text(json.dumps(self.state), encoding="utf-8")
+            msg = Path(d) / "msg.txt"
+            msg.write_text(project_report(reviews=[{"review_id": "R-0001", "verdict": "approve"}]), encoding="utf-8")
+            run = lambda *a: subprocess.run([sys.executable, str(SCRIPT), *a], capture_output=True, text=True)
+            proc = run("plan-actions", "--state", str(path), "--project", "P-0001", "--file", str(msg), "--running", "w-0020")
+            self.assertEqual(json.loads(proc.stdout)[0]["kind"], "stale_notify")
+            proc = run("parse-project-report", "--file", str(msg), "--expect-project", "P-0001")
+            self.assertEqual(proc.returncode, 0)
+            self.assertIn("| w-0020 |", run("roster", "--state", str(path), "--project", "P-0001").stdout)
+            self.assertEqual(json.loads(run("waits", "--state", str(path), "--now", NOW).stdout), [])
+            rows = Path(d) / "rows.json"
+            rows.write_text(json.dumps([]), encoding="utf-8")
+            proc = run("manager-reconcile", "--state", str(path), "--project", "P-0001", "--rows", str(rows))
+            self.assertEqual(json.loads(proc.stdout), [{"decision": "missing", "session_id": "sess_mgr_P-0001"}])
+            self.assertEqual(run("roster", "--state", str(path), "--project", "P-0009").returncode, 1)
+
+
+class ProjectReviewFixesTest(unittest.TestCase):
+    def setUp(self):
+        self.state = fixture_state()
+        add_project(self.state, last_review=1)
+        w = project_worker(self.state)
+        w["last_report"], w["review"] = rep("m1"), review()
+
+    def test_project_id_must_not_change(self):
+        cand = copy.deepcopy(self.state)
+        t = find(cand["tasks"], "T-0020")
+        del t["project_id"]
+        del find(cand["workers"], "w-0020")["review"]
+        with self.assertRaises(st.StateError) as ctx:
+            st.next_state(self.state, cand, NOW)
+        self.assertIn("task T-0020: project_id must not change", str(ctx.exception))
+
+    def test_cancelled_task_verdicts_are_silent(self):
+        find(self.state["tasks"], "T-0020")["cancel"] = {"at": NOW, "reason": "stop"}
+        report = st.parse_project_report(project_report(reviews=[{"review_id": "R-0001", "verdict": "approve"}]))["report"]
+        self.assertEqual([a["kind"] for a in st.plan_actions(self.state, "P-0001", report)], ["stale_silent"])
+        self.assertIn("(none)", st.roster(self.state, "P-0001").split("### Open reviews")[1])
+
+    def test_malformed_values_are_rejected_cleanly(self):
+        with self.assertRaises(st.StateError):
+            st.waits(self.state, "not a time")
+        bad = copy.deepcopy(self.state)
+        bad["projects"][0]["id"] = 5
+        self.assertRegex("; ".join(st.validate(bad)), "projects\\[0\\] must be an object with an id")
+        bad = copy.deepcopy(self.state)
+        find(bad["workers"], "w-0020")["review"]["id"] = 7
+        self.assertRegex("; ".join(st.validate(bad)), "review.id must be R-NNNN")
+        bad = copy.deepcopy(self.state)
+        find(bad["workers"], "w-0020")["last_report"] = "oops"
+        self.assertIn("last_report must be an object or null", "; ".join(st.validate(bad)))
+        bad = copy.deepcopy(self.state)
+        bad["projects"][0]["user_actions"] = [{"id": "UA-0900"}]
+        self.assertIn("user_action requires id and a description string", "; ".join(st.validate(bad)))
+        result = st.parse_project_report(project_report(reviews=[{"review_id": 3, "verdict": "approve"}]))
+        self.assertFalse(result["ok"])
+
+    def test_archived_foreign_session_is_not_reported(self):
+        m = self.state["projects"][0]["manager"]
+        rows = [{"sessionId": m["session_id"], "isRunning": False, "isArchived": False},
+                {"sessionId": "sess_rogue", "startedBy": m["session_id"], "isArchived": True}]
+        self.assertEqual([d["decision"] for d in st.manager_reconcile(m, rows)], ["update"])
+
+
+class ProjectGuardTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.sup = self.root / "sup"
+        self.sup.mkdir()
+        self.md = self.sup / "CLAUDE.md"
+        self.work = self.root / "work"
+        self.md.write_text(f"# Supervisor\n\n## Locations\n\n- clone_root: {self.root / 'clones'}\n- work_root: {self.work}\n", encoding="utf-8")
+        (self.sup / ".supervisor").mkdir()
+        shutil.copyfile(SCRIPT, self.sup / ".supervisor" / "state_tool.py")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = st.main(["prepare-dir", "--claude-md", str(self.md), *argv])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_hook_command(self):
+        cmd = st.guard_hook_command("/s/state_tool.py", "/p dir", "manager")
+        self.assertEqual(cmd, "python3 /s/state_tool.py guard --dir '/p dir' --role manager; [ $? -eq 3 ] && exit 2; exit 0")
+
+    def test_prepare_project_dir_and_guard_exit_codes(self):
+        dest = self.work / "P-0001-nature-mcp"
+        settings = dest / ".claude" / "settings.json"
+        code, out, _ = self.run_cli("--project", "P-0001-nature-mcp")
+        self.assertEqual((code, out), (0, f"created: {dest}\ncreated: {settings}\n"))
+        command = json.loads(settings.read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertIn("--role manager", command)
+        commit = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}, "cwd": str(dest)})
+        proc = subprocess.run(["sh", "-c", command], input=commit, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("The project manager only reads", proc.stderr)
+        read = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git log -1"}, "cwd": str(dest)})
+        self.assertEqual(subprocess.run(["sh", "-c", command], input=read, capture_output=True, text=True).returncode, 0)
+        self.assertEqual(self.run_cli("--project", "P-0001-nature-mcp")[1], f"exists: {dest}\nexists: {settings}\n")
+
+    def test_existing_hooks_are_kept(self):
+        dest = self.work / "P-0002-x"
+        settings = dest / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "true"}]}]}}))
+        code, out, _ = self.run_cli("--project", "P-0002-x")
+        self.assertEqual((code, out), (0, f"exists: {dest}\nupdated: {settings}\n"))
+        entries = json.loads(settings.read_text())["hooks"]["PreToolUse"]
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]["hooks"][0]["command"], "true")
+
+    def test_invalid_names_and_outside_root(self):
+        self.assertEqual(self.run_cli("--project", "T-0001-x")[0], 1)
+        self.assertEqual(self.run_cli("--project", "P-0001-Bad")[0], 1)
+        link = self.work / "P-0003-out"
+        self.work.mkdir()
+        link.symlink_to(self.root)
+        code, _, err = self.run_cli("--project", "P-0003-out")
+        self.assertEqual(code, 1)
+        self.assertIn("resolves outside", err)
+
+    def test_manager_block_message(self):
+        payload = {"tool_name": "Bash", "tool_input": {"command": "git push"}, "cwd": "/p"}
+        self.assertIn("The project manager only reads", st.guard_decision(payload, "/p", {}, "manager"))
+        self.assertIn("The supervisor does not change repositories", st.guard_decision(payload, "/p", {}))
+
+
+class SubcommandSurfaceTest(unittest.TestCase):
+    def test_project_subcommands_exist(self):
+        parser = st.build_parser()
+        names = set(next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction)).choices)
+        self.assertTrue({"setup", "commit", "digest", "parse-report", "guard", "prepare-dir", "check-cwd", "follow-ups",
+                         "validate-follow-ups", "version", "parse-project-report", "plan-actions", "roster", "waits",
+                         "manager-reconcile"} <= names, names)
+
+
+class ProjectRenderTest(unittest.TestCase):
+    SLOTS = "{{TASKS}}\n{{ARCHIVED}}\n{{FOOTER}}\n"
+
+    def test_golden_without_projects(self):
+        golden = (FIXTURES / "dashboard_no_projects.html").read_text(encoding="utf-8")
+        state = fixture_state()
+        self.assertEqual(st.assemble(*st.render(state, self.SLOTS)), golden)
+        state["projects"] = []
+        self.assertEqual(st.assemble(*st.render(state, self.SLOTS)), golden)
+        self.assertNotIn("pindex", st.assemble(*st.render(state, TEMPLATE)).split("<body>")[1].split("<script>")[0])
+
+    def test_project_groups(self):
+        state = fixture_state()
+        p1 = add_project(state, last_review=3)
+        p1["user_actions"] = [{"id": "UA-0900", "description": "Approve new task proposal of P-0001 (`Nature MCP`): Add docs",
+                               "since": NOW, "proposal": {"title": "Add docs", "text": "x", "message_ref": "m"}}]
+        add_project(state, "P-0002", name="<b>Other</b>", directory="/Users/handlename/supervisor-work/P-0002-other")
+        w = project_worker(state)
+        w["last_report"], w["review"] = rep("m1"), review()
+        w2 = project_worker(state, "T-0021", "w-0021")
+        w2["last_report"], w2["review"] = rep("m2"), review("R-0002", "rejected", ref="m2")
+        w3 = project_worker(state, "T-0022", "w-0022")
+        w3["last_report"], w3["awaiting_since"] = rep("m3", "awaiting_manager"), NOW
+        w3["review"] = review("R-0003", "waived", reason="push-only after R-0001")
+        w4 = project_worker(state, "T-0023", "w-0023", pid="P-0002")
+        w4["observed_state"] = "archived"
+        p2 = state["projects"][1]
+        p2["last_review_number"] = 1
+        w4["review"] = review("R-0001", ref="external:" + NOW)
+        self.assertEqual(st.validate(state), [])
+        page = st.assemble(*st.render(state, TEMPLATE))
+        self.assertEqual(page.count('<section class="project"'), 3)
+        index = page.split('<nav class="pindex"')[1].split("</nav>")[0]
+        self.assertEqual(re.findall(r'href="#(project-[^"]+)" data-jump', index), ["project-P-0001", "project-P-0002", "project-none"])
+        for anchor in ("project-P-0001", "project-P-0002", "project-none"):
+            self.assertIn(f'id="{anchor}"', page)
+        self.assertIn("P-0002 &lt;b&gt;Other&lt;/b&gt;", index)
+        self.assertIn('data-project="none"', page)
+        self.assertIn('manager <a href="#local_sess_mgr_P-0001">P-0001 Nature MCP</a> <code>sess_mgr_P-0001</code>', page)
+        self.assertIn('href="https://github.com/org/repo/issues/1"', page)
+        self.assertIn("Add docs", page)
+        for chip in ("review", "rejected", "review waived"):
+            self.assertIn(f'data-state="{chip}"', page)
+        self.assertIn('data-report="awaiting_manager"', page)
+        self.assertIn("is waiting for review R-0001 of the project manager", page)
+        self.assertNotIn("its results need checking", page.split('data-project="P-0002"')[1].split("</section>")[0])
+        self.assertIn("&lt;b&gt;Other&lt;/b&gt;", page)
+        self.assertNotIn("<b>Other</b>", page)
+
+    def test_archived_stub_shows_project(self):
+        state = fixture_state()
+        state["archived"][0]["project"] = {"id": "P-0001", "name": "Nature MCP"}
+        page = st.assemble(*st.render(state, TEMPLATE))
+        self.assertIn('<span class="id">P-0001</span>', page)
+
+    def test_digest_projects(self):
+        plain = st.digest(fixture_state(), "/s/state.json")
+        self.assertNotIn("projects:", plain)
+        state = fixture_state()
+        add_project(state, last_review=1)["user_actions"] = [{"id": "UA-0900", "description": "Answer it", "since": NOW}]
+        w = project_worker(state)
+        w["last_report"], w["review"] = rep("m1"), review()
+        text = st.digest(state, "/s/state.json")
+        self.assertIn("- P-0001 Nature MCP | manager sess_mgr_P-0001 idle | doc https://github.com/org/repo/issues/1 | open reviews: R-0001 | tasks: T-0020", text)
+        self.assertIn("- P-0001 UA-0900: Answer it", text)
+        self.assertIn("- [P-0001] T-0020 [", text)
+        self.assertLess(text.index("\nprojects:"), text.index("\ntasks:"))
+
+
+
+def investigation_task(state, task_id, worker_id, kind="non-git", cwd="/data/inv"):
+    if kind == "git":
+        git_task(state, task_id, worker_id)
+    else:
+        nongit_task(state, task_id, worker_id, cwd, "running", "idle", session_id="sess_" + worker_id)
+    task = find(state["tasks"], task_id)
+    task["investigation"] = True
+    return task
+
+
+def finding(wid, ref="m1", summary="Cause: retry is skipped on 429"):
+    return {"worker_id": wid, "session_id": "sess_" + wid, "title": f"T-0090|{wid} survey",
+            "summary": summary, "message_ref": ref, "at": NOW}
+
+
+def read_action(wid, ua_id="UA-0200"):
+    return {"id": ua_id, "since": NOW,
+            "description": f"Read the result of {wid} (T-0090|{wid} survey) in its session, then tell me or the worker that you have read it"}
+
+
+class InvestigationTest(unittest.TestCase):
+    def setUp(self):
+        self.current = fixture_state()
+
+    def assertRejected(self, candidate, pattern, current=None):
+        with self.assertRaises(st.StateError) as ctx:
+            st.next_state(current or self.current, candidate, NOW)
+        self.assertRegex(str(ctx.exception), pattern)
+
+    def assertInvalid(self, state, pattern):
+        errors = st.validate(state)
+        self.assertTrue(any(re.search(pattern, e) for e in errors), errors)
+
+    def held(self, kind="non-git"):
+        """An investigation worker verified and held for reading: findings, a read action, still running."""
+        state = fixture_state()
+        task = investigation_task(state, "T-0090", "w-0090", kind)
+        w = find(state["workers"], "w-0090")
+        if kind == "git":
+            commit_artifacts(state, "T-0090")
+            w["session_id"] = "sess_w-0090"
+        else:
+            task["artifacts"] = [{"kind": "file", "label": "notes", "path": "/data/inv/report.md"}]
+        w["last_report"] = rep("m1")
+        task["findings"] = [finding("w-0090")]
+        task["user_actions"] = [read_action("w-0090")]
+        return state
+
+    # Stage 1: recording and carry-over
+
+    def test_findings_invariants(self):
+        state = fixture_state()
+        investigation_task(state, "T-0090", "w-0090")["findings"] = [finding("w-0090")]
+        self.assertEqual(st.validate(state), [])
+        named = "findings w-0090 must name a worker of an investigation task by its session_id, once"
+        shape = "findings must be a list of"
+        for mutate, pattern in (
+            (lambda t: t.pop("investigation"), named),
+            (lambda t: t["findings"][0].update(session_id="sess_other"), named),
+            (lambda t: t["findings"][0].update(worker_id="w-0999"), "findings w-0999 must name"),
+            (lambda t: t["findings"].append(finding("w-0090")), named),
+            (lambda t: t["findings"][0].pop("message_ref"), shape),
+            (lambda t: t["findings"][0].update(summary=""), shape),
+            (lambda t: t.update(findings="x"), shape),
+            (lambda t: t.update(investigation="yes"), "investigation must be true when present"),
+        ):
+            bad = copy.deepcopy(state)
+            mutate(find(bad["tasks"], "T-0090"))
+            self.assertInvalid(bad, pattern)
+        stub = {"id": "T-0091", "title": "old", "request": "x", "artifacts": [], "archived_at": NOW,
+                "investigation": True, "findings": [finding("w-0999")]}
+        state["archived"].insert(0, stub)
+        self.assertEqual(st.validate(state), [])
+        stub["findings"][0]["title"] = ""
+        self.assertInvalid(state, r"archived T-0091: findings must be a list of")
+
+    def test_findings_and_investigation_carried_into_stub_and_concatenated(self):
+        investigation_task(self.current, "T-0090", "w-0090")
+        cand = copy.deepcopy(self.current)
+        task = find(cand["tasks"], "T-0090")
+        task["no_result"], task["findings"] = [no_result("w-0090")], [finding("w-0090")]
+        find(cand["workers"], "w-0090").update(intended_state="archived", observed_state="archived")
+        new = st.next_state(self.current, cand, NOW)
+        stub = find(new["archived"], "T-0090")
+        self.assertEqual((stub["investigation"], stub["findings"]), (True, [finding("w-0090")]))
+
+        investigation_task(new, "T-0090", "w-0091")
+        cand = copy.deepcopy(new)
+        task = find(cand["tasks"], "T-0090")
+        task["no_result"], task["findings"] = [no_result("w-0091")], [finding("w-0091", "m2")]
+        find(cand["workers"], "w-0091").update(intended_state="archived", observed_state="archived")
+        new = st.next_state(new, cand, NOW)
+        self.assertEqual(find(new["archived"], "T-0090")["findings"], [finding("w-0090"), finding("w-0091", "m2")])
+
+        nongit_task(self.current, "T-0092", "w-0092", "/data/plain", "running", "idle")
+        cand = copy.deepcopy(self.current)
+        find(cand["tasks"], "T-0092")["no_result"] = [no_result("w-0092")]
+        find(cand["workers"], "w-0092").update(intended_state="archived", observed_state="archived")
+        stub = find(st.next_state(self.current, cand, NOW)["archived"], "T-0092")
+        self.assertNotIn("findings", stub)
+        self.assertNotIn("investigation", stub)
+
+    def test_read_confirmed_in_report_and_last_report(self):
+        def parse(status, **extra):
+            report = dict({"task_id": "T-1", "worker_id": "w-1", "status": status, "summary": "s", "artifacts": {},
+                           "blockers": [], "next_action": ""}, **extra)
+            return st.parse_report("```supervisor-report\n" + json.dumps(report) + "\n```")
+        self.assertTrue(parse("done", read_confirmed=True)["ok"])
+        self.assertTrue(parse("done", read_confirmed=False)["ok"])
+        self.assertTrue(parse("done")["ok"])
+        self.assertEqual(parse("done", read_confirmed="true")["error"], "read_confirmed must be a boolean")
+        self.assertEqual(parse("in_progress", read_confirmed=True)["error"], "read_confirmed is allowed only with status done")
+
+        state = self.held()
+        w = find(state["workers"], "w-0090")
+        w["last_report"]["read_confirmed"] = True
+        self.assertEqual(st.validate(state), [])
+        w["last_report"]["read_confirmed"] = "true"
+        self.assertInvalid(state, "w-0090: last_report read_confirmed must be a boolean")
+        w["last_report"].update(read_confirmed=True, status="in_progress")
+        self.assertInvalid(state, "w-0090: last_report read_confirmed is allowed only with status done")
+
+    def test_derived_from_shape(self):
+        state = fixture_state()
+        nongit_task(state, "T-0093", "w-0093", "/data/fix", "running", "idle")
+        task = find(state["tasks"], "T-0093")
+        task["derived_from"] = {"task_id": "T-0001-gone", "context": "Investigated: retry is skipped on 429"}
+        self.assertEqual(st.validate(state), [])
+        for value in ({"task_id": "T-0090"}, {"task_id": "", "context": "c"}, "T-0090", []):
+            task["derived_from"] = value
+            self.assertInvalid(state, "task T-0093: derived_from must be {task_id, context} with non-empty strings")
+
+    def test_card_shows_finding_link_and_summary_only_when_different(self):
+        state = self.held()
+        nongit_task(state, "T-0094", "w-0094", "/data/other", "running", "idle")
+        find(state["workers"], "w-0090")["last_report"]["summary"] = "Cause: retry is skipped on 429"
+        page = st.assemble(*st.render(state, TEMPLATE))
+        card = task_card(page, "T-0090")
+        self.assertIn('<a href="#local_sess_w-0090">T-0090|w-0090 survey</a> <code>sess_w-0090</code>', card)
+        self.assertNotIn("finding__summary", card)
+        self.assertNotIn('class="finding"', task_card(page, "T-0094"))
+
+        find(state["tasks"], "T-0090")["findings"][0]["summary"] = "Cause: <retry> is skipped"
+        card = task_card(st.assemble(*st.render(state, TEMPLATE)), "T-0090")
+        self.assertIn('<p class="finding__summary">Cause: &lt;retry&gt; is skipped</p>', card)
+
+    def test_archived_stub_shows_finding_and_no_duplicate_no_result_note(self):
+        state = fixture_state()
+        state["archived"].insert(0, {"id": "T-0091", "title": "old survey", "request": "x", "artifacts": [], "archived_at": NOW,
+                                     "investigation": True, "findings": [finding("w-0090", summary="Cause: <x>")],
+                                     "no_result": [no_result("w-0090"), no_result("w-0089", "other worker note")]})
+        page = st.assemble(*st.render(state, TEMPLATE))
+        start = page.rindex('<li class="arc"', 0, page.index(">T-0091</button>"))
+        stub = page[start:page.index("</li>", start)]
+        self.assertIn(st._chip("no result"), stub)
+        self.assertNotIn("investigated only, nothing kept", stub)
+        self.assertIn("other worker note", stub)
+        self.assertIn('<a href="#local_sess_w-0090">T-0090|w-0090 survey</a>', stub)
+        self.assertIn('<p class="finding__summary">Cause: &lt;x&gt;</p>', stub)
+
+    # Stage 2: holding for the read confirmation
+
+    def test_hold_after_verification_derives_needs_user(self):
+        state = self.held()
+        new = st.next_state(fixture_state(), state, NOW)
+        self.assertEqual(find(new["tasks"], "T-0090")["status"], "needs_user")
+        self.assertEqual(find(new["workers"], "w-0090")["intended_state"], "running")
+
+    def test_hold_with_no_result_and_fail_closed(self):
+        state = self.held("git")
+        task = find(state["tasks"], "T-0090")
+        task["artifacts"], task["no_result"] = [], [no_result("w-0090")]
+        st.next_state(fixture_state(), state, NOW)
+        task["user_actions"] = []
+        self.assertRejected(state, "no_result w-0090 must name an archived, non-replaced worker of the task once",
+                            current=fixture_state())
+
+    def test_read_action_invariants(self):
+        pattern = "read action for w-0090 needs a live"
+        base = self.held()
+        self.assertEqual(st.validate(base), [])
+        other = copy.deepcopy(base)
+        # w-0090 has a findings entry here too, so the read action fails on task membership alone.
+        investigation_task(other, "T-0095", "w-0095", cwd="/data/inv2")["findings"] = [finding("w-0095"), finding("w-0090")]
+        find(other["tasks"], "T-0095")["user_actions"] = [read_action("w-0090", "UA-0201")]
+        self.assertInvalid(other, pattern)
+        for mutate in (
+            lambda s: find(s["tasks"], "T-0090").pop("investigation"),
+            lambda s: find(s["tasks"], "T-0090").update(findings=[]),
+            lambda s: find(s["tasks"], "T-0090")["user_actions"].append(read_action("w-0090", "UA-0201")),
+            lambda s: find(s["workers"], "w-0090").update(intended_state="archived"),
+            lambda s: find(s["workers"], "w-0090").update(observed_state="archived"),
+            lambda s: find(s["workers"], "w-0090").update(observed_state="missing"),
+        ):
+            bad = copy.deepcopy(base)
+            mutate(bad)
+            self.assertInvalid(bad, pattern)
+
+        state = fixture_state()
+        add_project(state, last_review=1)
+        project_worker(state, "T-0090", "w-0090")
+        task = find(state["tasks"], "T-0090")
+        commit_artifacts(state, "T-0090")
+        task.update(investigation=True, findings=[finding("w-0090")], user_actions=[read_action("w-0090")])
+        w = find(state["workers"], "w-0090")
+        w["last_report"] = rep("m1")
+        for review_state, ok in (("requested", False), ("approved", True)):
+            w["review"] = review(state=review_state)
+            if ok:
+                self.assertEqual(st.validate(state), [])
+            else:
+                self.assertInvalid(state, pattern)
+        w["review"] = review(state="waived", reason="Review not needed")
+        self.assertEqual(st.validate(state), [])
+
+    def test_resolution_archives_and_requires_push_decision_for_unpushed_commit(self):
+        current = self.held()
+        cand = copy.deepcopy(current)
+        find(cand["tasks"], "T-0090")["user_actions"] = []
+        find(cand["workers"], "w-0090")["intended_state"] = "archived"
+        new = st.next_state(current, cand, NOW)
+        cand = copy.deepcopy(new)
+        find(cand["workers"], "w-0090")["observed_state"] = "archived"
+        new = st.next_state(new, cand, NOW)
+        self.assertEqual(find(new["archived"], "T-0090")["findings"], [finding("w-0090")])
+
+        current = self.held("git")
+        cand = copy.deepcopy(current)
+        find(cand["tasks"], "T-0090")["user_actions"] = []
+        find(cand["workers"], "w-0090")["intended_state"] = "archived"
+        self.assertRejected(cand, "commit delivery archive requires a push-decision user_action", current=current)
+        push_decision(cand, "T-0090")
+        st.next_state(current, cand, NOW)
+
+    def test_held_missing_worker_finishes_task(self):
+        current = self.held()
+        cand = copy.deepcopy(current)
+        find(cand["tasks"], "T-0090")["user_actions"] = []
+        find(cand["workers"], "w-0090").update(intended_state="archived", observed_state="missing")
+        new = st.next_state(current, cand, NOW)
+        self.assertNotIn("T-0090", [t["id"] for t in new["tasks"]])
+        self.assertEqual(find(new["archived"], "T-0090")["findings"], [finding("w-0090")])
+
+        cand = copy.deepcopy(current)
+        task = find(cand["tasks"], "T-0090")
+        task["user_actions"], task["findings"] = [], []
+        find(cand["workers"], "w-0090").update(intended_state="archived", observed_state="missing")
+        self.assertEqual(find(st.next_state(current, cand, NOW)["tasks"], "T-0090")["status"], "needs_user")
+
+    def test_project_hold_review_cycle(self):
+        current = fixture_state()
+        add_project(current, last_review=1)
+        project_worker(current, "T-0090", "w-0090")
+        commit_artifacts(current, "T-0090")
+        task = find(current["tasks"], "T-0090")
+        task.update(investigation=True, findings=[finding("w-0090")], user_actions=[read_action("w-0090")])
+        w = find(current["workers"], "w-0090")
+        w["last_report"], w["review"] = rep("m1"), review(state="approved")
+        self.assertEqual(st.validate(current), [])  # (a)
+
+        # (b) a later done returns to review: a new id, and the read action leaves with it.
+        cand = copy.deepcopy(current)
+        cand["projects"][0]["last_review_number"] = 2
+        cw = find(cand["workers"], "w-0090")
+        cw["last_report"], cw["review"] = rep("m2"), review("R-0002", "requested", "m2")
+        self.assertRejected(cand, "read action for w-0090 needs a live", current=current)
+        find(cand["tasks"], "T-0090")["user_actions"] = []
+        st.next_state(current, cand, NOW)
+
+        def resolve(review_value, observed):
+            cand = copy.deepcopy(current)
+            find(cand["tasks"], "T-0090")["user_actions"] = []
+            push_decision(cand, "T-0090")
+            cw = find(cand["workers"], "w-0090")
+            cw.update(last_report=rep("m2"), review=review_value, intended_state="archived", observed_state=observed)
+            return cand
+
+        # (c) archiving on an approval of an older report fails the approval gate.
+        self.assertRejected(resolve(review(state="approved"), "archived"),
+                            "archived project worker needs an approved review of its latest report", current=current)
+        # (d) closing the held session waives the same review id, so only the approved findings reach the stub.
+        reason = "session closed while holding R-0001; later turns were not reviewed"
+        for observed in ("archived", "missing"):
+            cand = resolve(review(state="waived", reason=reason), observed)
+            ctask = find(cand["tasks"], "T-0090")
+            ctask["user_actions"] = []
+            ctask["artifacts"][1]["url"] = "https://github.com/org/repo-a/commit/abc123"
+            new = st.next_state(current, cand, NOW)
+            self.assertEqual(find(new["archived"], "T-0090")["findings"], [finding("w-0090")])
 
 
 if __name__ == "__main__":
