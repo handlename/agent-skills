@@ -5318,11 +5318,6 @@ class VerifyFixesTest(unittest.TestCase):
         self.env.add_task("T-0020", "w-0020", U1)
         self.env.save()
 
-    def chat_task(self, cand, task_id, uid):
-        git_task(cand, task_id, "w-" + task_id[2:])
-        find(cand["workers"], "w-" + task_id[2:]).update(cwd=f"/repo/{task_id}", intended_state="pending", observed_state="none", session_id=None)
-        to_v2(find(cand["tasks"], task_id), "tasks", uid)
-
     def create(self, uid, title):
         return {"op": "create", "uid": uid, "title": title, "kind": "task", "status": "backlog", "assignee": "user", "request": title}
 

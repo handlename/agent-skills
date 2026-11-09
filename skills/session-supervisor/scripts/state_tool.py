@@ -2245,6 +2245,11 @@ def parse_artifacts(section_text):
     return sorted(items, key=lambda a: (a["g"], a["n"])), problems
 
 
+def _group_incomplete(kinds):
+    """True when a branch in the group's kinds is not directly followed by a commit."""
+    return any(k == "branch" and kinds[j + 1:j + 2] != ["commit"] for j, k in enumerate(kinds))
+
+
 def artifacts_view(items, art_from=None):
     """v1 artifacts of the items numbered art_from or later, in (g, n) order. A group whose branch is not directly
     followed by a commit is incomplete and left out whole."""
@@ -2255,7 +2260,7 @@ def artifacts_view(items, art_from=None):
     view = []
     for members in groups.values():
         kinds = [m["kind"] for m in members]
-        if any(k == "branch" and kinds[j + 1:j + 2] != ["commit"] for j, k in enumerate(kinds)):
+        if _group_incomplete(kinds):
             continue
         view += [{k: m[k] for k in ART_FIELDS if k in m} for m in members]
     return view
@@ -2519,8 +2524,7 @@ def apply_note_ops(text, ops, now, rev):
 
 
 def _ua_number(ua_id):
-    m = UA_ID_RE.match(ua_id) if isinstance(ua_id, str) else None
-    return int(m.group(1)) if m else 0
+    return _id_number(UA_ID_RE, ua_id) or 0
 
 
 def _note_view(text):
@@ -2846,7 +2850,7 @@ def artifact_needs(view_task, workers, items):
                 needs.append(f"{ua['id']} の対象 {w['id']} の branch {w.get('branch')} と直後の commit")
     for g in sorted({i["g"] for i in rows}):
         kinds = [i["kind"] for i in rows if i["g"] == g]
-        if any(k == "branch" and kinds[j + 1:j + 2] != ["commit"] for j, k in enumerate(kinds)):
+        if _group_incomplete(kinds):
             needs.append(f"グループ {g} の branch の直後の commit")
     return needs
 
@@ -2927,16 +2931,22 @@ V2_RUNTIME_KEYS = ("uid", "note", "note_seen", "user_hold", "confirmed", "held",
                    "artifacts_quarantine", "done_proposed")
 
 
+def _free_uid(t, taken):
+    """The note uid of time t, one second later while taken."""
+    while t.strftime("%Y%m%d_%H%M%S") in taken:
+        t += timedelta(seconds=1)
+    return t.strftime("%Y%m%d_%H%M%S")
+
+
 def _uid_at(iso, taken, fallback):
     """A note uid from an ISO time (its own clock, offset ignored), one second later while taken."""
     try:
         t = datetime.strptime((iso or "")[:19], "%Y-%m-%dT%H:%M:%S")
     except ValueError:
         t = datetime.strptime(fallback[:19], "%Y-%m-%dT%H:%M:%S")
-    while t.strftime("%Y%m%d_%H%M%S") in taken:
-        t += timedelta(seconds=1)
-    taken.add(t.strftime("%Y%m%d_%H%M%S"))
-    return t.strftime("%Y%m%d_%H%M%S")
+    uid = _free_uid(t, taken)
+    taken.add(uid)
+    return uid
 
 
 def _migrated_ua(ua):
@@ -2946,7 +2956,10 @@ def _migrated_ua(ua):
     follow_up = ua.get("follow_up")
     if follow_up:
         item.update(rule=follow_up.get("rule"), url=follow_up.get("url"))
-        item.update(kind="auto", detector="pr_closed") if follow_up.get("done") == "pr_closed" else item.update(kind="ask")
+        if follow_up.get("done") == "pr_closed":
+            item.update(kind="auto", detector="pr_closed")
+        else:
+            item["kind"] = "ask"
         return item
     for pattern, kind, detector in MIGRATE_UA_RULES:
         if pattern.search(item["description"]):
@@ -2982,7 +2995,7 @@ def _migrated_note(uid, title, kind, status, assignee, at, request, rev, parent=
     return set_props(text, dates) if dates else text
 
 
-def migrate_v2(state, now, taken=()):
+def migrate_v2(state, now):
     """(state_v2, note_creates) for a v1 state (3.3, 3.9 migration). note_creates are {uid, path, text}. Every live
     task, project and stub gets a note (a revived task and its stub share one); project proposal user actions become
     backlog/user task notes under the project; read user actions become held. The result is deterministic: now is used
@@ -2992,7 +3005,7 @@ def migrate_v2(state, now, taken=()):
     errors = validate(state)
     if errors:
         raise StateError(errors)
-    out, taken, creates, rev = copy.deepcopy(state), set(taken), [], state["rev"]
+    out, taken, creates, rev = copy.deepcopy(state), set(), [], state["rev"]
     at_now = state.get("updated_at") or now
     workers_by_id = {w["id"]: w for w in state["workers"]}
     stubs = {s["id"]: s for s in state["archived"]}
@@ -3654,7 +3667,7 @@ def _commit_v2(args, current, html_path, template):
         given = next((o.get("path") for o in ops if o.get("op") == "assign_uid"), None)
         if given in texts:
             paths[uid] = given
-        elif any(o.get("op") == "create" for o in ops):
+        elif creates:
             paths[uid] = _new_note_path(uid)
         else:
             raise StateError(f"note {uid} not found in {vault}")
@@ -4277,10 +4290,7 @@ def _scan_ctx(kind, item, view_item, workers, live, duplicate, items):
 
 def _proposed_uid(path, taken):
     st_ = os.stat(path)
-    t = datetime.fromtimestamp(getattr(st_, "st_birthtime", st_.st_mtime))
-    while t.strftime("%Y%m%d_%H%M%S") in taken:
-        t += timedelta(seconds=1)
-    return t.strftime("%Y%m%d_%H%M%S")
+    return _free_uid(datetime.fromtimestamp(getattr(st_, "st_birthtime", st_.st_mtime)), taken)
 
 
 def notes_scan(state, texts, uids, vault=None):
@@ -4333,8 +4343,13 @@ def notes_scan(state, texts, uids, vault=None):
         props, body_text, _ = parse_frontmatter(text)
         uid = props.get("uid") if isinstance(props.get("uid"), str) and props.get("uid") else None
         tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]
-        kind = "project" if "project" in tags else "task" if "task" in tags else None
-        if uid in managed or kind is None:
+        if "project" in tags:
+            kind = "project"
+        elif "task" in tags:
+            kind = "task"
+        else:
+            continue
+        if uid in managed:
             continue
         cur = note_values(text)
         if uid and _former_note(props, body_text):
