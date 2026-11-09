@@ -1195,7 +1195,7 @@ def parse_report(text, expect_task=None, expect_worker=None):
 
 
 def _strip_ignored(lines):
-    """Blank out fenced blocks and HTML comments, keeping line numbers. Copied from secretary's state_tool.py."""
+    """Blank out fenced blocks and HTML comments, keeping line numbers."""
     out, fence, in_comment = [], None, False
     for line in lines:
         if fence is None and not in_comment:

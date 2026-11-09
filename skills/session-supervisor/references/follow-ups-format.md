@@ -33,7 +33,7 @@ With this rule, a verified PR `https://github.com/org/repo-a/pull/42` gets the u
 
 - `{label}`: the `label` of the `pr` artifact when it is a non-empty string. Otherwise, for a URL of the form `https://<host>/<owner>/<repo>/pull/<n>`, `<owner>/<repo>#<n>`. Otherwise the URL itself. Artifacts recorded from reports have no `label`, so `{label}` is normally `<owner>/<repo>#<n>`.
 - `{url}`: the PR URL.
-- Prefer a short `text` without `{url}`, such as `Review {label}`. The secretary shows at most 60 characters of the description in its paste text, and a long URL would be cut.
+- Prefer a short `text` without `{url}`, such as `Review {label}`.
 
 ## Errors
 
@@ -73,4 +73,4 @@ This mode does not compare with `state.json`, so it also re-adds follow-ups the 
 ## Completing follow-ups
 
 - `pr_closed`: at the start of a turn that begins with the user's message, the supervisor asks one `pr-state` observer for the state of every such PR and removes those reported `MERGED` or `CLOSED` ([observer-brief.md](observer-brief.md)).
-- Any follow-up: the user names it as done in the supervisor's chat, for example by pasting the secretary's text `T-0003 UA-0003 ("Review repo-a#42"): done`.
+- Any follow-up: the user names it as done in the supervisor's chat, for example `T-0003 UA-0003 ("Review repo-a#42"): done`.

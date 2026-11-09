@@ -1,5 +1,0 @@
-Recorded the decision in the inbox note.
-
-```secretary-report
-{"source_id": "obsidian", "mode": "relay", "status": "done", "summary": "inbox#12 marked as decided", "blockers": []}
-```

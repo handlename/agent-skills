@@ -18,53 +18,8 @@ A personal collection of custom AI Agent Skills compatible with `gh skill instal
 | `multirepo` | Investigate or edit multiple already-cloned local git repositories in parallel. Fires on a `multirepo: <repo1>, <repo2>, ...` declaration; the main session orchestrates one `multirepo-worker` sub-agent per repo (dispatch and result aggregation only), creating worktrees for edits and leaving commits/PRs to other skills. | `gh skill install handlename/agent-skills multirepo` | Claude Code |
 | `plan-to-issue` | Turn a finalized implementation plan or design into a GitHub tracking issue, with a big-picture diagram posted as an SVG image (drawn via `mermaid-to-svg` and attached via `github-attachment-upload` after the issue/comment is posted, mermaid source kept in a collapsed details block, falling back to an inline mermaid block), a PR-granularity checklist (TASK- IDs), plus a self-contained comment that lets a context-less person or agent start implementing. | `gh skill install handlename/agent-skills plan-to-issue` | Claude Code, Copilot, Gemini CLI, Cursor |
 | `runbook-execution-support` | Support a human operator through a runbook written in a GitHub issue comment: present each step, pre-check the target state, verify the result with evidence, post progress to a Slack thread (bold state heading, `[#number title](URL)` links), and tick the runbook/progress checklists with exact-match edits. The human performs every state-changing action. | `gh skill install handlename/agent-skills runbook-execution-support` | Claude Code, Copilot, Gemini CLI, Cursor |
-| `secretary` | Run a resident secretary session in the Claude desktop app (Code tab) that collects today's tasks and pending decisions from the `session-supervisor` `state.json` (read-only) and from external agents listed under `## Sources` in its `CLAUDE.md` (queried by a fresh session per expired interval, reporting a `secretary-report` block), keeps due dates in its own validated `state.json` that survives compaction, and publishes one dashboard artifact ordered by due date with overdue items highlighted. Answers are relayed with the user's verbatim words: paste text for the supervisor (the secretary never messages it) or a relay session for external sources. | `gh skill install handlename/agent-skills secretary` | Claude Code (desktop app) |
 | `session-supervisor` | Run a supervisor session in the Claude desktop app (Code tab) that governs worker sessions: the user gives tasks to the supervisor and answers a worker's questions in that worker's session, which starts a worker per task (a git worktree, or one session per non-git directory), tracks every task in a single-writer `state.json` that survives context compaction (re-injected by a `SessionStart` hook), auto-archives workers once their deliverables are verified on a committed branch or as recorded files, or once a worker the user declared complete is verified to have kept nothing (shown as "no result" with its summary), or when the user cancels the task, and publishes a dashboard artifact rendered from that state (user actions first, per-task progress with links to branches/PRs, recently archived tasks). Push/PR only on explicit consent in the task request or a later message, or on the user's own instruction inside a worker session, always carried out by a worker. The supervisor itself never edits, commits, or pushes: observation goes to subagents, and a PreToolUse hook installed by setup blocks out-of-directory edits and mutating git / jj / gh. | `gh skill install handlename/agent-skills session-supervisor` | Claude Code (desktop app) |
 | `setup-tagpr` | Set up [tagpr](https://github.com/Songmu/tagpr) for automated release management: creates and updates release pull requests for unreleased items, tags them on merge, and creates GitHub Releases. Covers goreleaser (Go) and TypeScript/Node.js projects. | `gh skill install handlename/agent-skills setup-tagpr` | Claude Code, Copilot, Gemini CLI, Cursor |
-
-## Session orchestration: supervisor and secretary
-
-`session-supervisor` and `secretary` both run as resident sessions in the Claude desktop app, each in its own non-git directory.
-They split work by ownership: **the supervisor owns the tasks the user gives it directly (running and verifying them, and the follow-up tasks left for the user once they are verified); the secretary owns the collection and due dates of decisions that other agents (the supervisor and external agents) are waiting on, and of the supervisor's follow-up tasks.**
-A relay only delivers the user's answer; it never moves ownership of the work.
-
-<!-- Source: docs/session-orchestration.mmd (mermaid). Regenerate the SVG with the mermaid-to-svg skill after editing it. -->
-![Relationship between session-supervisor and secretary](docs/session-orchestration.svg)
-
-| | `session-supervisor` | `secretary` |
-| :--- | :--- | :--- |
-| Owns | Splitting the user's tasks by directory, starting workers, verifying (through subagents) committed branches or recorded files, archiving workers, follow-up tasks for the user (created by `## Follow-ups` rules, removed on the observed PR state or the user's report), its own `state.json` and dashboard | Merging pending decisions and follow-up tasks from the supervisor and external sources, their due dates, relaying the user's verbatim answers, its own `state.json` and dashboard |
-| Never does | Responding to or coordinating with the secretary | Writing the supervisor's `state.json` or directory, messaging the supervisor, owning the work behind a decision |
-
-### Interaction rules
-
-- The dependency is one-way: the secretary depends on the supervisor, and the supervisor works the same with or without a secretary.
-- The secretary opens the supervisor's `state.json` read-only and turns each `tasks[].user_actions[]` entry into a pending decision, or into an entry under "Your tasks" when it carries `follow_up`.
-- The secretary never messages the supervisor. A supervisor decision is answered by pasting the secretary's paste text into the supervisor chat, or by an operation in the app.
-- Before starting a relay session in a source directory, the secretary checks that the directory does not overlap a running non-git worker of the supervisor (busy check).
-- The secretary directory must not be, contain, or sit inside the supervisor directory.
-- Follow-ups: the supervisor adds a follow-up user action (e.g. "Review repo-a#42") for each newly verified PR by the `## Follow-ups` rules in its `CLAUDE.md`, and removes it when an observer reports the PR merged or closed (`done: pr_closed`) or when the user reports it done. The secretary lists follow-ups under "Your tasks" by due date; completion goes back as paste text, e.g. `T-0003 UA-0003 ("Review repo-a#42"): done`.
-- The supervisor's `state.json` fields and user-action wording are the secretary's input contract; see [Read by the secretary](skills/session-supervisor/references/state-schema.md#read-by-the-secretary).
-
-### Which one to ask
-
-| Request | Ask |
-| :--- | :--- |
-| "Refactor repos A and B" | Supervisor: a task the user gives directly |
-| "Show today's pending decisions by due date" | Secretary: collecting decisions others are waiting on |
-| "Set a due date on a pending decision" | Secretary: due dates are its own data |
-| "Answer the question a worker is asking" | The worker that asks, in its own session: the supervisor and the secretary only point you there |
-
-### Where a new feature belongs
-
-| Feature idea | Belongs to |
-| :--- | :--- |
-| Automatic retry of a failed worker | Supervisor: running the task |
-| Reminders for decisions close to their due date | Secretary: due-date management |
-| A new kind of external source | Secretary: collecting decisions |
-| Watching CI of a PR a worker opened, before archiving the worker | Supervisor: verifying the task's result |
-| A new kind of follow-up (e.g. after a merged PR, or a new `done` condition) | Supervisor: the `## Follow-ups` rules; the secretary only shows them under "Your tasks" |
-
 
 ## Plugins
 
@@ -94,7 +49,6 @@ All skills listed under [Available Skills](#available-skills) are bundled into a
 | `persona-mimic-trainer` | skill | Train and iteratively refine a custom sub-agent that mimics a specific person's decision-making criteria, cognitive biases, and communication style for mock wall-hitting (pre-communication verification). |
 | `plan-to-issue` | skill | Turn a finalized implementation plan or design into a GitHub tracking issue (overview + PR-granularity checklist plus a self-contained detailed comment), or post it as a comment on an existing related issue. |
 | `runbook-execution-support` | skill | Support a human operator through a runbook in a GitHub issue comment: step presentation, pre-checks, verification, Slack progress posts, and checklist updates. |
-| `secretary` | skill | Run a resident secretary session in the Claude desktop app that aggregates today's tasks and due-dated pending decisions from the `session-supervisor` state (read-only) and from external agents defined in `## Sources`, publishes a dashboard artifact, and relays the user's verbatim answers (paste text for the supervisor, a relay session for external sources). |
 | `session-supervisor` | skill | Run a supervisor session in the Claude desktop app that starts, tracks, and auto-archives worker sessions once their committed branch or recorded files are verified (git worktree, or one per non-git directory), keeps a compaction-proof `state.json`, delegates edits and pushes to workers and observation to subagents, and publishes a dashboard artifact rendered from it. |
 | `setup-tagpr` | skill | Set up tagpr for automated release management: creates and updates release pull requests for unreleased items, tags them on merge, and creates GitHub Releases. Supports goreleaser (Go) and TypeScript/Node.js projects. |
 
