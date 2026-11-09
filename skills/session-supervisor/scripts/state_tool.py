@@ -4,7 +4,9 @@
 Functional core: validate, next_state, render, digest, parse_report, cwd_busy, serialize,
 parse_project_report, plan_actions, roster, waits, manager_reconcile,
 guard_decision (bash_violations, path_violation), parse_follow_ups, new_pr_urls, follow_up_actions,
-parse_locations, default_locations, add_missing_locations, clone_url_parts.
+parse_locations, default_locations, add_missing_locations, clone_url_parts,
+parse_frontmatter, set_props, new_note_text, parse_sections, parse_user_actions, ua_open, render_ua_line,
+apply_note_ops, parse_artifacts, render_artifact_line, artifacts_view, art_sha.
 Imperative shell: the argparse subcommands at the bottom of this file.
 """
 
@@ -21,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 from datetime import datetime
 from pathlib import Path
 
@@ -66,6 +69,26 @@ FOLLOW_UP_DONE = ("pr_closed", "manual")
 FOLLOW_UP_PLACEHOLDERS = ("{label}", "{url}")
 FOLLOW_UP_TEXT_MAX = 200
 PR_URL_RE = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)/?$", re.I)
+
+NOTE_STATUSES = ("backlog", "in progress", "pending", "done", "archived")
+ASSIGNEES = ("user", "agent")
+NOTE_KEYS = ("uid", "title", "para", "aliases", "created_at", "archived_at", "tags", "start_date", "due_date",
+             "pending_until", "completed_at", "status", "assignee", "parent", "follows")
+NOTE_RAW_KEYS = ("created_at", "archived_at")
+NOTE_SECTIONS = ("概要", "ユーザーアクション", "サブタスク", "関連ノート", "関連資料", "成果物", "ログ")
+UA_SECTION = "ユーザーアクション"
+ART_SECTION = "成果物"
+LOG_SECTION = "ログ"
+UA_KINDS = ("ask", "auto", "slot")
+UA_DETECTORS = ("worker_report", "worker_started", "archived_observed", "approval_cleared", "pr_closed",
+                "review_state", "start_possible", "manager_report", "foreign_session_gone", "children_closed")
+UA_META_KEYS = ("rule", "url", "since")
+ART_KEYS = ("n", "g", "kind", "ref", "url", "path", "label", "r")
+ART_FIELDS = ("kind", "ref", "url", "path", "label")
+FM_KEY_RE = re.compile(r"^([A-Za-z_][\w-]*):(?:[ \t]+(.*?))?[ \t]*$")
+FM_ITEM_RE = re.compile(r"^[ \t]*-(?:[ \t]+(.*?))?[ \t]*$")
+UA_LINE_RE = re.compile(r"^([ \t]*)[-*+] \[(.)\] (UA-\d+)\b(.*?)<!--[ \t]*sv[ \t]+(.*?)-->[ \t]*(?:\^([A-Za-z0-9-]+))?[ \t]*$")
+ART_COMMENT_RE = re.compile(r"<!--[ \t]*sv-art[ \t]+(.*?)[ \t]*-->")
 
 LOCATIONS_HEADING = "## Locations"
 LOCATION_KEYS = ("clone_root", "work_root")
@@ -1832,6 +1855,603 @@ def clone_url_parts(url):
         if m and all(CLONE_PART_RE.match(part) for part in m.groups()):
             return m.groups()
     return None
+
+
+def _fm_scalar(raw):
+    """(value, error) of one frontmatter value. Unquoted scalars other than null and booleans stay strings."""
+    if raw is None or raw in ("", "null", "Null", "NULL", "~"):
+        return None, None
+    if raw in ("true", "false"):
+        return raw == "true", None
+    if raw[0] == '"':
+        try:
+            return json.loads(raw), None
+        except ValueError:
+            return None, f"invalid quoted value {raw!r}"
+    if raw[0] == "'":
+        if len(raw) < 2 or raw[-1] != "'":
+            return None, f"invalid quoted value {raw!r}"
+        return raw[1:-1].replace("''", "'"), None
+    if raw[0] == "[":
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            if raw[-1] != "]" or "[" in raw[1:-1]:
+                return None, f"unsupported value {raw!r}"
+            parts = [_fm_scalar(p.strip()) for p in raw[1:-1].split(",") if p.strip()]
+            errors = [e for _, e in parts if e]
+            return (None, errors[0]) if errors else ([v for v, _ in parts], None)
+        return (value, None) if isinstance(value, list) else (None, f"unsupported value {raw!r}")
+    if raw[0] in "{|>&*!":
+        return None, f"unsupported value {raw!r}"
+    return raw, None
+
+
+def _frontmatter(text):
+    """Line-oriented frontmatter subset, or None when the text does not start with `---`.
+    entries: (key, start, end, value) with end exclusive, so a block list's `  - x` lines belong to its key."""
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].rstrip("\r\n") != "---":
+        return None
+    close = next((i for i in range(1, len(lines)) if lines[i].rstrip() == "---"), None)
+    if close is None:
+        return {"lines": lines, "close": None, "entries": [], "errors": ["frontmatter is not closed"]}
+    entries, errors, seen = [], [], set()
+    i = 1
+    while i < close:
+        line = lines[i].rstrip("\r\n")
+        if not line.strip() or line.lstrip().startswith("#"):
+            i += 1
+            continue
+        m = FM_KEY_RE.match(line)
+        if not m:
+            errors.append(f"frontmatter line {i + 1}: unsupported {line.strip()!r}")
+            i += 1
+            continue
+        key, raw, j = m.group(1), m.group(2), i + 1
+        value, error = _fm_scalar(raw)
+        if raw is None or raw == "":
+            items = []
+            while j < close and (im := FM_ITEM_RE.match(lines[j].rstrip("\r\n"))):
+                item, error = _fm_scalar(im.group(1))
+                if error:
+                    break
+                items.append(item)
+                j += 1
+            if items:
+                value = items
+        if error:
+            errors.append(f"frontmatter line {i + 1}: {error}")
+        if key in seen:
+            errors.append(f"frontmatter line {i + 1}: duplicate key {key!r}")
+        seen.add(key)
+        entries.append((key, i, j, value))
+        i = j
+    return {"lines": lines, "close": close, "entries": entries, "errors": errors}
+
+
+def parse_frontmatter(text):
+    """(props, body, errors) of a note. Any error means the frontmatter is outside the supported subset."""
+    fm = _frontmatter(text)
+    if fm is None:
+        return {}, text, ["missing frontmatter"]
+    if fm["close"] is None:
+        return {}, text, fm["errors"]
+    props = {}
+    for key, _, _, value in fm["entries"]:
+        props.setdefault(key, value)
+    return props, "".join(fm["lines"][fm["close"] + 1:]), fm["errors"]
+
+
+def _prop_line(key, value):
+    if key in NOTE_RAW_KEYS and isinstance(value, str):
+        return f"{key}: {value}"
+    return f"{key}: {json.dumps(value, ensure_ascii=False, separators=(',', ':'))}"
+
+
+def set_props(text, changes):
+    """Return text with each changed note property rewritten. A property whose value is already equal keeps its bytes;
+    a missing one is inserted at its NOTE_KEYS position. Every other line is left byte-identical."""
+    unknown = [k for k in changes if k not in NOTE_KEYS]
+    if unknown:
+        raise StateError(f"unknown note keys {unknown}")
+    fm = _frontmatter(text)
+    if fm is None or fm["errors"]:
+        raise StateError(fm["errors"] if fm else "missing frontmatter")
+    lines, close = fm["lines"], fm["close"]
+    nl = "\r\n" if lines[0].endswith("\r\n") else "\n"
+    spans = {key: (start, end, value) for key, start, end, value in fm["entries"]}
+    replace, inserts = {}, []
+    for key, value in changes.items():
+        line = _prop_line(key, value) + nl
+        if key in spans:
+            start, end, old = spans[key]
+            if old != value:
+                replace[start] = (end, line)
+            continue
+        rank = NOTE_KEYS.index(key)
+        before = [spans[k][1] for k in NOTE_KEYS[:rank] if k in spans]
+        after = [spans[k][0] for k in NOTE_KEYS[rank + 1:] if k in spans]
+        if before:
+            pos = max(before)
+        elif after:
+            pos = min(after)
+        else:
+            pos = close
+            while pos > 1 and not lines[pos - 1].strip():
+                pos -= 1
+        inserts.append((pos, rank, line))
+    out, i = [], 0
+    while i < len(lines):
+        out += [line for pos, _, line in sorted(inserts) if pos == i]
+        if i in replace:
+            end, line = replace[i]
+            out.append(line)
+            i = end
+        else:
+            out.append(lines[i])
+            i += 1
+    return "".join(out)
+
+
+def new_note_text(uid, title, kind, status, assignee, now, request="", parent=None, follows=None):
+    """Text of a new task or project note in the create-task format. parent and follows are note uids."""
+    if kind not in ("task", "project"):
+        raise StateError(f"note kind must be task or project, got {kind!r}")
+    if status not in NOTE_STATUSES or assignee not in ASSIGNEES:
+        raise StateError(f"invalid status/assignee {status!r}/{assignee!r}")
+    values = {
+        "uid": uid, "title": title, "para": "Project", "aliases": [], "created_at": f"{now[:10]} {now[11:19]}",
+        "archived_at": None, "tags": [kind], "start_date": None, "due_date": None, "pending_until": None,
+        "completed_at": None, "status": status, "assignee": assignee,
+        "parent": f"[[{parent}]]" if parent else None, "follows": f"[[{follows}]]" if follows else None,
+    }
+    head = "".join(_prop_line(k, values[k]) + "\n" for k in NOTE_KEYS if values[k] is not None or k not in ("parent", "follows"))
+    content = (request or "").strip("\n")
+    body = "\n".join(f"## {name}\n\n{content}\n" if name == "概要" and content else f"## {name}\n\n" for name in NOTE_SECTIONS)
+    return f"---\n{head}---\n{body}"
+
+
+def parse_sections(body):
+    """{title: text} for every `## title` of a note body (first occurrence wins). A section runs to the next H1/H2;
+    headings inside fenced blocks and comments do not count."""
+    lines = body.split("\n")
+    stripped = _strip_ignored(lines)
+    sections = {}
+    for i, line in enumerate(stripped):
+        m = re.match(r"^## (.+)$", line.rstrip())
+        if m and m.group(1).strip() not in sections:
+            sections[m.group(1).strip()] = "\n".join(lines[i + 1:_section_end(stripped, i)])
+    return sections
+
+
+def _indent(line):
+    return len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip())
+
+
+def _sub_end(lines, i, limit):
+    """End (exclusive) of the sub-items of the list item at lines[i]: following lines indented deeper than it.
+    Blank lines count only when a deeper line follows them."""
+    base, last = _indent(lines[i]), i
+    for j in range(i + 1, limit):
+        if not lines[j].strip():
+            continue
+        if _indent(lines[j]) <= base:
+            break
+        last = j
+    return last + 1
+
+
+def _ua_meta(meta):
+    ua = {"kind": None, "detector": None, "answer_required": False, "since": None, "rule": None, "url": None,
+          "done": None, "done_rev": None, "chk_rev": None}
+    for token in meta.split():
+        if token in ("ask", "slot"):
+            ua["kind"] = token
+        elif token.startswith("auto="):
+            ua["kind"], ua["detector"] = "auto", token[5:]
+        elif token == "answer":
+            ua["answer_required"] = True
+        elif re.fullmatch(r"chk=r\d+", token):
+            ua["chk_rev"] = int(token[5:])
+        elif re.fullmatch(r"r\d+", token):
+            ua["done_rev"] = int(token[1:])
+        elif "=" in token:
+            key, value = token.split("=", 1)
+            if key in UA_META_KEYS + ("done",):
+                ua[key] = value
+    return ua
+
+
+def parse_user_actions(section_text):
+    """User action items of a `## ユーザーアクション` section. Lines without `<!-- sv ... -->` metadata are the user's
+    and are skipped. answer is the item's sub-items, dedented but otherwise verbatim."""
+    lines = section_text.split("\n")
+    items = []
+    for i, line in enumerate(lines):
+        m = UA_LINE_RE.match(line)
+        if not m:
+            continue
+        ua = _ua_meta(m.group(5))
+        if ua["kind"] is None:
+            continue
+        sub = lines[i + 1:_sub_end(lines, i, len(lines))]
+        items.append({"id": m.group(3), "description": m.group(4).strip(), "checked": m.group(2) in "xX",
+                      **ua, "block": m.group(6), "answer": textwrap.dedent("\n".join(sub)).strip()})
+    return items
+
+
+def ua_open(ua):
+    """True for an unresolved user action: anything but a slot that has no done mark."""
+    return ua.get("kind") != "slot" and not ua.get("done")
+
+
+def render_ua_line(ua):
+    meta = [f"auto={ua['detector']}" if ua["kind"] == "auto" else ua["kind"]]
+    if ua.get("answer_required"):
+        meta.append("answer")
+    meta += [f"{key}={ua[key]}" for key in UA_META_KEYS if ua.get(key)]
+    if ua.get("chk_rev") is not None:
+        meta.append(f"chk=r{ua['chk_rev']}")
+    if ua.get("done"):
+        meta.append(f"done={ua['done']}")
+        if ua.get("done_rev") is not None:
+            meta.append(f"r{ua['done_rev']}")
+    box = "x" if ua.get("checked") else " "
+    return f"- [{box}] {ua['id']} {ua['description']} <!-- sv {' '.join(meta)} --> ^{ua.get('block') or ua['id'].lower()}"
+
+
+def _ua_errors(ua):
+    errors = []
+    if not isinstance(ua.get("id"), str) or not UA_ID_RE.match(ua["id"]):
+        errors.append(f"invalid user action id {ua.get('id')!r}")
+    if ua.get("kind") not in UA_KINDS:
+        errors.append(f"user action kind must be one of {list(UA_KINDS)}")
+    elif (ua["kind"] == "auto") != (ua.get("detector") in UA_DETECTORS):
+        errors.append(f"auto needs a detector in {list(UA_DETECTORS)}, got {ua.get('detector')!r}")
+    if not isinstance(ua.get("description"), str) or not ua["description"].strip() or "\n" in ua["description"]:
+        errors.append("user action description must be one non-empty line")
+    errors += [f"{key} must not contain spaces" for key in UA_META_KEYS if ua.get(key) and re.search(r"\s", str(ua[key]))]
+    return errors
+
+
+def _art_json(data):
+    text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
+def _art_text(item):
+    if item.get("label"):
+        return item["label"]
+    ref = item.get("ref") or ""
+    if item["kind"] == "commit":
+        ref = ref[:10]
+    elif "#" in ref:
+        ref = ref.rsplit("#", 1)[1]
+    elif not ref and item["kind"] == "pr":
+        ref = follow_up_label(None, item["url"])
+    return f"{item['kind']} {ref or item.get('url')}"
+
+
+def render_artifact_line(item):
+    """One `## 成果物` line: display text, the sv-art JSON comment, and the block id ^sv-art-<n>."""
+    data = {k: item[k] for k in ART_KEYS if item.get(k) is not None}
+    if item["kind"] == "file":
+        shown = f"`{item.get('path')}`"
+    else:
+        text = _art_text(item).replace("[", "\\[").replace("]", "\\]")
+        shown = f"[{text}]({item['url']})" if item.get("url") else text
+    return f"- {shown} <!-- sv-art {_art_json(data)} --> ^sv-art-{item['n']}"
+
+
+def _art_errors(data):
+    if not isinstance(data, dict):
+        return ["sv-art data must be an object"]
+    errors = [f"{key} must be a positive integer" for key in ("n", "g")
+              if not isinstance(data.get(key), int) or isinstance(data.get(key), bool) or data[key] < 1]
+    if "label" in data and not isinstance(data["label"], str):
+        errors.append("label must be a string")
+    return errors + _validate_artifact("sv-art", {k: data[k] for k in ART_FIELDS if k in data}, None)
+
+
+def parse_artifacts(section_text):
+    """(items, problems) of a `## 成果物` section. Items are sorted by (g, n), not by line position.
+    A line with broken or invalid metadata, or sharing its n with another line, is left out and reported."""
+    found, problems = {}, []
+    for k, line in enumerate(section_text.split("\n"), 1):
+        m = ART_COMMENT_RE.search(line)
+        if not m:
+            continue
+        try:
+            data = json.loads(m.group(1))
+        except ValueError:
+            problems.append(f"line {k}: invalid sv-art JSON")
+            continue
+        errors = _art_errors(data)
+        if errors:
+            problems += [f"line {k}: {e}" for e in errors]
+            continue
+        found.setdefault(data["n"], []).append((k, {key: data[key] for key in ART_KEYS if key in data}))
+    items = []
+    for n, rows in found.items():
+        if len(rows) > 1:
+            problems.append(f"lines {', '.join(str(k) for k, _ in rows)}: duplicate n {n}")
+        else:
+            items.append(rows[0][1])
+    return sorted(items, key=lambda a: (a["g"], a["n"])), problems
+
+
+def artifacts_view(items, art_from=None):
+    """v1 artifacts of the items numbered art_from or later, in (g, n) order. A group whose branch is not directly
+    followed by a commit is incomplete and left out whole."""
+    items = sorted((i for i in items if art_from is None or i["n"] >= art_from), key=lambda a: (a["g"], a["n"]))
+    groups = {}
+    for item in items:
+        groups.setdefault(item["g"], []).append(item)
+    view = []
+    for members in groups.values():
+        kinds = [m["kind"] for m in members]
+        if any(k == "branch" and kinds[j + 1:j + 2] != ["commit"] for j, k in enumerate(kinds)):
+            continue
+        view += [{k: m[k] for k in ART_FIELDS if k in m} for m in members]
+    return view
+
+
+def art_sha(items):
+    """Hash of the artifact data in (g, n) order. label and display text are excluded."""
+    rows = [[i["n"], i["g"], i["kind"], i.get("ref"), i.get("url"), i.get("path")]
+            for i in sorted(items, key=lambda a: (a["g"], a["n"]))]
+    return hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _split_note(text):
+    fm = _frontmatter(text)
+    if fm is None or fm["close"] is None:
+        return "", text
+    return "".join(fm["lines"][:fm["close"] + 1]), "".join(fm["lines"][fm["close"] + 1:])
+
+
+def _section_span(lines, title):
+    stripped = _strip_ignored(lines)
+    heads = _section_heads(stripped, f"## {title}")
+    return (heads[0], _section_end(stripped, heads[0])) if heads else None
+
+
+def _ensure_section(lines, title):
+    """(head, end) of the section, creating it before the next existing section in NOTE_SECTIONS order."""
+    span = _section_span(lines, title)
+    if span:
+        return span
+    later = [s for s in (_section_span(lines, t) for t in NOTE_SECTIONS[NOTE_SECTIONS.index(title) + 1:]) if s]
+    if later:
+        pos = min(head for head, _ in later)
+        lines[pos:pos] = ([""] if pos > 0 and lines[pos - 1].strip() else []) + [f"## {title}", ""]
+    else:
+        while lines and not lines[-1].strip():
+            lines.pop()
+        lines += (["", f"## {title}", ""] if lines else [f"## {title}", ""])
+    return _section_span(lines, title)
+
+
+def _insert_in_section(lines, title, new_lines):
+    """Append new_lines after the last non-blank line of the section, keeping a blank line before the next heading."""
+    head, end = _ensure_section(lines, title)
+    last = max((i for i in range(head + 1, end) if lines[i].strip()), default=head)
+    block = ([""] if last == head else []) + new_lines
+    pos = last + 1
+    if pos >= len(lines) or lines[pos].strip():
+        block.append("")
+    lines[pos:pos] = block
+
+
+def _has_block(lines, block_id):
+    pattern = re.compile(rf"\^{re.escape(block_id)}[ \t]*$")
+    return any(pattern.search(line) for line in lines)
+
+
+def _find_ua(lines, ua_id):
+    span = _section_span(lines, UA_SECTION)
+    for i in range(*span) if span else ():
+        m = UA_LINE_RE.match(lines[i])
+        if m and (m.group(3) == ua_id or m.group(6) == ua_id.lower()):
+            return i, span[1]
+    return None, None
+
+
+def _edit_ua(line, tokens, checked=False):
+    m = UA_LINE_RE.match(line)
+    line = line[:m.start(5)] + " ".join(tokens) + " " + line[m.end(5):]
+    return line[:m.start(2)] + "x" + line[m.end(2):] if checked else line
+
+
+def _art_data(line):
+    m = ART_COMMENT_RE.search(line)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _art_op_lines(op, g, rev):
+    items = []
+    for item in op.get("items") or []:
+        item = {**item, "g": g, "r": rev}
+        errors = _art_errors(item)
+        if errors:
+            raise StateError(f"{op['op']}: {errors}")
+        items.append(item)
+    if not items:
+        raise StateError(f"{op['op']} needs items")
+    return items
+
+
+def _op_log(lines, op, now, rev, index, problems):
+    block_id = op.get("id") or f"sv-log-r{rev}-{index}"
+    if not isinstance(op.get("text"), str) or not op["text"].strip():
+        raise StateError("log needs text")
+    if _has_block(lines, block_id):
+        return []
+    first, *rest = op["text"].strip("\n").split("\n")
+    entry = [f"- {now[:10]} {now[11:16]} {first} ^{block_id}"] + [f"    {line}".rstrip() for line in rest]
+    _insert_in_section(lines, LOG_SECTION, entry)
+    return [block_id]
+
+
+def _op_ua_add(lines, op, now, rev, index, problems):
+    ua = {"since": now, **(op.get("ua") or {}), "checked": False, "chk_rev": None, "done": None, "done_rev": None}
+    errors = _ua_errors(ua)
+    if errors:
+        raise StateError(f"ua_add: {errors}")
+    block_id = ua.get("block") or ua["id"].lower()
+    if _has_block(lines, block_id):
+        return []
+    span = _section_span(lines, UA_SECTION)
+    items = [i for i in range(*span) if UA_LINE_RE.match(lines[i])] if span else []
+    if items:
+        # Keep the checklist together: a user's ### heading later in the section stays below it.
+        pos = _sub_end(lines, items[-1], span[1])
+        lines[pos:pos] = [render_ua_line(ua)]
+    else:
+        _insert_in_section(lines, UA_SECTION, [render_ua_line(ua)])
+    return [block_id]
+
+
+def _op_ua_check(lines, op, now, rev, index, problems):
+    i, _ = _find_ua(lines, op["id"])
+    if i is None:
+        problems.append(f"ua_check {op['id']}: item not found")
+        return []
+    tokens = UA_LINE_RE.match(lines[i]).group(5).split()
+    # The rev mark makes a re-application a no-op, so a box the user unchecked afterwards stays unchecked.
+    if f"chk=r{rev}" not in tokens:
+        lines[i] = _edit_ua(lines[i], [t for t in tokens if not t.startswith("chk=")] + [f"chk=r{rev}"], checked=True)
+    return []
+
+
+def _op_ua_ack(lines, op, now, rev, index, problems):
+    i, _ = _find_ua(lines, op["id"])
+    if i is None:
+        problems.append(f"ua_ack {op['id']}: item not found")
+        return []
+    tokens = UA_LINE_RE.match(lines[i]).group(5).split()
+    if not any(t.startswith("done=") for t in tokens):
+        lines[i] = _edit_ua(lines[i], tokens + [f"done={op.get('at') or now}", f"r{rev}"])
+    return []
+
+
+def _op_ua_answer(lines, op, now, rev, index, problems):
+    i, end = _find_ua(lines, op["id"])
+    if i is None:
+        problems.append(f"ua_answer {op['id']}: item not found")
+        return []
+    if not isinstance(op.get("text"), str) or not op["text"].strip():
+        raise StateError("ua_answer needs text")
+    base = UA_LINE_RE.match(lines[i]).group(1) + "    "
+    first, *rest = op["text"].strip("\n").split("\n")
+    new = [f"{base}- {first}"] + [f"{base}  {line}".rstrip() for line in rest]
+    sub_end = _sub_end(lines, i, end)
+    if "\n".join(new) not in "\n".join(lines[i + 1:sub_end]):
+        lines[sub_end:sub_end] = new
+    return []
+
+
+def _op_art_add(lines, op, now, rev, index, problems):
+    items = op.get("items") or []
+    g = op.get("g") or (items[0].get("n") if items else None)
+    added, block = [], []
+    for item in _art_op_lines(op, g, rev):
+        block_id = f"sv-art-{item['n']}"
+        if not _has_block(lines, block_id):
+            block.append(render_artifact_line(item))
+            added.append(block_id)
+    if block:
+        _insert_in_section(lines, ART_SECTION, block)
+    return added
+
+
+def _op_art_set(lines, op, now, rev, index, problems):
+    span = _section_span(lines, ART_SECTION)
+    i = next((i for i in range(*span) if (_art_data(lines[i]) or {}).get("n") == op["n"]), None) if span else None
+    if i is None:
+        problems.append(f"art_set {op['n']}: artifact line not found")
+        return []
+    data = _art_data(lines[i])
+    if data.get("r") == rev:
+        return []
+    old_url = data.get("url")
+    for key, value in (op.get("fields") or {}).items():
+        if key not in ART_FIELDS:
+            raise StateError(f"art_set cannot change {key!r}")
+        if value is None:
+            data.pop(key, None)
+        else:
+            data[key] = value
+    data["r"] = rev
+    errors = _art_errors(data)
+    if errors:
+        raise StateError(f"art_set: {errors}")
+    m = ART_COMMENT_RE.search(lines[i])
+    shown, rest = lines[i][:m.start()], lines[i][m.end():]
+    if old_url and data.get("url") and data["url"] != old_url:
+        shown = shown.replace(f"]({old_url})", f"]({data['url']})")
+    lines[i] = shown + f"<!-- sv-art {_art_json({k: data[k] for k in ART_KEYS if k in data})} -->" + rest
+    return []
+
+
+def _op_art_replace_group(lines, op, now, rev, index, problems):
+    g = op.get("g")
+    items = _art_op_lines(op, g, rev)
+    block_ids = [f"sv-art-{item['n']}" for item in items]
+    if any(_has_block(lines, b) for b in block_ids):
+        return []
+    new = [render_artifact_line(item) for item in items]
+    head, end = _ensure_section(lines, ART_SECTION)
+    group = [i for i in range(head + 1, end) if (_art_data(lines[i]) or {}).get("g") == g]
+    if not group:
+        _insert_in_section(lines, ART_SECTION, new)
+        return block_ids
+    for i in reversed(group):
+        del lines[i]
+    lines[group[0]:group[0]] = new
+    return block_ids
+
+
+_NOTE_BODY_OPS = {
+    "log": _op_log, "ua_add": _op_ua_add, "ua_check": _op_ua_check, "ua_answer": _op_ua_answer, "ua_ack": _op_ua_ack,
+    "art_add": _op_art_add, "art_set": _op_art_set, "art_replace_group": _op_art_replace_group,
+}
+
+
+def apply_note_ops(text, ops, now, rev):
+    """Apply note ops to a note's text. Returns (text, new_ids, problems).
+    Re-applying the same ops with the same rev is a no-op: lines are added once per block id, and edits of existing
+    lines leave a rev mark (chk=r<rev>, done=<at> r<rev>, "r": <rev>). new_ids are the block ids this call added.
+    create writes a note only into empty text; assign_uid sets uid only when the note has none."""
+    new_ids, problems = [], []
+    for index, op in enumerate(ops):
+        name = op.get("op")
+        if name == "create":
+            if not text.strip():
+                text = new_note_text(op["uid"], op["title"], op["kind"], op["status"], op["assignee"], now,
+                                     op.get("request", ""), op.get("parent"), op.get("follows"))
+            continue
+        if name == "assign_uid":
+            props, _, errors = parse_frontmatter(text)
+            if errors:
+                problems.append(f"assign_uid: {errors}")
+            elif not props.get("uid"):
+                text = set_props(text, {"uid": op["uid"]})
+            continue
+        if name not in _NOTE_BODY_OPS:
+            raise StateError(f"unknown note op {name!r}")
+        head, body = _split_note(text)
+        lines = body.split("\n")
+        new_ids += _NOTE_BODY_OPS[name](lines, op, now, rev, index, problems)
+        text = head + "\n".join(lines)
+    return text, new_ids, problems
 
 
 def _pr_urls(task):

@@ -3751,5 +3751,393 @@ class InvestigationTest(unittest.TestCase):
             self.assertEqual(find(new["archived"], "T-0090")["findings"], [finding("w-0090")])
 
 
+
+NOTES = FIXTURES / "notes"
+NOTE_NOW = "2026-11-10T09:00:00+09:00"
+
+
+def note(name):
+    return (NOTES / f"{name}.md").read_text(encoding="utf-8")
+
+
+def note_section(text, title):
+    return st.parse_sections(st.parse_frontmatter(text)[1])[title]
+
+
+def note_uas(text):
+    return {ua["id"]: ua for ua in st.parse_user_actions(note_section(text, "ユーザーアクション"))}
+
+
+def apply_twice(test, text, ops, rev=13):
+    once, ids, problems = st.apply_note_ops(text, ops, NOTE_NOW, rev)
+    twice, ids2, _ = st.apply_note_ops(once, ops, NOTE_NOW, rev)
+    test.assertEqual(twice, once)
+    test.assertEqual(ids2, [])
+    return once, ids, problems
+
+
+class FrontmatterTest(unittest.TestCase):
+    def test_reads_obsidian_reserialized_shapes(self):
+        props, body, errors = st.parse_frontmatter(note("task_obsidian"))
+        self.assertEqual(errors, [])
+        self.assertEqual(props["uid"], "20250418_081420")
+        self.assertIsNone(props["aliases"])
+        self.assertIsNone(props["archived_at"])
+        self.assertEqual(props["tags"], ["task", "hobby"])
+        self.assertIsNone(props["due_date"])
+        self.assertEqual(props["completed_at"], "2025-05-24T16:36:00")
+        self.assertEqual(props["status"], "done")
+        self.assertEqual(props["parent"], ["2025/04/20250418_080000.md"])
+        self.assertTrue(body.startswith("## 概要\n"))
+
+    def test_reads_json_shapes(self):
+        props, _, errors = st.parse_frontmatter(note("task_managed"))
+        self.assertEqual(errors, [])
+        self.assertEqual(list(props), list(st.NOTE_KEYS[:-1]))
+        self.assertEqual((props["uid"], props["aliases"], props["tags"]), ("20261109_221500", [], ["task", "oss"]))
+        self.assertEqual((props["status"], props["assignee"], props["parent"]), ("in progress", "user", "[[20261101_090000]]"))
+        self.assertEqual(props["created_at"], "2026-11-09 22:15:00")
+
+    def test_outside_the_subset_is_an_error_and_never_written(self):
+        text = note("note_unsupported")
+        _, _, errors = st.parse_frontmatter(text)
+        self.assertEqual(len(errors), 3, errors)
+        with self.assertRaises(st.StateError):
+            st.set_props(text, {"status": "done"})
+        self.assertEqual(st.parse_frontmatter("## 概要\n")[2], ["missing frontmatter"])
+        self.assertEqual(st.parse_frontmatter("---\ntitle: x\n")[2], ["frontmatter is not closed"])
+        self.assertTrue(st.parse_frontmatter('---\nuid: "a"\nuid: "b"\n---\n')[2])
+
+    def test_set_props_changes_only_the_target_lines(self):
+        text = note("task_obsidian")
+        out = st.set_props(text, {"status": "in progress", "assignee": "agent"})
+        self.assertEqual(out, text.replace("status: done\n", 'status: "in progress"\nassignee: "agent"\n'))
+
+    def test_set_props_keeps_equal_values_byte_identical(self):
+        text = note("task_obsidian")
+        self.assertEqual(st.set_props(text, {"status": "done", "tags": ["task", "hobby"], "archived_at": None}), text)
+
+    def test_set_props_inserts_missing_keys_in_note_key_order(self):
+        text = note("task_obsidian")
+        out = st.set_props(text, {"follows": "[[20250101_000000]]", "pending_until": "2026-01-01"})
+        lines = out.splitlines()
+        self.assertEqual(lines[lines.index("due_date:") + 1], 'pending_until: "2026-01-01"')
+        self.assertEqual(lines[lines.index("  - 2025/04/20250418_080000.md") + 1], 'follows: "[[20250101_000000]]"')
+        self.assertEqual(lines[lines.index('follows: "[[20250101_000000]]"') + 1], "")
+        self.assertEqual(st.parse_frontmatter(out)[2], [])
+
+    def test_set_props_replaces_a_block_list_and_writes_raw_and_json_values(self):
+        text = note("task_obsidian")
+        out = st.set_props(text, {"tags": ["task"], "archived_at": "2026-11-10 09:00:00", "completed_at": "2026-11-10"})
+        self.assertIn('tags: ["task"]\n\ndue_date:', out)
+        self.assertIn("archived_at: 2026-11-10 09:00:00\n", out)
+        self.assertIn('completed_at: "2026-11-10"\n', out)
+        self.assertNotIn("  - hobby", out)
+        self.assertEqual(st.parse_frontmatter(out)[0]["archived_at"], "2026-11-10 09:00:00")
+        with self.assertRaises(st.StateError):
+            st.set_props(text, {"owner": "x"})
+
+    def test_parse_sections_ignores_fenced_headings_and_keeps_h3(self):
+        sections = st.parse_sections(st.parse_frontmatter(note("task_obsidian"))[1])
+        self.assertEqual(list(sections), ["概要", "サブタスク", "関連ノート", "関連資料", "ログ"])
+        self.assertIn("## not a heading inside a fence", sections["サブタスク"])
+        self.assertIn("### メモ", note_section(note("task_managed"), "ユーザーアクション"))
+
+
+class NoteTemplateTest(unittest.TestCase):
+    def test_task_note_follows_the_create_task_format(self):
+        text = st.new_note_text("20261110_090000", "README の typo を直す", "task", "in progress", "agent", NOTE_NOW,
+                                "typo を直してください。\n\n- README.md", parent="20261101_090000")
+        self.assertTrue(text.startswith('---\nuid: "20261110_090000"\ntitle: "README の typo を直す"\npara: "Project"\n'
+                                        "aliases: []\ncreated_at: 2026-11-10 09:00:00\narchived_at: null\n"
+                                        'tags: ["task"]\n'))
+        props, body, errors = st.parse_frontmatter(text)
+        self.assertEqual(errors, [])
+        self.assertEqual(list(props), list(st.NOTE_KEYS[:-1]))
+        self.assertEqual((props["status"], props["assignee"], props["parent"]), ("in progress", "agent", "[[20261101_090000]]"))
+        self.assertFalse(re.search(r"^# ", body, re.M))
+        sections = st.parse_sections(body)
+        self.assertEqual(list(sections), list(st.NOTE_SECTIONS))
+        self.assertEqual(sections["概要"].strip(), "typo を直してください。\n\n- README.md")
+
+    def test_project_note_and_optional_links(self):
+        text = st.new_note_text("20261110_090001", "Nature MCP", "project", "backlog", "user", NOTE_NOW)
+        props = st.parse_frontmatter(text)[0]
+        self.assertEqual(props["tags"], ["project"])
+        self.assertNotIn("parent", props)
+        self.assertNotIn("follows", props)
+        follows = st.parse_frontmatter(st.new_note_text("u", "t", "task", "backlog", "agent", NOTE_NOW, follows="20261101_000000"))[0]
+        self.assertEqual(follows["follows"], "[[20261101_000000]]")
+        for args in (("u", "t", "memo", "backlog", "agent"), ("u", "t", "task", "new", "agent"), ("u", "t", "task", "backlog", "bot")):
+            with self.assertRaises(st.StateError):
+                st.new_note_text(*args, NOTE_NOW)
+
+    def test_create_op_writes_only_into_an_empty_note(self):
+        op = {"op": "create", "uid": "20261110_090000", "title": "t", "kind": "task", "status": "in progress",
+              "assignee": "agent", "request": "依頼"}
+        text, ids, problems = apply_twice(self, "", [op, {"op": "log", "text": "受領しました"}])
+        self.assertEqual(problems, [])
+        self.assertEqual(ids, ["sv-log-r13-1"])
+        self.assertTrue(text.startswith(st.new_note_text("20261110_090000", "t", "task", "in progress", "agent", NOTE_NOW, "依頼")[:200]))
+        self.assertIn("- 2026-11-10 09:00 受領しました ^sv-log-r13-1", note_section(text, "ログ"))
+        existing = note("task_managed")
+        self.assertEqual(st.apply_note_ops(existing, [op], NOTE_NOW, 13)[0], existing)
+
+    def test_assign_uid_only_when_missing(self):
+        text = note("note_without_uid")
+        out, _, problems = apply_twice(self, text, [{"op": "assign_uid", "uid": "20261110_090000"}])
+        self.assertEqual(problems, [])
+        self.assertEqual(out, text.replace("---\n", '---\nuid: "20261110_090000"\n', 1))
+        managed = note("task_managed")
+        self.assertEqual(st.apply_note_ops(managed, [{"op": "assign_uid", "uid": "x"}], NOTE_NOW, 13)[0], managed)
+        _, _, problems = st.apply_note_ops(note("note_unsupported").replace('uid: "20261109_230000"\n', ""),
+                                           [{"op": "assign_uid", "uid": "x"}], NOTE_NOW, 13)
+        self.assertEqual(len(problems), 1)
+
+    def test_log_entries_append_once_and_keep_the_rest(self):
+        text = note("task_obsidian")
+        out, ids, _ = apply_twice(self, text, [{"op": "log", "text": "検証しました\n詳細"}, {"op": "log", "id": "sv-log-x", "text": "次"}])
+        self.assertEqual(ids, ["sv-log-r13-0", "sv-log-x"])
+        self.assertEqual(out, text + "- 2026-11-10 09:00 検証しました ^sv-log-r13-0\n    詳細\n- 2026-11-10 09:00 次 ^sv-log-x\n")
+        with self.assertRaises(st.StateError):
+            st.apply_note_ops(text, [{"op": "nope"}], NOTE_NOW, 13)
+
+
+class UserActionChecklistTest(unittest.TestCase):
+    def test_kinds_and_open_state(self):
+        uas = note_uas(note("task_managed"))
+        self.assertEqual(list(uas), ["UA-0160", "UA-0161", "UA-0162", "UA-0163", "UA-0164"])
+        self.assertEqual((uas["UA-0160"]["kind"], uas["UA-0160"]["answer_required"]), ("ask", True))
+        self.assertEqual((uas["UA-0161"]["kind"], uas["UA-0161"]["detector"]), ("auto", "pr_closed"))
+        self.assertEqual(uas["UA-0161"]["url"], "https://github.com/org/repo-a/pull/42")
+        self.assertEqual(uas["UA-0162"]["kind"], "slot")
+        self.assertEqual({k: st.ua_open(v) for k, v in uas.items()},
+                         {"UA-0160": True, "UA-0161": True, "UA-0162": False, "UA-0163": False, "UA-0164": True})
+        self.assertEqual({k: v["checked"] for k, v in uas.items()},
+                         {"UA-0160": False, "UA-0161": True, "UA-0162": False, "UA-0163": True, "UA-0164": False})
+        self.assertEqual((uas["UA-0163"]["done"], uas["UA-0163"]["done_rev"]), ("2026-11-09T22:40:00+09:00", 12))
+        self.assertEqual(uas["UA-0164"]["answer"], "")
+
+    def test_sub_items_are_read_verbatim(self):
+        uas = note_uas(note("task_managed"))
+        self.assertEqual(uas["UA-0160"]["answer"], "- push してください\n\n    - main への PR も作ってください")
+
+    def test_render_round_trip(self):
+        for ua in note_uas(note("task_managed")).values():
+            line = st.render_ua_line(ua)
+            self.assertEqual(st.parse_user_actions(line)[0], dict(ua, answer=""))
+        self.assertIn(st.render_ua_line(note_uas(note("task_managed"))["UA-0163"]),
+                      note_section(note("task_managed"), "ユーザーアクション"))
+
+    def test_ua_add_is_idempotent_by_block_id_and_keeps_the_list_together(self):
+        text = note("task_managed")
+        op = {"op": "ua_add", "ua": {"id": "UA-0165", "kind": "auto", "detector": "worker_report",
+                                     "description": "Answer w-0120 (which file?) in the app: which file?"}}
+        out, ids, _ = apply_twice(self, text, [op])
+        self.assertEqual(ids, ["ua-0165"])
+        section = note_section(out, "ユーザーアクション")
+        self.assertLess(section.index("^ua-0165"), section.index("自分用のチェック"))
+        self.assertEqual(note_uas(out)["UA-0165"]["since"], NOTE_NOW)
+        self.assertEqual(out.replace(st.render_ua_line(note_uas(out)["UA-0165"]) + "\n", ""), text)
+        for bad in ({"id": "UA-0166", "kind": "auto", "detector": "nope", "description": "x"},
+                    {"id": "UA-0166", "kind": "ask", "description": "a\nb"}, {"id": "166", "kind": "slot", "description": "x"}):
+            with self.assertRaises(st.StateError):
+                st.apply_note_ops(text, [{"op": "ua_add", "ua": bad}], NOTE_NOW, 13)
+
+    def test_ua_add_creates_the_section_in_template_order(self):
+        text = note("task_obsidian")
+        out, _, _ = apply_twice(self, text, [{"op": "ua_add", "ua": {"id": "UA-0001", "kind": "slot", "description": "再開時の指示"}}])
+        self.assertEqual(list(st.parse_sections(st.parse_frontmatter(out)[1]))[:3], ["概要", "ユーザーアクション", "サブタスク"])
+        self.assertEqual(list(note_uas(out)), ["UA-0001"])
+        self.assertIn("- [x] M3x10 (4pcs)\n\n## ユーザーアクション\n\n- [ ] UA-0001 ", out)
+
+    def test_check_and_ack_leave_rev_marks(self):
+        text = note("task_managed")
+        out, _, problems = apply_twice(self, text, [{"op": "ua_check", "id": "UA-0164"}, {"op": "ua_ack", "id": "UA-0164"}])
+        self.assertEqual(problems, [])
+        ua = note_uas(out)["UA-0164"]
+        self.assertEqual((ua["checked"], ua["chk_rev"], ua["done"], ua["done_rev"]), (True, 13, NOTE_NOW, 13))
+        self.assertFalse(st.ua_open(ua))
+        self.assertEqual(out.replace("- [x] UA-0164", "- [/] UA-0164").replace(f" chk=r13 done={NOTE_NOW} r13", ""), text)
+
+    def test_a_box_the_user_unchecked_is_not_checked_again(self):
+        ops = [{"op": "ua_check", "id": "UA-0160"}]
+        out = st.apply_note_ops(note("task_managed"), ops, NOTE_NOW, 13)[0]
+        unchecked = out.replace("- [x] UA-0160", "- [ ] UA-0160")
+        self.assertEqual(st.apply_note_ops(unchecked, ops, NOTE_NOW, 13)[0], unchecked)
+        self.assertTrue(note_uas(st.apply_note_ops(unchecked, ops, NOTE_NOW, 14)[0])["UA-0160"]["checked"])
+
+    def test_ack_keeps_an_existing_done_mark(self):
+        text = note("task_managed")
+        self.assertEqual(st.apply_note_ops(text, [{"op": "ua_ack", "id": "UA-0163"}], NOTE_NOW, 13)[0], text)
+
+    def test_answer_appends_after_the_users_sub_items(self):
+        text = note("task_managed")
+        out, _, _ = apply_twice(self, text, [{"op": "ua_answer", "id": "UA-0160", "text": "やはり push しないでください\n理由は後で"}])
+        self.assertEqual(note_uas(out)["UA-0160"]["answer"],
+                         "- push してください\n\n    - main への PR も作ってください\n- やはり push しないでください\n  理由は後で")
+        self.assertEqual(out.replace("    - やはり push しないでください\n      理由は後で\n", ""), text)
+
+    def test_missing_items_are_problems(self):
+        text = note("task_managed")
+        for name in ("ua_check", "ua_ack", "ua_answer"):
+            out, _, problems = st.apply_note_ops(text, [{"op": name, "id": "UA-0999", "text": "x"}], NOTE_NOW, 13)
+            self.assertEqual(out, text)
+            self.assertEqual(problems, [f"{name} UA-0999: item not found"])
+
+    def test_text_outside_managed_sections_is_kept(self):
+        text = note("task_managed")
+        ops = [{"op": "ua_add", "ua": {"id": "UA-0165", "kind": "ask", "answer": True, "description": "q"}},
+               {"op": "ua_check", "id": "UA-0161"}, {"op": "ua_ack", "id": "UA-0161"}, {"op": "log", "text": "済"},
+               {"op": "art_add", "items": [{"n": 4, "kind": "ci", "url": "https://ci.example.com/4"}]}]
+        out = st.apply_note_ops(text, ops, NOTE_NOW, 13)[0]
+        before, after = st.parse_frontmatter(text), st.parse_frontmatter(out)
+        self.assertEqual(after[0], before[0])
+        self.assertTrue(after[1].startswith("ユーザーが見出しの外に書いたメモ。\n\n## 概要\n"))
+        for title in ("概要", "サブタスク", "関連ノート", "関連資料"):
+            self.assertEqual(st.parse_sections(after[1])[title], st.parse_sections(before[1])[title])
+        self.assertIn("### メモ\n\nユーザーの小見出し。", out)
+        self.assertEqual(note_uas(out)["UA-0160"]["answer"], note_uas(text)["UA-0160"]["answer"])
+
+
+BRANCH_REF = "/Users/example/src/github.com/org/repo-a#claude/t0120-fix-typo"
+COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+class ArtifactSectionTest(unittest.TestCase):
+    def section(self, text):
+        return note_section(text, "成果物")
+
+    def test_reads_metadata_in_g_n_order_and_skips_user_lines(self):
+        items, problems = st.parse_artifacts(self.section(note("task_managed")))
+        self.assertEqual(problems, [])
+        self.assertEqual([(i["g"], i["n"], i["kind"]) for i in items], [(1, 1, "branch"), (1, 2, "commit"), (3, 3, "pr")])
+        self.assertEqual(items[0]["ref"], BRANCH_REF)
+        self.assertEqual(st.artifacts_view(items), [
+            {"kind": "branch", "ref": BRANCH_REF, "url": "https://github.com/org/repo-a/tree/claude/t0120-fix-typo",
+             "label": "repo-a claude/t0120-fix-typo"},
+            {"kind": "commit", "ref": COMMIT_SHA, "url": f"https://github.com/org/repo-a/commit/{COMMIT_SHA}", "label": "repo-a 0123456789"},
+            {"kind": "pr", "url": "https://github.com/org/repo-a/pull/42", "label": "repo-a#42"},
+        ])
+
+    def test_reordering_lines_and_editing_display_text_do_not_change_meaning(self):
+        section = self.section(note("task_managed"))
+        items = st.parse_artifacts(section)[0]
+        lines = section.split("\n")
+        art = [l for l in lines if "sv-art" in l]
+        reordered = "\n".join(reversed(art))
+        self.assertEqual(st.parse_artifacts(reordered)[0], items)
+        edited = section.replace("[repo-a#42](", "[マージ待ちの PR](")
+        self.assertEqual(st.art_sha(st.parse_artifacts(edited)[0]), st.art_sha(items))
+        relabeled = [dict(i, label="x") for i in items]
+        self.assertEqual(st.art_sha(relabeled), st.art_sha(items))
+        self.assertNotEqual(st.art_sha(items[:2]), st.art_sha(items))
+
+    def test_problems_leave_lines_out(self):
+        good = st.render_artifact_line({"n": 1, "g": 1, "kind": "pr", "url": "https://github.com/org/repo-a/pull/1"})
+        cases = {
+            "- x <!-- sv-art {\"n\":2,\"g\":2,\"kind\": --> ^sv-art-2": "invalid sv-art JSON",
+            st.render_artifact_line({"n": 2, "g": 2, "kind": "tag", "ref": "v1"}): "unknown kind",
+            "- x <!-- sv-art {\"n\":2,\"g\":2,\"kind\":\"pr\"} --> ^sv-art-2": "pr requires an http(s) url",
+            st.render_artifact_line({"n": 2, "g": 2, "kind": "file", "path": "rel/path"}): "absolute path",
+            st.render_artifact_line({"n": 0, "g": 2, "kind": "ci", "url": "https://ci"}): "n must be a positive integer",
+            "- x <!-- sv-art [1] -->": "must be an object",
+        }
+        for line, message in cases.items():
+            items, problems = st.parse_artifacts(f"{good}\n{line}")
+            self.assertEqual([i["n"] for i in items], [1], line)
+            self.assertEqual(len(problems), 1, problems)
+            self.assertIn(message, problems[0])
+        items, problems = st.parse_artifacts(f"{good}\n{good}\n" + st.render_artifact_line({"n": 2, "g": 2, "kind": "ci", "url": "https://ci"}))
+        self.assertEqual([i["n"] for i in items], [2])
+        self.assertEqual(problems, ["lines 1, 2: duplicate n 1"])
+
+    def test_render_escapes_comment_breakers_and_round_trips(self):
+        item = {"n": 4, "g": 4, "kind": "pr", "url": "https://github.com/org/repo-a/pull/43?a=1&b=2",
+                "label": "<b>--> [x] & y", "r": 3}
+        line = st.render_artifact_line(item)
+        comment = line[line.index("<!-- sv-art ") + 12:line.rindex(" -->")]
+        self.assertNotIn("<", comment)
+        self.assertNotIn(">", comment)
+        self.assertNotIn("&", comment)
+        self.assertTrue(line.endswith(" ^sv-art-4"))
+        self.assertTrue(line.startswith("- [<b>--> \\[x\\] & y](https://github.com/org/repo-a/pull/43?a=1&b=2) "))
+        self.assertEqual(st.parse_artifacts(line), ([item], []))
+        file_line = st.render_artifact_line({"n": 5, "g": 5, "kind": "file", "path": "/w/report.md"})
+        self.assertTrue(file_line.startswith("- `/w/report.md` <!-- sv-art "))
+        commit_line = st.render_artifact_line({"n": 6, "g": 6, "kind": "commit", "ref": COMMIT_SHA})
+        self.assertTrue(commit_line.startswith("- commit 0123456789 <!-- "))
+
+    def test_art_add_is_idempotent_and_creates_the_section(self):
+        text = note("task_obsidian")
+        items = [{"n": 1, "kind": "branch", "ref": BRANCH_REF}, {"n": 2, "kind": "commit", "ref": COMMIT_SHA}]
+        out, ids, _ = apply_twice(self, text, [{"op": "art_add", "items": items}])
+        self.assertEqual(ids, ["sv-art-1", "sv-art-2"])
+        self.assertEqual(list(st.parse_sections(st.parse_frontmatter(out)[1]))[-2:], ["成果物", "ログ"])
+        parsed = st.parse_artifacts(self.section(out))[0]
+        self.assertEqual([(i["n"], i["g"], i["r"]) for i in parsed], [(1, 1, 13), (2, 1, 13)])
+        with self.assertRaises(st.StateError):
+            st.apply_note_ops(text, [{"op": "art_add", "items": [{"n": 3, "kind": "pr"}]}], NOTE_NOW, 13)
+
+    def test_art_set_updates_data_and_keeps_user_link_text(self):
+        text = note("task_managed").replace("[repo-a 0123456789](", "[直したコミット](")
+        pushed = f"https://github.com/org/repo-a/commit/{COMMIT_SHA}?pushed"
+        out, _, problems = apply_twice(self, text, [{"op": "art_set", "n": 2, "fields": {"url": pushed, "label": None}}])
+        self.assertEqual(problems, [])
+        line = next(l for l in out.split("\n") if l.endswith("^sv-art-2"))
+        self.assertTrue(line.startswith(f"- [直したコミット]({pushed}) "))
+        item = next(i for i in st.parse_artifacts(self.section(out))[0] if i["n"] == 2)
+        self.assertEqual((item["url"], item["r"], "label" in item), (pushed, 13, False))
+        moved = text.replace(f"[直したコミット](https://github.com/org/repo-a/commit/{COMMIT_SHA})", "[直したコミット](https://example.com/mine)")
+        line = next(l for l in st.apply_note_ops(moved, [{"op": "art_set", "n": 2, "fields": {"url": pushed}}], NOTE_NOW, 13)[0].split("\n")
+                    if l.endswith("^sv-art-2"))
+        self.assertTrue(line.startswith("- [直したコミット](https://example.com/mine) "))
+        out, _, problems = st.apply_note_ops(text, [{"op": "art_set", "n": 9, "fields": {"url": pushed}}], NOTE_NOW, 13)
+        self.assertEqual((out, problems), (text, ["art_set 9: artifact line not found"]))
+
+    def test_art_replace_group_keeps_position_and_user_lines(self):
+        text = note("task_managed")
+        items = [{"n": 4, "kind": "branch", "ref": BRANCH_REF, "url": "https://github.com/org/repo-a/tree/claude/t0120-fix-typo"},
+                 {"n": 5, "kind": "commit", "ref": "fedcba9876"}]
+        out, ids, _ = apply_twice(self, text, [{"op": "art_replace_group", "g": 1, "items": items}])
+        self.assertEqual(ids, ["sv-art-4", "sv-art-5"])
+        section = self.section(out)
+        self.assertIn("- 自分用のメモ(メタデータの無い行)", section)
+        self.assertNotIn("^sv-art-1", section)
+        parsed = st.parse_artifacts(section)[0]
+        self.assertEqual([(i["g"], i["n"], i["kind"]) for i in parsed], [(1, 4, "branch"), (1, 5, "commit"), (3, 3, "pr")])
+        self.assertLess(section.index("^sv-art-5"), section.index("^sv-art-3"))
+
+    def test_non_git_file_group_is_replaced_per_cwd(self):
+        text = note("task_obsidian")
+        files = [{"n": 1, "kind": "file", "path": "/work/T-0088/a.md"}, {"n": 2, "kind": "file", "path": "/work/T-0088/b.md"}]
+        out, _, _ = apply_twice(self, text, [{"op": "art_add", "items": files},
+                                             {"op": "art_add", "items": [{"n": 3, "kind": "ci", "url": "https://ci/3"}]}])
+        self.assertEqual([(i["g"], i["n"]) for i in st.parse_artifacts(self.section(out))[0]], [(1, 1), (1, 2), (3, 3)])
+        out, _, _ = apply_twice(self, out, [{"op": "art_replace_group", "g": 1, "items": [{"n": 4, "kind": "file", "path": "/work/T-0088/c.md"}]}])
+        self.assertEqual(st.artifacts_view(st.parse_artifacts(self.section(out))[0]),
+                         [{"kind": "file", "path": "/work/T-0088/c.md"}, {"kind": "ci", "url": "https://ci/3"}])
+
+    def test_art_from_splits_generations(self):
+        items = [{"n": 1, "g": 1, "kind": "pr", "url": "https://github.com/o/r/pull/1"},
+                 {"n": 2, "g": 2, "kind": "branch", "ref": "/r#b"}, {"n": 3, "g": 2, "kind": "commit", "ref": "abc"},
+                 {"n": 4, "g": 4, "kind": "pr", "url": "https://github.com/o/r/pull/2"}]
+        self.assertEqual([a.get("url") or a["ref"] for a in st.artifacts_view(items, 2)], ["/r#b", "abc", "https://github.com/o/r/pull/2"])
+        self.assertEqual(len(st.artifacts_view(items, 5)), 0)
+        self.assertEqual(len(st.artifacts_view(items)), 4)
+
+    def test_incomplete_groups_are_left_out_of_the_view(self):
+        cwd, branch = "/Users/example/src/github.com/org/repo-a", "claude/t0120-fix-typo"
+        worker = {"cwd": cwd, "branch": branch}
+        old = [{"n": 1, "g": 1, "kind": "branch", "ref": f"{cwd}#{branch}"},
+               {"n": 2, "g": 1, "kind": "commit", "ref": "aaa", "url": "https://github.com/org/repo-a/commit/aaa"}]
+        newer_branch = {"n": 3, "g": 3, "kind": "branch", "ref": f"{cwd}#{branch}"}
+        view = st.artifacts_view(old + [newer_branch])
+        self.assertEqual(view, st.artifacts_view(old))
+        self.assertTrue(st._pushed_at_head({"artifacts": view}, worker))
+        self.assertFalse(st._pushed_at_head({"artifacts": st.artifacts_view(old + [newer_branch, {"n": 4, "g": 3, "kind": "commit", "ref": "bbb"}])}, worker))
+        self.assertEqual(st.artifacts_view([{"n": 2, "g": 1, "kind": "commit", "ref": "aaa"}]), [{"kind": "commit", "ref": "aaa"}])
+
+
 if __name__ == "__main__":
     unittest.main()
