@@ -5090,5 +5090,191 @@ class ProjectContextDocTest(unittest.TestCase):
         self.assertEqual(st.join_view(state, notes)["projects"][0]["context_doc_url"], "https://github.com/org/repo/issues/1")
 
 
+
+class ProposalNoteTest(unittest.TestCase):
+    def setUp(self):
+        self.state, self.notes = v2_state()
+        self.project = to_v2(add_project(self.state), "projects", U3)
+        v2_note(self.notes, U3, kind="project", request="https://github.com/org/repo/issues/1")
+
+    def plan(self, plans=(), titles=(), **extra):
+        report = dict({"project_id": "P-0001", "status": "idle", "summary": "s", "reviews": [], "plans": list(plans),
+                       "questions": []}, **extra)
+        text = "```project-report\n" + json.dumps(report, ensure_ascii=False) + "\n```"
+        parsed = st.parse_project_report(text, "P-0001")
+        self.assertTrue(parsed["ok"], parsed)
+        return st.plan_actions(st.join_view(self.state, self.notes), "P-0001", parsed["report"], (), titles)
+
+    def test_new_task_proposals_become_notes(self):
+        actions = self.plan([{"kind": "new", "title": "Add docs", "text": "write docs"},
+                             {"kind": "new", "title": "Add docs", "text": "again"}])
+        self.assertEqual(actions, [{"kind": "proposal_note", "title": "Add docs", "text": "write docs", "parent": U3},
+                                   {"kind": "proposal_dup", "title": "Add docs", "text": "again"}])
+        self.assertEqual([a["kind"] for a in self.plan([{"kind": "new", "title": "Add docs", "text": "x"}], {"Add docs"})],
+                         ["proposal_dup"])
+
+    def test_proposal_titles_reads_backlog_user_children(self):
+        child = st.new_note_text(U1, "Add docs", "task", "backlog", "user", NOTE_NOW, "write docs", parent=U3)
+        texts = {"a.md": child,
+                 "b.md": st.new_note_text(U2, "Started", "task", "in progress", "agent", NOTE_NOW, "x", parent=U3),
+                 "c.md": st.new_note_text("20261110_090009", "Other", "task", "backlog", "user", NOTE_NOW, "x", parent="20261101_000000"),
+                 "d.md": child.replace(f'parent: "[[{U3}]]"', f"parent:\n  - 2026/11/{U3}.md")}
+        self.assertEqual(st.proposal_titles(texts, U3), {"Add docs"})
+        op = {"op": "create", "uid": U1, "title": "Add docs", "kind": "task", "status": "backlog", "assignee": "user",
+              "request": "write docs", "parent": U3}
+        props = st.parse_frontmatter(st.apply_note_ops("", [op], NOW, 1)[0])[0]
+        self.assertEqual((props["parent"], props["status"], props["assignee"]), (f"[[{U3}]]", "backlog", "user"))
+
+    def test_done_field_is_a_completion_proposal(self):
+        self.assertEqual(self.plan(done="すべて完了しました")[-1], {"kind": "project_done", "summary": "すべて完了しました"})
+        self.assertEqual(self.plan(), [])
+        for bad in ("", "  ", 1):
+            text = "```project-report\n" + json.dumps({"project_id": "P-0001", "status": "idle", "summary": "s", "reviews": [],
+                                                      "plans": [], "questions": [], "done": bad}) + "\n```"
+            self.assertFalse(st.parse_project_report(text)["ok"])
+        self.project["done_proposed"] = {"at": NOW, "summary": "すべて完了しました"}
+        self.assertEqual(st.note_props("project", st.join_view(self.state, self.notes)["projects"][0], {}), ("done", "agent"))
+
+
+LIVE_SHAPE = FIXTURES / "state_v1_live_shape.json"
+MIGRATE_NOW = "2026-11-10T09:00:00+09:00"
+
+
+def live_shape():
+    return json.loads(LIVE_SHAPE.read_text(encoding="utf-8"))
+
+
+class MigrateExportTest(unittest.TestCase):
+    def setUp(self):
+        self.v1 = live_shape()
+        self.v2, self.creates = st.migrate_v2(self.v1, MIGRATE_NOW)
+        self.notes = {c["uid"]: c["text"] for c in self.creates}
+
+    def note_of(self, task_id, key="tasks"):
+        return self.notes[find(self.v2[key], task_id)["uid"]]
+
+    def test_fixture_covers_the_live_shapes(self):
+        shapes = {"+".join(sorted(a)) for o in self.v1["tasks"] + self.v1["archived"] for a in o["artifacts"]}
+        self.assertEqual(shapes, {"kind+label+url", "kind+label+ref+url", "kind+ref+url", "kind+ref", "kind+label+ref", "kind+path"})
+        self.assertEqual(st.validate(self.v1), [])
+
+    def test_storage_form_is_valid(self):
+        self.assertEqual(self.v2["schema_version"], 2)
+        self.assertEqual(st._storage_errors(self.v2, self.notes), [])
+        self.assertEqual(st.validate(st.join_view(self.v2, self.notes)), [])
+        self.assertEqual(len(self.creates), 13)
+        self.assertEqual(self.v2["supervisor"]["last_ua_number"], 160)
+        self.assertEqual(st.migrate_v2(self.v1, "2030-01-01T00:00:00+09:00")[1], self.creates)
+
+    def test_round_trip_keeps_titles_requests_actions_and_artifacts(self):
+        exported = st.export_v1(self.v2, self.notes)
+        self.assertEqual(st.validate(exported), [])
+        self.assertEqual(exported["schema_version"], 1)
+        for key in ("tasks", "archived"):
+            for old, new in zip(self.v1[key], exported[key]):
+                with self.subTest(key=key, id=old["id"]):
+                    self.assertEqual(new["id"], old["id"])
+                    self.assertEqual((new["title"], new["request"]), (old["title"], old["request"]))
+                    self.assertEqual(new["artifacts"], old["artifacts"])
+                    keep = [(u["id"], u["description"], u.get("follow_up")) for u in old.get("user_actions", [])
+                            if not u["description"].startswith(st.READ_ACTION_PREFIX)]
+                    self.assertEqual([(u["id"], u["description"], u.get("follow_up")) for u in new.get("user_actions", [])
+                                      if not u["id"].startswith(st.HELD_UA_PREFIX)], keep)
+                    self.assertFalse(set(st.V2_RUNTIME_KEYS) & set(new))
+        for old, new in zip(self.v1["projects"], exported["projects"]):
+            self.assertEqual((new["name"], new["context_doc_url"]), (old["name"], old["context_doc_url"]))
+            self.assertEqual([u["id"] for u in new["user_actions"]], [u["id"] for u in old["user_actions"] if "proposal" not in u])
+        self.assertEqual(find(exported["tasks"], "T-0120")["proposal"], find(self.v1["tasks"], "T-0120")["proposal"])
+
+    def test_uids_notes_and_props(self):
+        self.assertEqual(find(self.v2["tasks"], "T-0102")["uid"], "20261028_110000")
+        self.assertEqual(find(self.v2["tasks"], "T-0101")["uid"], "20261028_110001")
+        expected = {"T-0102": ("in progress", "user"), "T-0090": ("done", "agent"), "T-0106": ("in progress", "agent"),
+                    "T-0120": ("in progress", "agent")}
+        for task_id, pair in expected.items():
+            self.assertEqual(st._pair(st.note_values(self.note_of(task_id))), pair, task_id)
+        self.assertEqual(find(self.v2["tasks"], "T-0090")["held"], ["w-0090"])
+        self.assertEqual(st.parse_frontmatter(self.note_of("T-0120"))[0]["parent"], f"[[{find(self.v2['projects'], 'P-0001')['uid']}]]")
+        for stub_id, pair, date_key in (("T-0088", ("done", "user"), "completed_at"), ("T-0050", ("archived", "user"), "archived_at")):
+            props = st.parse_frontmatter(self.note_of(stub_id, "archived"))[0]
+            self.assertEqual(((props["status"], props["assignee"])), pair)
+            self.assertTrue(props[date_key])
+        self.assertEqual(find(self.v2["archived"], "T-0050")["project"], {"id": "P-0002"})
+        self.assertEqual(note_section(self.note_of("T-0102"), "概要").strip(), "repo-a の不具合を直して。push して PR を作ってよい")
+        log = note_section(self.note_of("T-0095"), "ログ")
+        self.assertIn("    > b.md も\n    > 見直して", log)
+
+    def test_user_action_kinds(self):
+        uas = note_uas(self.note_of("T-0102"))
+        self.assertEqual((uas["UA-0121"]["kind"], uas["UA-0121"]["detector"], uas["UA-0121"]["rule"]), ("auto", "pr_closed", "merge-pr"))
+        self.assertEqual((uas["UA-0122"]["kind"], uas["UA-0122"]["url"]), ("ask", "https://github.com/org/repo-a/pull/12"))
+        self.assertEqual(uas["UA-0153"]["detector"], "worker_report")
+        self.assertTrue(note_uas(self.note_of("T-0101"))["UA-0156"]["answer_required"])
+        self.assertEqual(note_uas(self.note_of("T-0090")), {})
+        project = note_uas(self.note_of("P-0001", "projects"))
+        self.assertEqual(list(project), ["UA-0148"])
+        self.assertEqual(project["UA-0148"]["detector"], "manager_report")
+        child = next(c for c in self.creates if "ドキュメントを足す" in c["text"])
+        props = st.parse_frontmatter(child["text"])[0]
+        self.assertEqual((props["status"], props["assignee"], props["parent"]),
+                         ("backlog", "user", f"[[{find(self.v2['projects'], 'P-0001')['uid']}]]"))
+        self.assertEqual(note_section(child["text"], "概要").strip(), "README に使い方を書く")
+
+    def test_artifact_groups_and_generations(self):
+        def rows(task_id, key="tasks"):
+            return [(i["g"], i["n"], i["kind"]) for i in st.parse_artifacts(note_section(self.note_of(task_id, key), "成果物"))[0]]
+        self.assertEqual(rows("T-0102"), [(1, 1, "branch"), (1, 2, "commit"), (3, 3, "pr"), (4, 4, "branch"), (4, 5, "commit"), (6, 6, "pr")])
+        self.assertEqual(rows("T-0095"), [(1, 1, "file"), (1, 2, "file")])
+        self.assertEqual(rows("T-0088", "archived"), [(1, 1, "file"), (1, 2, "file")])
+        self.assertEqual(rows("T-0096", "archived"), [(1, 1, "file"), (2, 2, "branch"), (2, 3, "commit"), (4, 4, "pr")])
+        revived = find(self.v2["tasks"], "T-0103")
+        self.assertEqual((revived["art_from"], revived["last_artifact_number"]), (4, 5))
+        self.assertEqual(find(self.v2["archived"], "T-0103")["uid"], revived["uid"])
+        self.assertEqual(rows("T-0103"), [(1, 1, "branch"), (1, 2, "commit"), (3, 3, "pr"), (4, 4, "branch"), (4, 5, "commit")])
+        self.assertEqual(find(self.v2["tasks"], "T-0106")["art_from"], 1)
+
+    def test_cli_migrate_and_export(self):
+        env = VaultEnv(self)
+        env.state_path.write_text(LIVE_SHAPE.read_text(encoding="utf-8"), encoding="utf-8")
+        code, out, err = env.run("migrate-v2", "--state", str(env.state_path), "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertEqual((json.loads(out)["dry_run"], len(json.loads(out)["notes"])), (True, 13))
+        self.assertFalse(env.vault.exists())
+        # An interrupted run (notes written, state still v1) is completed by running again.
+        with mock.patch.object(st, "_write_atomic", side_effect=Crash):
+            with self.assertRaises(Crash):
+                env.run("migrate-v2", "--state", str(env.state_path))
+        code, out, err = env.run("migrate-v2", "--state", str(env.state_path))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(env.load()["schema_version"], 2)
+        self.assertEqual(len(st._index_vault(str(env.vault))[0]), 13)
+        self.assertEqual(env.run("migrate-v2", "--state", str(env.state_path))[0], 1)
+        self.assertEqual(env.scan(), {"events": [], "warnings": []})
+        out_path = env.dir / "state.v1.json"
+        self.assertEqual(env.run("export-v1", "--state", str(env.state_path), "--out", str(env.state_path))[0], 1)
+        code, _, err = env.run("export-v1", "--state", str(env.state_path), "--out", str(out_path))
+        self.assertEqual(code, 0, err)
+        exported = json.loads(out_path.read_text(encoding="utf-8"))
+        self.assertEqual([t["title"] for t in exported["tasks"]], [t["title"] for t in self.v1["tasks"]])
+        code, _, err = env.commit()
+        self.assertEqual(code, 0, err)
+
+    def test_main_digest_reads_the_export(self):
+        main_tool = subprocess.run(["git", "-C", str(SKILL), "show", "main:skills/session-supervisor/scripts/state_tool.py"],
+                                   capture_output=True, text=True)
+        if main_tool.returncode != 0:
+            self.skipTest("main branch not available")
+        with tempfile.TemporaryDirectory() as tmp:
+            tool = Path(tmp) / "state_tool.py"
+            tool.write_text(main_tool.stdout, encoding="utf-8")
+            exported = Path(tmp) / "state.json"
+            exported.write_text(st.serialize(st.export_v1(self.v2, self.notes)), encoding="utf-8")
+            proc = subprocess.run([sys.executable, str(tool), "digest", "--state", str(exported)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("state not readable", proc.stdout)
+        for needle in ("T-0102", "UA-0153", "作業 T-0090", "P-0001 サンプル基盤"):
+            self.assertIn(needle, proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

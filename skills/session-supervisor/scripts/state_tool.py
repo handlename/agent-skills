@@ -7,7 +7,8 @@ guard_decision (bash_violations, path_violation), parse_follow_ups, new_pr_urls,
 parse_locations, default_locations, add_missing_locations, clone_url_parts,
 parse_frontmatter, set_props, new_note_text, parse_sections, parse_user_actions, ua_open, render_ua_line,
 apply_note_ops, parse_artifacts, render_artifact_line, artifacts_view, art_sha,
-join_view, split_view, note_props, user_transition, artifact_needs, note_values, journal_reflected, number_note_ops.
+join_view, split_view, note_props, user_transition, artifact_needs, note_values, journal_reflected, number_note_ops,
+proposal_titles, migrate_v2, export_v1.
 Imperative shell: the argparse subcommands at the bottom of this file.
 """
 
@@ -2905,6 +2906,183 @@ def number_note_ops(ops, next_ua, art_last):
     return out
 
 
+# v1 user action wording (SKILL.md section 5) -> (kind, detector) of the note item (3.2). Anything else is ask answer.
+MIGRATE_UA_RULES = (
+    (re.compile(r"^Answer w-\d+ \("), "auto", "worker_report"),
+    (re.compile(r"^Hub wait w-\d+ \("), "auto", "worker_report"),
+    (re.compile(r"^Review wait w-\d+ \("), "auto", "review_state"),
+    (re.compile(r"^Pass review R-\d+ "), "auto", "review_state"),
+    (re.compile(r"^Waiting task T-\d+ can start now"), "auto", "start_possible"),
+    (re.compile(r"^Open repo "), "auto", "worker_started"),
+    (re.compile(r"^(Close w-\d+ |Please archive )"), "auto", "archived_observed"),
+    (re.compile(r"^(Answer the pending approval of w-|Approve the pending tool request )"), "auto", "approval_cleared"),
+    (re.compile(r"^Answer the P-\d+ project manager"), "auto", "manager_report"),
+    (re.compile(r"^Session \S+ was started by the P-\d+ project manager"), "auto", "foreign_session_gone"),
+    (re.compile(r"^Tell w-\d+ in the app"), "ask", None),
+)
+V2_RUNTIME_KEYS = ("uid", "note", "note_seen", "user_hold", "confirmed", "held", "last_artifact_number", "art_from",
+                   "artifacts_quarantine", "done_proposed")
+
+
+def _uid_at(iso, taken, fallback):
+    """A note uid from an ISO time (its own clock, offset ignored), one second later while taken."""
+    try:
+        t = datetime.strptime((iso or "")[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        t = datetime.strptime(fallback[:19], "%Y-%m-%dT%H:%M:%S")
+    while t.strftime("%Y%m%d_%H%M%S") in taken:
+        t += timedelta(seconds=1)
+    taken.add(t.strftime("%Y%m%d_%H%M%S"))
+    return t.strftime("%Y%m%d_%H%M%S")
+
+
+def _migrated_ua(ua):
+    item = {"id": ua["id"], "description": ua["description"].replace("\n", " ")}
+    if ua.get("since"):
+        item["since"] = ua["since"]
+    follow_up = ua.get("follow_up")
+    if follow_up:
+        item.update(rule=follow_up.get("rule"), url=follow_up.get("url"))
+        item.update(kind="auto", detector="pr_closed") if follow_up.get("done") == "pr_closed" else item.update(kind="ask")
+        return item
+    for pattern, kind, detector in MIGRATE_UA_RULES:
+        if pattern.search(item["description"]):
+            return dict(item, kind=kind, **({"detector": detector} if detector else {}))
+    return dict(item, kind="ask", answer_required=True)
+
+
+def _artifact_groups(artifacts, first_n, cwds):
+    """Number artifacts in array order from first_n and infer groups by adjacency (3.9 migration): a commit right
+    after a lone branch joins it; consecutive files join when they lie under the same worker cwd (any cwd for stubs)."""
+    groups = []
+    for i, a in enumerate(artifacts):
+        item = dict({k: a[k] for k in ART_FIELDS if k in a}, n=first_n + i)
+        last = groups[-1] if groups else []
+        joins = last and (
+            (item["kind"] == "commit" and len(last) == 1 and last[0]["kind"] == "branch")
+            or (item["kind"] == "file" and last[-1]["kind"] == "file"
+                and (cwds is None or any(_under(last[-1]["path"], c) and _under(item["path"], c) for c in cwds))))
+        if joins:
+            last.append(item)
+        else:
+            groups.append([item])
+    return groups
+
+
+def _migrated_note(uid, title, kind, status, assignee, at, request, rev, parent=None, uas=(), groups=(), followups=(), dates=None):
+    text = new_note_text(uid, title or uid, kind, status, assignee, at, request or "", parent)
+    ops = [{"op": "ua_add", "ua": ua} for ua in uas] + [{"op": "art_add", "g": g[0]["n"], "items": g} for g in groups]
+    text = apply_note_ops(text, ops, at, rev)[0]
+    for i, f in enumerate(followups):
+        quote = "\n".join("> " + line for line in f["text"].split("\n"))
+        text = apply_note_ops(text, [{"op": "log", "id": f"sv-log-v1-{i}", "text": "追加の依頼:\n" + quote}], f["at"], rev)[0]
+    return set_props(text, dates) if dates else text
+
+
+def migrate_v2(state, now, taken=()):
+    """(state_v2, note_creates) for a v1 state (3.3, 3.9 migration). note_creates are {uid, path, text}. Every live
+    task, project and stub gets a note (a revived task and its stub share one); project proposal user actions become
+    backlog/user task notes under the project; read user actions become held. The result is deterministic: now is used
+    only where the state has no time of its own."""
+    if not isinstance(state, dict) or state.get("schema_version") != VIEW_SCHEMA_VERSION:
+        raise StateError(f"migrate-v2 needs a schema_version {VIEW_SCHEMA_VERSION} state")
+    errors = validate(state)
+    if errors:
+        raise StateError(errors)
+    out, taken, creates, rev = copy.deepcopy(state), set(taken), [], state["rev"]
+    at_now = state.get("updated_at") or now
+    workers_by_id = {w["id"]: w for w in state["workers"]}
+    stubs = {s["id"]: s for s in state["archived"]}
+
+    def create(uid, text):
+        creates.append({"uid": uid, "path": _new_note_path(uid), "text": text})
+        return text
+
+    def store(item, key, uid, text):
+        for k in NOTE_MOVED_KEYS[key]:
+            item.pop(k, None)
+        item.update(uid=uid, note_seen=note_values(text))
+        if key != "archived":
+            item["note"] = _new_note_path(uid)
+
+    project_uids = {}
+    for p in out.get("projects", []):
+        uid = project_uids[p["id"]] = _uid_at(p.get("created_at"), taken, now)
+        proposals = [ua for ua in p.get("user_actions", []) if isinstance(ua.get("proposal"), dict)]
+        rest = [ua for ua in p.get("user_actions", []) if not isinstance(ua.get("proposal"), dict)]
+        status, assignee = note_props("project", dict(p, user_actions=rest), {})
+        overview = f"Context document: {p['context_doc_url']}" if p.get("context_doc_url") else ""
+        text = create(uid, _migrated_note(uid, p.get("name"), "project", status, assignee or "agent", p["created_at"], overview, rev,
+                                          uas=[_migrated_ua(ua) for ua in rest], dates=_date_props(status, at_now)))
+        for ua in proposals:
+            puid = _uid_at(ua.get("since"), taken, now)
+            create(puid, _migrated_note(puid, ua["proposal"]["title"], "task", "backlog", "user", ua.get("since") or at_now,
+                                        ua["proposal"]["text"], rev, parent=uid))
+        store(p, "projects", uid, text)
+    task_uids = {}
+    for t in out["tasks"]:
+        uid = task_uids[t["id"]] = _uid_at(t.get("created_at"), taken, now)
+        stub = stubs.get(t["id"])
+        held = [wid for wid in map(_read_action_worker, t.get("user_actions", [])) if wid]
+        cwds = [w["cwd"] for w in state["workers"] if w.get("task_id") == t["id"]]
+        old = stub.get("artifacts", []) if stub else []
+        groups = _artifact_groups(old, 1, None) + _artifact_groups(t.get("artifacts", []), len(old) + 1, cwds)
+        status, assignee = note_props("task", t, workers_by_id)
+        followups = (stub.get("followups", []) if stub else []) + [f for f in t.get("followups", []) if f not in (stub or {}).get("followups", [])]
+        text = create(uid, _migrated_note(
+            uid, t.get("title"), "task", status, assignee or "agent", t["created_at"], t.get("request"), rev,
+            parent=project_uids.get(t.get("project_id")), groups=groups, followups=followups, dates=_date_props(status, at_now),
+            uas=[_migrated_ua(ua) for ua in t.get("user_actions", []) if not _read_action_worker(ua)]))
+        store(t, "tasks", uid, text)
+        t["last_artifact_number"] = sum(len(g) for g in groups)
+        if held:
+            t["held"] = held
+        if stub is not None:
+            t["art_from"] = len(old) + 1
+    for sb in out["archived"]:
+        if sb["id"] in task_uids:
+            uid = task_uids[sb["id"]]
+            text = next(c["text"] for c in creates if c["uid"] == uid)
+            last = len(sb.get("artifacts", []))
+        else:
+            uid = _uid_at(sb.get("archived_at"), taken, now)
+            status = "archived" if sb.get("cancelled") else "done"
+            groups = _artifact_groups(sb.get("artifacts", []), 1, None)
+            last = sum(len(g) for g in groups)
+            text = create(uid, _migrated_note(
+                uid, sb.get("title"), "task", status, "user", sb.get("archived_at") or at_now, sb.get("request"), rev,
+                parent=project_uids.get((sb.get("project") or {}).get("id")), groups=groups,
+                followups=sb.get("followups", []), dates=_date_props(status, sb.get("archived_at") or at_now)))
+        store(sb, "archived", uid, text)
+        sb["last_artifact_number"] = last
+        if "project" in sb:
+            sb["project"] = {"id": sb["project"]["id"]}
+    out["schema_version"] = SCHEMA_VERSION
+    out["supervisor"].update(last_ua_number=max([_ua_number(i) for i in _ua_ids(state)] + [0]), note_warnings={},
+                             note_journal=None)
+    notes = {c["uid"]: c["text"] for c in creates}
+    errors = _storage_errors(out, notes) + validate(join_view(out, notes))
+    if errors:
+        raise StateError(errors)
+    return out, creates
+
+
+def export_v1(state, notes):
+    """The v1 state.json of a v2 state and its notes ({uid: text}): the v1 view without the v2 runtime keys.
+    A held worker comes back as a `Read the result of w-NNNN (held)` user action; follow-up quotes stay in the notes."""
+    view = join_view(state, notes)
+    for key in ("last_ua_number", "note_warnings", "note_journal"):
+        view["supervisor"].pop(key, None)
+    for item in view["tasks"] + view.get("projects", []) + view["archived"]:
+        for key in V2_RUNTIME_KEYS:
+            item.pop(key, None)
+        if "user_actions" in item:
+            item["user_actions"] = [{k: v for k, v in ua.items() if k not in ("detector", "needs_answer")} for ua in item["user_actions"]]
+        if not item.get("followups"):
+            item.pop("followups", None)
+    return view
+
+
 def _pr_urls(task):
     urls = []
     for a in task.get("artifacts", []):
@@ -3003,6 +3181,8 @@ def parse_project_report(text, expect_project=None):
             return {"ok": False, "error": "each plan needs kind redo or new"}
         if not _fields_ok(plan, keys) or not isinstance(plan.get("worker_id", ""), str):
             return {"ok": False, "error": f"a {kind} plan needs non-empty {' and '.join(keys)} (worker_id, when given, a string)"}
+    if "done" in report and not (isinstance(report["done"], str) and report["done"].strip()):
+        return {"ok": False, "error": "done, when given, must be a non-empty summary string"}
     if expect_project is not None and report["project_id"] != expect_project:
         return {"ok": False, "error": f"project_id {report['project_id']!r} does not match {expect_project!r}"}
     return {"ok": True, "report": report}
@@ -3025,9 +3205,11 @@ def _review_action(worker, verdict, running):
     return "stale_silent"
 
 
-def plan_actions(state, project_id, report, running=()):
+def plan_actions(state, project_id, report, running=(), proposal_titles=()):
     """Turn a project-report's reviews and plans into the operations the supervisor performs. Does not modify state.
-    `running` holds the worker ids the supervisor just found running with get."""
+    `running` holds the worker ids the supervisor just found running with get. For a project with a note (uid), a new
+    task proposal becomes proposal_note (a backlog/user task note with parent); proposal_titles are the titles of its
+    backlog/user child notes, which make a proposal with the same title a duplicate."""
     project = _project(state, project_id)
     tasks = {t["id"]: t for t in state.get("tasks", [])}
     workers_by_id = {w["id"]: w for w in state.get("workers", [])}
@@ -3044,12 +3226,16 @@ def plan_actions(state, project_id, report, running=()):
         actions.append(dict(base, kind=_review_action(w, r["verdict"], set(running)), worker_id=w["id"], task_id=w["task_id"]))
     stubs = {s["id"]: s for s in state.get("archived", [])}
     open_titles = {ua["proposal"]["title"] for ua in project.get("user_actions", []) if isinstance(ua.get("proposal"), dict)}
+    open_titles |= set(proposal_titles)
     seen_redos = set()
     for plan in report.get("plans", []):
         if plan["kind"] == "new":
             dup = plan["title"] in open_titles
             open_titles.add(plan["title"])
-            actions.append({"kind": "proposal_dup" if dup else "proposal_add", "title": plan["title"], "text": plan["text"]})
+            action = {"kind": "proposal_dup" if dup else "proposal_add", "title": plan["title"], "text": plan["text"]}
+            if project.get("uid") and not dup:
+                action.update(kind="proposal_note", parent=project["uid"])
+            actions.append(action)
             continue
         tid, text = plan["task_id"], plan["text"]
         action = {"task_id": tid, "text": text}
@@ -3074,7 +3260,26 @@ def plan_actions(state, project_id, report, running=()):
         else:
             actions.append(dict(action, kind="redo_ambiguous" if live else "redo_start",
                                 worker_ids=[w["id"] for w in live]))
+    if report.get("done"):
+        actions.append({"kind": "project_done", "summary": report["done"]})
     return actions
+
+
+def _parent_uids(value):
+    """Note uids a parent property links: "[[uid]]", a path ending in uid.md, or a list of those."""
+    return set(re.findall(r"\d{8}_\d{6}", json.dumps(value)))
+
+
+def proposal_titles(texts, project_uid):
+    """Titles of the backlog/user task notes whose parent is the project note: proposals waiting for the user."""
+    titles = set()
+    for text in texts.values():
+        props = parse_frontmatter(text)[0]
+        tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]
+        if ("task" in tags and (props.get("status"), props.get("assignee")) == ("backlog", "user")
+                and project_uid in _parent_uids(props.get("parent")) and isinstance(props.get("title"), str)):
+            titles.add(props["title"])
+    return titles
 
 
 def _cell(value):
@@ -4003,7 +4208,10 @@ def cmd_plan_actions(args):
     result = parse_project_report(_read_text_arg(args.file), args.project)
     if not result["ok"]:
         raise StateError(result["error"])
-    print(json.dumps(plan_actions(_load_view(args.state), args.project, result["report"], args.running), ensure_ascii=False))
+    view = _load_view(args.state)
+    project_uid = (_project(view, args.project) or {}).get("uid")
+    titles = proposal_titles(_index_vault(_vault_path(args.state))[0], project_uid) if project_uid else ()
+    print(json.dumps(plan_actions(view, args.project, result["report"], args.running, titles), ensure_ascii=False))
     return 0
 
 
@@ -4154,6 +4362,37 @@ def cmd_new_note(args):
     return 0
 
 
+def cmd_migrate_v2(args):
+    state = _read_json(args.state)
+    vault = Path(_vault_path(args.state))
+    new, creates = migrate_v2(state, _now())
+    exists = [c for c in creates if (vault / c["path"]).exists()]
+    conflicts = [c["path"] for c in exists if (vault / c["path"]).read_text(encoding="utf-8") != c["text"]]
+    if conflicts:
+        raise StateError(f"notes already exist with other content: {conflicts}")
+    summary = {"dry_run": bool(args.dry_run), "notes": [c["path"] for c in creates], "tasks": len(new["tasks"]),
+               "projects": len(new.get("projects", [])), "archived": len(new["archived"])}
+    if not args.dry_run:
+        # Notes first: an interrupted run leaves state.json at v1, and a rerun writes the same notes again.
+        for c in creates:
+            if c not in exists:
+                _write_note(str(vault / c["path"]), c["text"])
+        _write_atomic(args.state, serialize(new))
+    print(json.dumps(summary, ensure_ascii=False))
+    return 0
+
+
+def cmd_export_v1(args):
+    if _real(args.out) == _real(args.state):
+        raise StateError("--out must not be the state file")
+    state = _read_json(args.state)
+    _require_v2(state, args.state)
+    texts, uids = _index_vault(_vault_path(args.state))
+    _write_atomic(args.out, serialize(export_v1(state, _notes_by_uid(texts, uids))))
+    print(json.dumps({"out": args.out}))
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="state_tool.py", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -4182,6 +4421,16 @@ def build_parser():
     p.add_argument("--state", required=True)
     p.add_argument("--uid", required=True)
     p.set_defaults(func=cmd_note_show)
+
+    p = sub.add_parser("migrate-v2", help="convert a schema_version 1 state.json into notes and a v2 state (idempotent until state is written)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--dry-run", action="store_true", help="print what would be written and write nothing")
+    p.set_defaults(func=cmd_migrate_v2)
+
+    p = sub.add_parser("export-v1", help="write the v1 state.json of a v2 state and its notes to --out (rollback)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--out", required=True)
+    p.set_defaults(func=cmd_export_v1)
 
     p = sub.add_parser("new-note", help="reserve a uid and path for a new task or project note (writes nothing)")
     p.add_argument("--state", required=True)
