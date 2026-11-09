@@ -2587,6 +2587,9 @@ def join_view(state, notes):
                                   + [_held_action(task, wid) for wid in task.get("held", [])]),
                     last_artifact_number=max([i["n"] for i in items] + [task.get("last_artifact_number", 0)]))
         task["status"] = derive_status(task, workers_by_id)
+        if isinstance(task.get("proposal"), dict):
+            # A task picked up from a proposal note stores only {from, message_ref}; the note is the proposal.
+            task["proposal"] = dict({"title": task["title"], "text": task["request"]}, **task["proposal"])
     for stub in view["archived"]:
         props, sections, items = parsed.get(stub.get("uid"), empty)
         last = max([i["n"] for i in items] + [stub.get("last_artifact_number", 0)])

@@ -5125,6 +5125,14 @@ class ProposalNoteTest(unittest.TestCase):
         props = st.parse_frontmatter(st.apply_note_ops("", [op], NOW, 1)[0])[0]
         self.assertEqual((props["parent"], props["status"], props["assignee"]), (f"[[{U3}]]", "backlog", "user"))
 
+    def test_task_from_a_proposal_note_takes_title_and_text_from_it(self):
+        task = v2_git_task(self.state, self.notes, "T-0020", "w-0020", U1, intended="pending", observed="none")
+        task.update(project_id="P-0001", proposal={"from": "P-0001", "message_ref": f"note:{U1}"})
+        view = st.join_view(self.state, self.notes)
+        self.assertEqual(find(view["tasks"], "T-0020")["proposal"],
+                         {"title": f"task {U1}", "text": "fix the LICENSE year", "from": "P-0001", "message_ref": f"note:{U1}"})
+        self.assertEqual(st.validate(view), [])
+
     def test_done_field_is_a_completion_proposal(self):
         self.assertEqual(self.plan(done="すべて完了しました")[-1], {"kind": "project_done", "summary": "すべて完了しました"})
         self.assertEqual(self.plan(), [])

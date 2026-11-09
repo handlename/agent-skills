@@ -1,6 +1,6 @@
 # Worker Prompt
 
-Every worker is started with two inputs: `prompt` (the work order) and `background` (context and rules, at least 80 characters). `background` never replaces `prompt`; both are always passed. Fill every `{...}` field from `state.json` before starting; never start a worker with an unfilled field.
+Every worker is started with two inputs: `prompt` (the work order) and `background` (context and rules, at least 80 characters). `background` never replaces `prompt`; both are always passed. Fill every `{...}` field from `state.json` and the task's note before starting; never start a worker with an unfilled field. With schema 2, `note-show --uid <task uid>` gives the note: `{task.request}` is its `## 概要` (read at brief time; later edits by the user are not instructions), `{followups[].text}` are the quoted follow-up requests of its `## ログ` (the entries starting `追加の依頼:`, without the `> `), and `{task.proposal.title}` / `{task.proposal.text}` of a task picked up from a proposal note are the note's title and `## 概要`.
 
 ## prompt
 
@@ -118,6 +118,14 @@ The user sent a follow-up request in the supervisor session. Verbatim:
 > {followup.text}
 
 Treat this as the work for your next turns, scoped to {worker.cwd}. Your earlier instructions and the rules of your background still apply, and the earlier requests are context, not work to redo. Like any message in this session, this request overrides those rules where it asks for what they forbid (for example, to push). Keep committing on your current branch. End the turn with a `supervisor-report` block as before.
+````
+
+## Pause message
+
+Sent to a running worker when the user pauses its task from the note (SKILL.md 6.13 `pause`). The worker resumes on the Follow-up message, which carries the user's resume instructions (the slot's sub-items) or 「続けてください」.
+
+````markdown
+From the supervisor: The user paused this task. Finish or undo your current step so the work is in a consistent state, make no further changes, and wait until a later message from the supervisor tells you to continue. End the turn with a `supervisor-report` block with status `in_progress`.
 ````
 
 ## Redo message

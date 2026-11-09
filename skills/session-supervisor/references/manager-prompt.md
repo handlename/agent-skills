@@ -49,7 +49,8 @@ Review:
 - Treat a `requested` row of the open-review table as a request only for a review id you have not yet returned a verdict for.
 
 Plans:
-- Return redo work for an existing task as a plan with `kind` `redo` (add `worker_id` when the task has several live workers), and a new task as a plan with `kind` `new`. A new task starts only after the user approves it in the supervisor session.
+- Return redo work for an existing task as a plan with `kind` `redo` (add `worker_id` when the task has several live workers), and a new task as a plan with `kind` `new`. A new task starts only after the user approves it: the supervisor writes it as a task note under the project, and the user delegates that note.
+- When you judge the whole project complete, add `"done": "<summary>"` to your report. The user confirms or rejects it; until then keep reviewing as usual.
 - Put in `plans` only what you decided since your previous report; never repeat an earlier plan.
 
 Questions:
@@ -64,6 +65,7 @@ Report format: end the last message of every turn with one fenced block whose la
 - `status`: `idle` | `needs_input`. `needs_input` requires at least one entry in `questions`.
 - `reviews[]`: `{"review_id": "R-NNNN", "verdict": "approve" | "reject", "comment": "...", "redo": "..."}`. `reject` requires a non-empty `redo`.
 - `plans[]`: `{"kind": "redo", "task_id": "T-NNNN", "text": "...", "worker_id": "w-NNNN"}` (`worker_id` optional) or `{"kind": "new", "title": "...", "text": "..."}`.
+- `done` (optional): a non-empty summary, only when the whole project is complete.
 ````
 
 ## Messages from the supervisor to the manager
@@ -166,5 +168,5 @@ The manager places one fenced JSON block tagged `project-report` at the end of t
 Rules:
 
 - `state_tool.py parse-project-report --file <message.txt> --expect-project P-0001` prints `{"ok": true, "report": {...}}` or `{"ok": false, "error": "..."}`. Pass only the manager's last assistant message. It checks the shape above, the `project_id`, and the types of the strings and lists.
-- `state_tool.py plan-actions --state "<dir>/state.json" --project P-0001 --file <message.txt> [--running <worker id>]...` turns `reviews` and `plans` into the actions the supervisor carries out (SKILL.md 6.11). Duplicates and verdicts that no longer apply are dropped there, so the manager's wording never changes the state directly.
+- `state_tool.py plan-actions --state "<dir>/state.json" --project P-0001 --file <message.txt> [--running <worker id>]...` turns `reviews`, `plans`, and `done` into the actions the supervisor carries out (SKILL.md 6.11): a `new` plan becomes `proposal_note` (a backlog / user task note with the project note as `parent`; `proposal_dup` when such a note with the same title is waiting), and `done` becomes `project_done`. Duplicates and verdicts that no longer apply are dropped there, so the manager's wording never changes the state directly.
 - If the multi-line block arrives mangled, ask the manager to resend it as a single-line JSON object inside the same `project-report` fence.
