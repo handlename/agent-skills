@@ -4290,7 +4290,12 @@ def notes_scan(state, texts, uids, vault=None):
         rows = parse_artifacts(body.get(ART_SECTION, ""))[0]
         ctx, needs = _scan_ctx(kind, item, view_items.get((key, item["id"])), view["workers"], live, len(rels) > 1, rows)
         result = user_transition(seen, cur, ctx)
-        if cur == seen and not result["clear_invalid"] and result["event"] == "none":
+        # A change that needs nothing (an answer or checkbox edit, a paused note moved between user values) is not
+        # printed; it is acked with the next event of the note. AC-12: nothing happens while the assignee is user.
+        if result["event"] == "none" and not result["clear_invalid"]:
+            continue
+        hold = item.get("user_hold") or {}
+        if result["event"] == "invalid" and hold.get("reason") == "invalid" and (hold.get("status"), hold.get("assignee")) == _pair(cur):
             continue
         event = dict(result, uid=uid, path=rels[0], id=item.get("id"), kind=kind, live=live, seen=seen, cur=cur,
                      user_actions=[_ua_summary(u) for u in parse_user_actions(body.get(UA_SECTION, ""))])

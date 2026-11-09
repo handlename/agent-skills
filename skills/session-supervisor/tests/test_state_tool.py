@@ -4974,6 +4974,33 @@ class NotesScanCliTest(unittest.TestCase):
         self.assertEqual((event["event"], event["row"]), ("artifacts_broken", 23))
         self.assertIn("UA-0001 の対象 w-0020 の branch claude/license-x1 と直後の commit", event["needs"])
 
+    def test_answers_while_the_assignee_is_user_print_nothing(self):
+        env = VaultEnv(self)
+        env.add_task("T-0020", "w-0020", U1, uas=[ua(1, "where?", answer_required=True)])
+        env.state["tasks"][0]["note_seen"] = st.note_values(env.text(U1).replace('assignee: "agent"', 'assignee: "user"'))
+        env.put(U1, env.text(U1).replace('assignee: "agent"', 'assignee: "user"'))
+        env.save()
+        env.put(U1, env.text(U1).replace("- [ ] UA-0001", "- [x] UA-0001").replace("^ua-0001", "^ua-0001\n    - ~/notes"))
+        self.assertEqual(env.scan()["events"], [])
+        env.put(U1, env.text(U1).replace('assignee: "user"', 'assignee: "agent"'))
+        event = env.scan()["events"][0]
+        self.assertEqual((event["event"], event["ack"]), ("resume", st.note_values(env.text(U1))))
+
+    def test_a_recorded_invalid_hold_is_not_printed_again(self):
+        self.env.put(U1, self.env.text(U1).replace('status: "in progress"', "status: doing"))
+        event = self.env.scan()["events"][0]
+        self.assertEqual((event["event"], event["row"]), ("invalid", 4))
+        state = self.env.load()
+        state["tasks"][0]["user_hold"] = {"at": NOW, "status": "doing", "assignee": "agent", "reason": "invalid"}
+        self.env.state = state
+        self.env.save()
+        self.assertEqual(self.env.scan()["events"], [])
+        self.env.put(U1, self.env.text(U1).replace("status: doing", "status: todo"))
+        self.assertEqual([e["event"] for e in self.env.scan()["events"]], ["invalid"])
+        self.env.put(U1, self.env.text(U1).replace("status: todo", 'status: "in progress"'))
+        event = self.env.scan()["events"][0]
+        self.assertEqual((event["event"], event["clear_invalid"]), ("none", True))
+
     def test_v1_state_is_refused(self):
         self.env.state_path.write_text(st.serialize(fixture_state()), encoding="utf-8")
         code, _, err = self.env.run("notes-scan", "--state", str(self.env.state_path))

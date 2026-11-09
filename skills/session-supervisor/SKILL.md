@@ -673,8 +673,9 @@ Called from 6.4 when a manager of an open project is `missing` or archived outsi
 | `reject_done` | Remove `done_proposed` and send the manager "The user does not consider the project done. Continue." |
 | `artifacts_edit` | Ack, `log` 「成果物の変更を受け付けました」; when quarantined, remove `artifacts_quarantine` and ack its user action |
 | `artifacts_broken` | Quarantine: `artifacts_quarantine = {at, ua}` and the `ask answer` user action listing `needs`, why they are needed, and the two answers 「行を戻した」 (restore the rows with Obsidian's undo or file recovery) and 「削除」 |
-| `invalid` | Tell the user once; for a managed note record `user_hold` (`reason: "invalid"`), for an unmanaged one store `warning_key: warning_sha` in `supervisor.note_warnings`. Nothing else, no ack |
-| `none` | Copy the ack (a checkbox or answer edit; answers are read at `resume`) |
+| `invalid` | Tell the user; for a managed note record `user_hold = {at, status, assignee, reason: "invalid"}` with the note's current values, for an unmanaged one store `warning_key: warning_sha` in `supervisor.note_warnings`. Either record stops the same warning from being printed again. Nothing else, no ack |
+
+A change that needs nothing (an answer or a checkbox edit, a paused note moved between user values) prints no event; answers are read at `resume`.
 
 `clear_invalid: true` on an event means the user fixed the values: remove `user_hold` in the same candidate. Quarantine answers, at `resume`: when the rows are back (the next scan reports `artifacts_edit`) the quarantine ends there; 「行を戻した」 with rows still missing gets the user action again with the current needs; 「削除」 records, in one candidate, `no_result` (`summary` 「成果物の記録をユーザーが削除(UA-NNNN)」) for each archived worker that depended on the rows, acks the push decision as "no push" and the follow-ups, and removes `artifacts_quarantine`.
 
