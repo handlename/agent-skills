@@ -3549,16 +3549,25 @@ def _load_view(state_path):
     return join_view(state, _notes_by_uid(texts, uids))
 
 
-def _pending_entries(state, texts, uids):
-    """Journal entries of the last commit whose notes do not show their write yet, by uid."""
+def _entry_rev(entry, journal):
+    # An entry carried over after a failed write keeps the rev of the commit that made its ops (ids and marks).
+    return entry.get("rev", journal["rev"])
+
+
+def _unreflected(state, texts, uids):
+    """Journal entries of the last commit whose notes do not show their write yet, in journal order."""
     journal = (state.get("supervisor") or {}).get("note_journal")
     if not journal or journal.get("rev") != state.get("rev"):
-        return {}
+        return []
+    return [e for e in journal.get("entries", [])
+            if not journal_reflected(texts.get((uids.get(e.get("uid")) or [e.get("path")])[0]), e, _entry_rev(e, journal))]
+
+
+def _pending_entries(state, texts, uids):
+    """The first unreflected journal entry of each note, by uid (its before values are what the note still shows)."""
     pending = {}
-    for entry in journal.get("entries", []):
-        rel = (uids.get(entry.get("uid")) or [entry.get("path")])[0]
-        if not journal_reflected(texts.get(rel), entry, journal["rev"]):
-            pending.setdefault(entry.get("uid"), entry)
+    for entry in _unreflected(state, texts, uids):
+        pending.setdefault(entry.get("uid"), entry)
     return pending
 
 
@@ -3568,10 +3577,11 @@ def _replay_journal(state, vault, texts, uids, warnings):
     if not journal or journal.get("rev") != state.get("rev"):
         return []
     carried = []
-    for uid, entry in _pending_entries(state, texts, uids).items():
+    for entry in _unreflected(state, texts, uids):
+        uid = entry.get("uid")
         rel = (uids.get(uid) or [entry["path"]])[0]
         text = texts.get(rel)
-        new_text, _, _ = apply_note_ops(text or "", entry.get("ops", []), entry.get("at") or _now(), journal["rev"])
+        new_text, _, _ = apply_note_ops(text or "", entry.get("ops", []), entry.get("at") or _now(), _entry_rev(entry, journal))
         if entry.get("props") and _pair(note_values(text or new_text)) == _pair(entry.get("before") or note_values(new_text)):
             new_text = set_props(new_text, entry["props"])
         try:
@@ -3579,9 +3589,9 @@ def _replay_journal(state, vault, texts, uids, warnings):
         except OSError as e:
             tries = entry.get("tries", 0) + 1
             if tries >= 2:
-                warnings.append(f"note {rel}: dropped the unwritten changes of rev {journal['rev']} after {tries} tries ({e})")
+                warnings.append(f"note {rel}: dropped the unwritten changes of rev {_entry_rev(entry, journal)} after {tries} tries ({e})")
             else:
-                carried.append(dict(entry, tries=tries))
+                carried.append(dict(entry, tries=tries, rev=_entry_rev(entry, journal)))
             continue
         texts[rel] = new_text
         uids.setdefault(uid, [rel])
@@ -3632,6 +3642,11 @@ def _commit_v2(args, current, html_path, template):
     # 2. Locate the notes and check the acks the supervisor copied into note_seen.
     paths = {uid: rels[0] for uid, rels in uids.items()}
     for uid, ops in raw_ops.items():
+        creates = sum(o.get("op") == "create" for o in ops)
+        if creates > 1:
+            raise StateError(f"note {uid}: {creates} create ops; reserve one uid per note with new-note --count")
+        if creates and (uid in uids or os.path.exists(os.path.join(vault, _new_note_path(uid)))):
+            raise StateError(f"note {uid} already exists; reserve a new uid with new-note")
         if len(uids.get(uid, [])) > 1:
             raise StateError(f"note uid {uid} is used by {uids[uid]}")
         if uid in paths:
@@ -3693,6 +3708,8 @@ def _commit_v2(args, current, html_path, template):
         changes = {}
         if derived[0] != cur_pair[0]:
             changes["status"] = derived[0]
+            if derived[0] not in ("done", "archived") and parse_frontmatter(after[uid])[0].get("completed_at"):
+                changes["completed_at"] = None
         # The date is set when the note reaches done / archived, also when the user moved it there first.
         changes.update({k: v for k, v in _date_props(derived[0], now).items() if not parse_frontmatter(after[uid])[0].get(k)})
         if derived[1] and derived[1] != cur_pair[1]:
@@ -3740,7 +3757,7 @@ def _commit_v2(args, current, html_path, template):
     entries = list(carried) + [{
         "uid": uid, "path": paths[uid], "before": seen_cmp.get(uid), "after": new_seen.get(uid),
         "ops": ops_all.get(uid, []), "props": props.get(uid, {}), "new_ids": new_ids.get(uid, []),
-        "after_sha": _text_sha(after[uid]), "tries": 0, "at": now,
+        "after_sha": _text_sha(after[uid]), "tries": 0, "at": now, "rev": rev,
     } for uid in written]
     state_new["supervisor"]["note_journal"] = {"rev": rev, "entries": entries} if entries else None
     errors = _storage_errors(state_new, dict(notes_after, **{uid: after[uid] for uid in written}))
@@ -4277,6 +4294,7 @@ def notes_scan(state, texts, uids, vault=None):
             if item.get("uid") and item["uid"] not in managed:
                 managed[item["uid"]] = (key, kind, item, live)
     events, warnings = [], []
+    warned = (state.get("supervisor") or {}).get("note_warnings") or {}
     for uid, (key, kind, item, live) in managed.items():
         rels = uids.get(uid, [])
         if not rels:
@@ -4297,13 +4315,20 @@ def notes_scan(state, texts, uids, vault=None):
         hold = item.get("user_hold") or {}
         if result["event"] == "invalid" and hold.get("reason") == "invalid" and (hold.get("status"), hold.get("assignee")) == _pair(cur):
             continue
+        warning = None
+        if result["event"] == "invalid" and not live:
+            # A stub has no user_hold (plan #19): its warning is recorded in note_warnings like an unmanaged note's.
+            warning = _text_sha(json.dumps(_pair(cur), ensure_ascii=False))
+            if warned.get(uid) == warning:
+                continue
         event = dict(result, uid=uid, path=rels[0], id=item.get("id"), kind=kind, live=live, seen=seen, cur=cur,
                      user_actions=[_ua_summary(u) for u in parse_user_actions(body.get(UA_SECTION, ""))])
         if needs:
             event["needs"] = needs
+        if warning:
+            event["warning_key"], event["warning_sha"] = uid, warning
         events.append(event)
     taken = set(uids) | set(managed)
-    warned = (state.get("supervisor") or {}).get("note_warnings") or {}
     for rel, text in texts.items():
         props, body_text, _ = parse_frontmatter(text)
         uid = props.get("uid") if isinstance(props.get("uid"), str) and props.get("uid") else None
@@ -4312,6 +4337,11 @@ def notes_scan(state, texts, uids, vault=None):
         if uid in managed or kind is None:
             continue
         cur = note_values(text)
+        if uid and _former_note(props, body_text):
+            event = _former_follow_up(uid, rel, kind, props, body_text, cur)
+            if event:
+                events.append(event)
+            continue
         result = user_transition(None, cur, {"managed": False})
         if result["event"] == "none":
             continue
@@ -4329,6 +4359,30 @@ def notes_scan(state, texts, uids, vault=None):
             taken.add(event["proposed_uid"])
         events.append(event)
     return {"events": events, "warnings": warnings}
+
+
+FORMER_MARK_RE = re.compile(r"\^(?:ua-\d+|sv-log-[\w-]+|sv-art-\d+)[ \t]*$|<!--[ \t]*sv-art ", re.M)
+
+
+def _former_note(props, body):
+    """A note state_tool wrote for a task that no longer is in state (its stub left the archived window)."""
+    return bool(props.get("completed_at")) or bool(FORMER_MARK_RE.search(body))
+
+
+def _former_follow_up(uid, rel, kind, props, body, cur):
+    """done/archived or anything but backlog/agent: no event. backlog/agent: a follow-up (#16) without a stub, carrying
+    the open slot's text and the highest artifact number, so the new T-id keeps the uid and starts its own rows."""
+    if _pair(cur) != ("backlog", "agent"):
+        return None
+    sections = parse_sections(body)
+    uas = parse_user_actions(sections.get(UA_SECTION, ""))
+    slots = [u for u in uas if u["kind"] == "slot" and not u["done"]]
+    rows = parse_artifacts(sections.get(ART_SECTION, ""))[0]
+    return {"event": "follow_up", "row": 16, "ack": cur, "clear_invalid": False, "uid": uid, "path": rel, "kind": kind,
+            "live": False, "former": True, "cur": cur, "title": props.get("title"), "request": sections.get("概要", "").strip(),
+            "slot": slots[-1]["id"] if slots else None, "follow_up_text": slots[-1]["answer"] if slots else "",
+            "last_artifact_number": max([r["n"] for r in rows] + [0]),
+            "user_actions": [_ua_summary(u) for u in uas]}
 
 
 def cmd_notes_scan(args):
@@ -4362,11 +4416,15 @@ def cmd_new_note(args):
     _require_v2(state, args.state)
     _, uids = _index_vault(_vault_path(args.state))
     taken = set(uids) | {i.get("uid") for k in ("tasks", "projects", "archived") for i in state.get(k, [])}
-    t = datetime.now()
-    while t.strftime("%Y%m%d_%H%M%S") in taken:
+    if args.count < 1:
+        raise StateError("--count must be 1 or more")
+    t, notes = datetime.now(), []
+    while len(notes) < args.count:
+        uid = t.strftime("%Y%m%d_%H%M%S")
+        if uid not in taken:
+            notes.append({"uid": uid, "path": _new_note_path(uid), "kind": args.kind})
         t += timedelta(seconds=1)
-    uid = t.strftime("%Y%m%d_%H%M%S")
-    print(json.dumps({"uid": uid, "path": _new_note_path(uid), "kind": args.kind}))
+    print(json.dumps(notes[0] if args.count == 1 else notes))
     return 0
 
 
@@ -4443,6 +4501,7 @@ def build_parser():
     p = sub.add_parser("new-note", help="reserve a uid and path for a new task or project note (writes nothing)")
     p.add_argument("--state", required=True)
     p.add_argument("--kind", required=True, choices=("task", "project"))
+    p.add_argument("--count", type=int, default=1, help="reserve this many distinct uids (prints a list when above 1)")
     p.set_defaults(func=cmd_new_note)
 
     p = sub.add_parser("digest", help="print the SessionStart summary (always exits 0)")

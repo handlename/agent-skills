@@ -5311,5 +5311,112 @@ class MigrateExportTest(unittest.TestCase):
             self.assertIn(needle, proc.stdout)
 
 
+
+class VerifyFixesTest(unittest.TestCase):
+    def setUp(self):
+        self.env = VaultEnv(self)
+        self.env.add_task("T-0020", "w-0020", U1)
+        self.env.save()
+
+    def chat_task(self, cand, task_id, uid):
+        git_task(cand, task_id, "w-" + task_id[2:])
+        find(cand["workers"], "w-" + task_id[2:]).update(cwd=f"/repo/{task_id}", intended_state="pending", observed_state="none", session_id=None)
+        to_v2(find(cand["tasks"], task_id), "tasks", uid)
+
+    def create(self, uid, title):
+        return {"op": "create", "uid": uid, "title": title, "kind": "task", "status": "backlog", "assignee": "user", "request": title}
+
+    def test_new_note_count_reserves_distinct_uids(self):
+        class Fixed(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 11, 10, 9, 0, 0)
+        with mock.patch.object(st, "datetime", Fixed):
+            code, out, _ = self.env.run("new-note", "--state", str(self.env.state_path), "--kind", "task", "--count", "3")
+        self.assertEqual([n["uid"] for n in json.loads(out)], ["20261110_090000", "20261110_090002", "20261110_090003"])
+        self.assertEqual(self.env.run("new-note", "--state", str(self.env.state_path), "--kind", "task", "--count", "0")[0], 1)
+
+    def test_a_second_create_for_one_uid_is_rejected(self):
+        before = self.env.state_path.read_bytes()
+        code, _, err = self.env.commit(None, {U3: [self.create(U3, "提案A"), self.create(U3, "提案B")]})
+        self.assertEqual(code, 1)
+        self.assertIn(f"note {U3}: 2 create ops", err)
+        code, _, err = self.env.commit(None, {U1: [self.create(U1, "上書き")]})
+        self.assertEqual(code, 1)
+        self.assertIn(f"note {U1} already exists", err)
+        self.assertEqual(self.env.state_path.read_bytes(), before)
+        self.assertFalse(self.env.path(U3).exists())
+        self.assertEqual(self.env.commit(None, {U3: [self.create(U3, "提案A")]})[0], 0)
+        self.assertIn("提案A", self.env.text(U3))
+
+    def finished_note_without_stub(self):
+        cand = self.env.load()
+        find(cand["workers"], "w-0020").update(intended_state="archived", observed_state="archived")
+        commit_ops = {U1: [{"op": "art_add", "items": [{"kind": "branch", "ref": "/repo/a#claude/license-x1"}, {"kind": "commit", "ref": "abc123",
+                                                                                                                  "url": "https://github.com/org/repo-a/commit/abc123"}]},
+                           {"op": "ua_add", "ua": {"kind": "slot", "description": "追加の依頼(任意。サブアイテムに書いて backlog/agent にしてください)"}}]}
+        self.assertEqual(self.env.commit(cand, commit_ops)[0], 0)
+        self.assertEqual(st._pair(self.env.values(U1)), ("done", "agent"))
+        state = self.env.load()
+        state["archived"] = []  # the stub left the ARCHIVED_KEEP window
+        self.env.state = state
+        self.env.save()
+
+    def test_a_note_whose_stub_aged_out_is_quiet_until_followed_up(self):
+        self.finished_note_without_stub()
+        self.assertEqual(self.env.scan()["events"], [])
+        self.env.put(U1, self.env.text(U1).replace('status: "done"', 'status: "pending"').replace('assignee: "agent"', 'assignee: "user"'))
+        self.assertEqual(self.env.scan()["events"], [])
+        text = self.env.text(U1).replace('status: "pending"', 'status: "backlog"').replace('assignee: "user"', 'assignee: "agent"')
+        self.env.put(U1, text.replace("^ua-0001", "^ua-0001\n    - README の別の typo も直して"))
+        event = self.env.scan()["events"][0]
+        self.assertEqual((event["event"], event["row"], event["live"], event["former"]), ("follow_up", 16, False, True))
+        self.assertEqual((event["slot"], event["follow_up_text"], event["last_artifact_number"]), ("UA-0001", "- README の別の typo も直して", 2))
+        cand = self.env.load()
+        git_task(cand, "T-0030", "w-0030", intended="pending", observed="none")
+        find(cand["workers"], "w-0030")["session_id"] = None
+        task = to_v2(find(cand["tasks"], "T-0030"), "tasks", U1)
+        task.update(note_seen=event["ack"], art_from=event["last_artifact_number"] + 1, last_artifact_number=event["last_artifact_number"])
+        code, out, err = self.env.commit(cand, {U1: [{"op": "ua_ack", "id": "UA-0001"}, {"op": "log", "text": "追加の依頼:\n> README の別の typo も直して"}]})
+        self.assertEqual(code, 0, err)
+        props = st.parse_frontmatter(self.env.text(U1))[0]
+        self.assertEqual((props["status"], props["assignee"], props["completed_at"]), ("in progress", "agent", None))
+        view = st.join_view(self.env.load(), {U1: self.env.text(U1)})
+        self.assertEqual(find(view["tasks"], "T-0030")["artifacts"], [])
+        self.assertEqual(self.env.scan()["events"], [])
+
+    def test_unmarked_unmanaged_notes_are_still_picked_up(self):
+        self.env.put(U3, st.new_note_text(U3, "新しい依頼", "task", "backlog", "agent", NOTE_NOW, "やって"))
+        self.assertEqual([e["event"] for e in self.env.scan()["events"]], ["pickup"])
+
+    def test_invalid_change_on_a_stub_uses_note_warnings(self):
+        self.finished_note_without_stub()
+        state = self.env.load()
+        state["archived"] = [{"id": "T-0020", "uid": U1, "archived_at": NOW, "note_seen": self.env.values(U1)}]
+        self.env.state = state
+        self.env.save()
+        self.env.put(U1, self.env.text(U1).replace('status: "done"', "status: doing"))
+        event = self.env.scan()["events"][0]
+        self.assertEqual((event["event"], event["warning_key"]), ("invalid", U1))
+        state["supervisor"]["note_warnings"] = {U1: event["warning_sha"]}
+        self.env.save()
+        self.assertEqual(self.env.scan()["events"], [])
+
+    def test_a_carried_entry_replays_under_its_own_rev(self):
+        writes, _ = failing_writes({1}, OSError)
+        with writes:
+            code, out, _ = self.env.commit(None, {U1: [{"op": "log", "text": "最初の記録"}]})
+        self.assertEqual(out["notes_failed"], [st._new_note_path(U1)])
+        # The next commit cannot write the replay either (carried), but writes its own log on the same note.
+        writes, _ = failing_writes({1}, OSError)
+        with writes:
+            code, out, err = self.env.commit(None, {U1: [{"op": "log", "text": "二回目の記録"}]})
+        self.assertEqual(code, 0, err)
+        self.assertEqual([e.get("rev") for e in self.env.load()["supervisor"]["note_journal"]["entries"]], [1, 2])
+        self.assertEqual(self.env.commit()[0], 0)
+        log = note_section(self.env.text(U1), "ログ")
+        self.assertEqual((log.count("最初の記録"), log.count("二回目の記録")), (1, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

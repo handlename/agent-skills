@@ -169,7 +169,7 @@ Runtime fields:
 | `art_from` | Integer >= 1, required on a revived task: its generation's first row number. |
 | `artifacts_quarantine` | `{at, ua}`: the user removed or broke rows something depends on (see Artifact quarantine). Pending workers are not started while it is set. |
 | `done_proposed` | `{at, summary}` (project): the manager proposed that the project is done. |
-| `note_journal` | `{rev, entries}`: note ops written with the state and not yet confirmed in the notes. |
+| `note_journal` | `{rev, entries}`: note ops written with the state and not yet confirmed in the notes. Each entry keeps the `rev` of the commit that made its ops, also when it is carried over after a failed write, and is replayed and checked under that rev. |
 
 In the view, an open user action also carries `detector` (for `auto=<detector>` items) and `needs_answer: true` (for `ask answer` items).
 
