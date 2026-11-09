@@ -6,7 +6,8 @@ parse_project_report, plan_actions, roster, waits, manager_reconcile,
 guard_decision (bash_violations, path_violation), parse_follow_ups, new_pr_urls, follow_up_actions,
 parse_locations, default_locations, add_missing_locations, clone_url_parts,
 parse_frontmatter, set_props, new_note_text, parse_sections, parse_user_actions, ua_open, render_ua_line,
-apply_note_ops, parse_artifacts, render_artifact_line, artifacts_view, art_sha.
+apply_note_ops, parse_artifacts, render_artifact_line, artifacts_view, art_sha,
+join_view, split_view, note_props, user_transition, artifact_needs.
 Imperative shell: the argparse subcommands at the bottom of this file.
 """
 
@@ -27,7 +28,8 @@ import textwrap
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+VIEW_SCHEMA_VERSION = 1
 ARCHIVED_KEEP = 20
 DIGEST_LIMIT = 10000
 HERE = Path(__file__).resolve().parent
@@ -83,6 +85,16 @@ UA_KINDS = ("ask", "auto", "slot")
 UA_DETECTORS = ("worker_report", "worker_started", "archived_observed", "approval_cleared", "pr_closed",
                 "review_state", "start_possible", "manager_report", "foreign_session_gone", "children_closed")
 UA_META_KEYS = ("rule", "url", "since")
+HOLD_REASONS = ("pause", "invalid")
+SEEN_KEYS = ("status", "assignee", "ua_sha", "art_sha")
+NOTE_MOVED_KEYS = {
+    "tasks": ("title", "request", "status", "user_actions", "followups", "artifacts"),
+    "projects": ("name", "context_doc_url", "user_actions"),
+    "archived": ("title", "request", "followups", "artifacts"),
+}
+HELD_UA_PREFIX = "held-"
+CONSENT_QUOTE_ERROR = "{prefix}: push_pr requires push_consent.text quoted from push_consent.message when present, else from the task request"
+AUTO_CLOSE_REASON = "done/user で完了"
 ART_KEYS = ("n", "g", "kind", "ref", "url", "path", "label", "r")
 ART_FIELDS = ("kind", "ref", "url", "path", "label")
 FM_KEY_RE = re.compile(r"^([A-Za-z_][\w-]*):(?:[ \t]+(.*?))?[ \t]*$")
@@ -181,8 +193,9 @@ def serialize(state):
 
 
 def empty_state(supervisor_dir):
+    # commit still stores the v1 view until the note commit flow is wired into the CLI.
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": VIEW_SCHEMA_VERSION,
         "rev": 0,
         "updated_at": None,
         "supervisor": {
@@ -256,8 +269,9 @@ def _ua_ids(state):
 
 
 def _next_ua_number(state):
+    """Numbers are never reused: the counter covers user actions already acked in the notes."""
     used = [int(m.group(1)) for i in _ua_ids(state) if isinstance(i, str) and (m := UA_ID_RE.match(i))]
-    return max(used, default=0) + 1
+    return max(used + [(state.get("supervisor") or {}).get("last_ua_number", 0)]) + 1
 
 
 def _id_number(regex, value):
@@ -776,7 +790,7 @@ def _project_shape_errors(state):
     return errors
 
 
-def _follow_up_errors(prefix, task):
+def _follow_up_errors(prefix, task, relieved=()):
     errors, seen = [], set()
     pr_urls = set(_pr_urls(task))
     for ua in task.get("user_actions", []):
@@ -791,7 +805,7 @@ def _follow_up_errors(prefix, task):
             errors.append(f"{where}.done must be one of {list(FOLLOW_UP_DONE)}")
         if not _is_http_url(url):
             errors.append(f"{where}.url must be http(s)")
-        elif url not in pr_urls:
+        elif url not in pr_urls and ua.get("id") not in relieved:
             errors.append(f"{where}.url {url} is not a pr artifact of the task (remove the follow-up when its pr artifact is replaced)")
         if not isinstance(ua.get("since"), str) or not ua["since"]:
             errors.append(f"{where} requires a non-empty since")
@@ -802,13 +816,15 @@ def _follow_up_errors(prefix, task):
     return errors
 
 
-def validate(state):
-    """Check the single-state invariants. Returns a list of error strings."""
+def validate(state, relief=None):
+    """Check the single-state invariants of a v1 view. Returns a list of error strings.
+    relief ({workers, user_actions}) skips the delivery and follow-up url checks of a quarantined task (3.9)."""
     if not isinstance(state, dict):
         return ["state must be an object"]
+    relief = relief or {"workers": set(), "user_actions": set()}
     errors = []
-    if state.get("schema_version") != SCHEMA_VERSION:
-        errors.append(f"schema_version must be {SCHEMA_VERSION}")
+    if state.get("schema_version") != VIEW_SCHEMA_VERSION:
+        errors.append(f"schema_version must be {VIEW_SCHEMA_VERSION}")
     if not isinstance(state.get("rev"), int) or state.get("rev") < 0:
         errors.append("rev must be a non-negative integer")
     for key in ("tasks", "workers", "archived"):
@@ -844,7 +860,8 @@ def validate(state):
         prefix = f"task {tid}"
         if task.get("status") is not None and task.get("status") not in TASK_STATUSES:
             errors.append(f"{prefix}: invalid status {task.get('status')!r}")
-        if not task.get("worker_ids"):
+        # A task waiting for the user's answer to where it should run has no worker yet.
+        if not task.get("worker_ids") and not any(ua.get("needs_answer") for ua in task.get("user_actions", [])):
             errors.append(f"{prefix}: worker_ids must not be empty")
         for wid in task.get("worker_ids", []):
             w = workers_by_id.get(wid)
@@ -853,7 +870,7 @@ def validate(state):
         for ua in task.get("user_actions", []):
             if not ua.get("id") or not isinstance(ua.get("description"), str) or not ua["description"]:
                 errors.append(f"{prefix}: user_action requires id and a description string")
-        errors += _follow_up_errors(prefix, task)
+        errors += _follow_up_errors(prefix, task, relief["user_actions"])
         if task.get("cancel"):
             for wid in task.get("worker_ids", []):
                 if workers_by_id.get(wid, {}).get("intended_state") == "running":
@@ -892,9 +909,8 @@ def validate(state):
         for i, artifact in enumerate(task.get("artifacts", [])):
             errors += _validate_artifact(f"{prefix} artifact[{i}]", artifact, cwds)
         stub = stubs_by_id.get(tid)
-        if stub is not None and not (isinstance(stub.get("request"), str) and not stub.get("cancelled")
-                                     and stub["request"] == task.get("request")):
-            errors.append(f"{prefix}: id is an archived stub; revive only a non-cancelled stub with the same request")
+        if stub is not None and (stub.get("cancelled") or stub.get("uid") != task.get("uid")):
+            errors.append(f"{prefix}: id is an archived stub; revive only a non-cancelled stub with the same uid")
 
     occupants = []
     for w in workers:
@@ -920,13 +936,14 @@ def validate(state):
         if delivery == "push_pr" and task is not None:
             consent = task.get("push_consent") or {}
             text = consent.get("text") or ""
-            source = consent["message"] if "message" in consent else task.get("request")
-            if not text or text not in (source or ""):
-                errors.append(f"{prefix}: push_pr requires push_consent.text quoted from push_consent.message when present, else from the task request")
+            # Quoting from the request is checked only when the consent changes (_consent_request_errors):
+            # the request comes from the note, which the user may edit later.
+            if not text or ("message" in consent and text not in (consent["message"] or "")):
+                errors.append(CONSENT_QUOTE_ERROR.format(prefix=prefix))
         # A vanished session produces no deliverables, so giving it up requires none; nor does handing a worker to its replacement.
         exempt = (task is None or task.get("cancel") or w.get("observed_state") == "missing" or w.get("replaced_by")
                   or wid in _no_result_ids(task))
-        if w.get("intended_state") == "archived" and not exempt:
+        if w.get("intended_state") == "archived" and not exempt and wid not in relief["workers"]:
             if not _delivery_artifacts_ok(delivery, task.get("artifacts", [])):
                 errors.append(f"{prefix}: archive requested but task lacks {delivery} artifacts")
         errors += _validate_last_report(prefix, w.get("last_report"))
@@ -1117,10 +1134,19 @@ def _project_transition_errors(current, candidate):
     return errors
 
 
-def _request_errors(current, candidate):
+def _consent_request_errors(current, candidate):
+    """A consent without message must quote the request at the time it is given or changed."""
+    errors = []
     cur_tasks = {t["id"]: t for t in current["tasks"]}
-    return [f"task {t['id']}: request is verbatim and must not change"
-            for t in candidate["tasks"] if t["id"] in cur_tasks and cur_tasks[t["id"]].get("request") != t.get("request")]
+    for w in candidate["workers"]:
+        task = next((t for t in candidate["tasks"] if t["id"] == w["task_id"]), {})
+        consent = task.get("push_consent") or {}
+        if (w.get("delivery") != "push_pr" or "message" in consent or not consent.get("text")
+                or consent == (cur_tasks.get(task.get("id"), {}).get("push_consent") or {})):
+            continue
+        if consent["text"] not in (task.get("request") or ""):
+            errors.append(CONSENT_QUOTE_ERROR.format(prefix=f"worker {w['id']}"))
+    return errors
 
 
 def _consent_message_errors(current, candidate):
@@ -1145,7 +1171,8 @@ def waiting_start_description(task_id):
 
 
 def _startable_workers(state, task, workers_by_id):
-    if task.get("cancel"):
+    # A task the user paused or marked invalid, or whose artifacts are quarantined, starts nothing.
+    if task.get("cancel") or task.get("user_hold") or task.get("artifacts_quarantine"):
         return []
     # A replacement is started on the next user message anyway, so it needs no user action.
     replacements = {w.get("replaced_by") for w in state["workers"]}
@@ -1181,10 +1208,11 @@ def next_state(current, candidate, now):
     if not isinstance(candidate, dict) or candidate.get("rev") != current.get("rev"):
         raise StateError(f"candidate rev {candidate.get('rev') if isinstance(candidate, dict) else None!r} does not match current rev {current.get('rev')!r}")
     state = copy.deepcopy(candidate)
-    errors = validate(state)
+    relief = _quarantine_relief(current, state)
+    errors = validate(state, relief)
     if errors:
         raise StateError(errors)
-    errors = (_deletion_errors(current, state) + _transition_errors(current, state) + _request_errors(current, state)
+    errors = (_deletion_errors(current, state) + _transition_errors(current, state) + _consent_request_errors(current, state)
               + _consent_message_errors(current, state))
     if errors:
         raise StateError(errors)
@@ -1218,7 +1246,7 @@ def next_state(current, candidate, now):
         project = projects_by_id.get(t.get("project_id"))
         if project is not None:
             stub["project"] = {"id": project["id"], "name": project["name"]}
-        for key in ("proposal", "redos"):
+        for key in ("proposal", "redos", "uid", "last_artifact_number"):
             if t.get(key):
                 stub[key] = t[key]
         stubs.append(stub)
@@ -1230,10 +1258,34 @@ def next_state(current, candidate, now):
         referenced = {t.get("project_id") for t in state["tasks"]}
         state["projects"] = [p for p in state["projects"]
                              if not (p.get("close") and _finished(p["manager"]) and p["id"] not in referenced)]
+        _auto_close_projects(state, referenced, now)
+        # Re-check what commit itself changed: waiting-start actions and automatic closes.
+        errors = validate(state, relief)
+        if errors:
+            raise StateError(errors)
 
     state["rev"] = current["rev"] + 1
     state["updated_at"] = now
     return state
+
+
+def _quarantine_relief(current, candidate):
+    """What validate skips for quarantined tasks: the delivery check of workers already intended archived in current,
+    and the url check of follow-up user actions current already has. New archives are checked in full."""
+    ids = {t["id"] for t in candidate.get("tasks", []) if t.get("artifacts_quarantine")}
+    workers = {w["id"] for w in current.get("workers", []) if w.get("task_id") in ids and w.get("intended_state") == "archived"}
+    actions = {ua.get("id") for t in current.get("tasks", []) if t.get("id") in ids
+               for ua in t.get("user_actions", []) if ua.get("follow_up") is not None}
+    return {"workers": workers, "user_actions": actions}
+
+
+def _auto_close_projects(state, referenced, now):
+    """A project the user confirmed as done closes once no live task belongs to it (D-8)."""
+    for p in state["projects"]:
+        if p.get("confirmed") and not p.get("close") and p["id"] not in referenced:
+            p["close"] = {"at": now, "reason": AUTO_CLOSE_REASON}
+            p["manager"]["intended_state"] = "archived"
+            p["user_actions"] = [ua for ua in p.get("user_actions", []) if ua.get("detector") != "children_closed"]
 
 
 def _esc(value):
@@ -2452,6 +2504,335 @@ def apply_note_ops(text, ops, now, rev):
         new_ids += _NOTE_BODY_OPS[name](lines, op, now, rev, index, problems)
         text = head + "\n".join(lines)
     return text, new_ids, problems
+
+
+def _ua_number(ua_id):
+    m = UA_ID_RE.match(ua_id) if isinstance(ua_id, str) else None
+    return int(m.group(1)) if m else 0
+
+
+def _note_view(text):
+    """(props, sections, artifact items) of a note text."""
+    props, body, _ = parse_frontmatter(text)
+    sections = parse_sections(body)
+    return props, sections, parse_artifacts(sections.get(ART_SECTION, ""))[0]
+
+
+def _view_user_actions(section_text):
+    """Open user actions in the v1 shape. Slots are left out: derive_status would count them."""
+    actions = []
+    for ua in parse_user_actions(section_text or ""):
+        if not ua_open(ua):
+            continue
+        item = {"id": ua["id"], "description": ua["description"], "since": ua["since"]}
+        if ua["rule"]:
+            item["follow_up"] = {"rule": ua["rule"], "url": ua["url"],
+                                 "done": "pr_closed" if ua["detector"] == "pr_closed" else "manual"}
+        if ua["kind"] == "auto":
+            item["detector"] = ua["detector"]
+        if ua["answer_required"]:
+            item["needs_answer"] = True
+        actions.append(item)
+    return actions
+
+
+def _held_action(task, wid):
+    """The v1 read-the-result action a held worker stands for, so the v1 held-worker invariants keep working."""
+    return {"id": f"{HELD_UA_PREFIX}{wid}", "description": f"{READ_ACTION_PREFIX}{wid} (held)", "since": task.get("created_at")}
+
+
+def _note_title(item, props):
+    # digest must not fail when the vault cannot be read: show the uid and the note path instead.
+    return props.get("title") or f"{item.get('uid')} ({item.get('note')})"
+
+
+def join_view(state, notes):
+    """v1 domain view of a v2 state. notes maps uid to note text (after this commit's ops).
+    Tasks get title, request (## 概要), open user actions (plus one read action per held worker), artifacts
+    (## 成果物 rows numbered art_from or later) and status; stubs get title, request and the rows before the art_from
+    of a revived task with the same id (all rows otherwise); projects get name, context_doc_url and user actions."""
+    view = copy.deepcopy(state)
+    view["schema_version"] = VIEW_SCHEMA_VERSION
+    parsed = {uid: _note_view(text) for uid, text in notes.items() if isinstance(text, str)}
+    empty = ({}, {}, [])
+    sup = view["supervisor"]
+    numbers = [_ua_number(ua["id"]) for _, sections, _ in parsed.values()
+               for ua in parse_user_actions(sections.get(UA_SECTION, ""))]
+    sup["last_ua_number"] = max(numbers + [sup.get("last_ua_number", 0)])
+    for project in view.get("projects", []):
+        props, sections, _ = parsed.get(project.get("uid"), empty)
+        urls = re.findall(r"https?://[^\s)>\]]+", sections.get("概要", "") + "\n" + sections.get("関連資料", ""))
+        project.update(name=_note_title(project, props), context_doc_url=urls[0] if urls else None,
+                       user_actions=_view_user_actions(sections.get(UA_SECTION)))
+    names = {p["id"]: p["name"] for p in view.get("projects", [])}
+    workers_by_id = {w["id"]: w for w in view["workers"]}
+    live = {t["id"]: t for t in view["tasks"]}
+    for task in view["tasks"]:
+        props, sections, items = parsed.get(task.get("uid"), empty)
+        task.update(title=_note_title(task, props), request=sections.get("概要", "").strip(), followups=[],
+                    artifacts=artifacts_view(items, task.get("art_from")),
+                    user_actions=(_view_user_actions(sections.get(UA_SECTION))
+                                  + [_held_action(task, wid) for wid in task.get("held", [])]),
+                    last_artifact_number=max([i["n"] for i in items] + [task.get("last_artifact_number", 0)]))
+        task["status"] = derive_status(task, workers_by_id)
+    for stub in view["archived"]:
+        props, sections, items = parsed.get(stub.get("uid"), empty)
+        last = max([i["n"] for i in items] + [stub.get("last_artifact_number", 0)])
+        if stub["id"] in live:
+            items = [i for i in items if i["n"] < (live[stub["id"]].get("art_from") or 1)]
+        stub.update(title=_note_title(stub, props), request=sections.get("概要", "").strip(),
+                    artifacts=artifacts_view(items), last_artifact_number=last)
+        if "project" in stub:
+            stub["project"] = {"id": stub["project"]["id"], "name": names.get(stub["project"]["id"], stub["project"]["id"])}
+    return view
+
+
+def _ua_add_op(owner_id, ua):
+    follow_up = ua.get("follow_up") or {}
+    detector = ua.get("detector")
+    if detector is None and ua["description"] == waiting_start_description(owner_id):
+        detector = "start_possible"
+    if detector is None and follow_up.get("done") == "pr_closed":
+        detector = "pr_closed"
+    item = {"id": ua["id"], "description": ua["description"], "kind": "auto" if detector else "ask"}
+    if detector:
+        item["detector"] = detector
+    if ua.get("needs_answer"):
+        item["answer_required"] = True
+    if follow_up:
+        item.update(rule=follow_up.get("rule"), url=follow_up.get("url"))
+    if ua.get("since"):
+        item["since"] = ua["since"]
+    return {"op": "ua_add", "ua": item}
+
+
+def split_view(view_cand, view_new, ops=None):
+    """(state_v2, ops) for a view next_state returned. ops ({uid: [op, ...]}) gain a ua_add for each user action
+    next_state added and a ua_ack for each it removed (including every open action of a task it archived).
+    held keeps only workers whose read action is still in the view; last_ua_number rises to the highest number used."""
+    state = copy.deepcopy(view_new)
+    state["schema_version"] = SCHEMA_VERSION
+    ops = {uid: list(items) for uid, items in (ops or {}).items()}
+    numbers = [state["supervisor"].get("last_ua_number", 0)]
+    for key in ("tasks", "projects"):
+        after_by_id = {o["id"]: o for o in view_new.get(key, [])}
+        for old in view_cand.get(key, []):
+            before = {ua["id"] for ua in old.get("user_actions", []) if not _read_action_worker(ua)}
+            after = [ua for ua in after_by_id.get(old["id"], {}).get("user_actions", []) if not _read_action_worker(ua)]
+            numbers += [_ua_number(ua["id"]) for ua in after]
+            added = [_ua_add_op(old["id"], ua) for ua in after if ua["id"] not in before]
+            acked = [{"op": "ua_ack", "id": i} for i in sorted(before - {ua["id"] for ua in after})]
+            if added or acked:
+                ops.setdefault(old.get("uid"), []).extend(added + acked)
+    state["supervisor"]["last_ua_number"] = max(numbers)
+    for task in state["tasks"]:
+        held = [wid for wid in task.pop("held", []) if wid in _held_ids(task)]
+        if held:
+            task["held"] = held
+    cand_uids = {t["id"]: t.get("uid") for t in view_cand["tasks"]}
+    for key, moved in NOTE_MOVED_KEYS.items():
+        for item in state.get(key, []):
+            for k in moved:
+                item.pop(k, None)
+    for stub in state["archived"]:
+        if not stub.get("uid") and cand_uids.get(stub["id"]):
+            stub["uid"] = cand_uids[stub["id"]]
+        if "project" in stub:
+            stub["project"] = {"id": stub["project"]["id"]}
+    return state, ops
+
+
+def _runtime_shape_errors(prefix, item):
+    errors = []
+    seen = item.get("note_seen")
+    if seen is not None and not (isinstance(seen, dict) and set(seen) <= set(SEEN_KEYS)
+                                 and all(v is None or isinstance(v, str) for v in seen.values())):
+        errors.append(f"{prefix}: note_seen must be {{{', '.join(SEEN_KEYS)}}} with strings or null")
+    hold = item.get("user_hold")
+    if hold is not None and not (isinstance(hold, dict) and _str(hold.get("at")) and hold.get("reason") in HOLD_REASONS):
+        errors.append(f"{prefix}: user_hold must be {{at, status, assignee, reason}} with reason in {list(HOLD_REASONS)}")
+    for key, fields in (("confirmed", ("at",)), ("artifacts_quarantine", ("at", "ua")), ("done_proposed", ("at", "summary"))):
+        if item.get(key) is not None and not _fields_ok(item[key], fields):
+            errors.append(f"{prefix}: {key} must be {{{', '.join(fields)}}} with non-empty strings")
+    if "art_from" in item and not (_nonneg_int(item["art_from"]) and item["art_from"] >= 1):
+        errors.append(f"{prefix}: art_from must be a positive integer")
+    if not _nonneg_int(item.get("last_artifact_number", 0)):
+        errors.append(f"{prefix}: last_artifact_number must be a non-negative integer")
+    return errors
+
+
+def _storage_errors(state, notes):
+    """Checks of the v2 storage form that the v1 view cannot see. notes maps uid to note text."""
+    if state.get("schema_version") != SCHEMA_VERSION:
+        return [f"schema_version must be {SCHEMA_VERSION}"]
+    errors = []
+    sup = state.get("supervisor") or {}
+    if not _nonneg_int(sup.get("last_ua_number", 0)):
+        errors.append("supervisor.last_ua_number must be a non-negative integer")
+    if not isinstance(sup.get("note_warnings", {}), dict):
+        errors.append("supervisor.note_warnings must be an object")
+    journal = sup.get("note_journal")
+    if journal is not None and not (isinstance(journal, dict) and _nonneg_int(journal.get("rev"))
+                                    and isinstance(journal.get("entries"), list)):
+        errors.append("supervisor.note_journal must be null or {rev, entries}")
+    live_uids = {}
+    for key in ("tasks", "projects", "archived"):
+        for item in state.get(key, []):
+            prefix = f"{key} {item.get('id')}"
+            moved = [k for k in NOTE_MOVED_KEYS[key] if k in item]
+            if moved:
+                errors.append(f"{prefix}: {moved} belong to the note")
+            uid = item.get("uid")
+            if not _str(uid):
+                errors.append(f"{prefix}: uid must be a non-empty string")
+                continue
+            if uid not in notes:
+                errors.append(f"{prefix}: note {uid} not found")
+            if key != "archived":
+                if uid in live_uids:
+                    errors.append(f"{prefix}: uid {uid} is also used by {live_uids[uid]}")
+                live_uids[uid] = prefix
+            errors += _runtime_shape_errors(prefix, item)
+    stub_ids = {s.get("id") for s in state.get("archived", [])}
+    for t in state.get("tasks", []):
+        held = t.get("held", [])
+        if not isinstance(held, list) or any(wid not in t.get("worker_ids", []) for wid in held):
+            errors.append(f"tasks {t.get('id')}: held must list workers of the task")
+        if t.get("id") in stub_ids and "art_from" not in t:
+            errors.append(f"tasks {t.get('id')}: a revived task needs art_from")
+    return errors
+
+
+def note_props(kind, item, workers_by_id):
+    """(status, assignee) commit derives for a live task or project of the view (3.4 (1)), or None to leave the
+    note's props alone (stubs, user_hold). An archived result has assignee None: keep the note's assignee."""
+    if kind not in ("task", "project"):
+        return None
+    if item.get("confirmed"):
+        return ("done", "user")
+    if item.get("cancel" if kind == "task" else "close"):
+        return ("archived", None)
+    if item.get("user_hold"):
+        return None
+    if kind == "project":
+        if item.get("done_proposed"):
+            return ("done", "agent")
+        return ("in progress", "user") if item.get("user_actions") else ("in progress", "agent")
+    actions = item.get("user_actions", [])
+    status = derive_status(item, workers_by_id)
+    if status == "done" or (actions and all(_read_action_worker(ua) for ua in actions)):
+        return ("done", "agent")
+    return ("in progress", "user") if status == "needs_user" else ("in progress", "agent")
+
+
+NOTE_USER_VALUES = (("in progress", "user"), ("pending", "user"), ("backlog", "user"))
+NOTE_AGENT_RESUME = (("in progress", "agent"), ("backlog", "agent"))
+
+
+def user_transition(seen, cur, ctx):
+    """Classify a user's change of a note (3.4 (2)). seen and cur are {status, assignee, ua_sha, art_sha}; seen is
+    None for an unmanaged note, cur None when the frontmatter cannot be read. ctx: managed, live, active,
+    hold (None, "pause", "invalid"), open_ua, kind ("task" or "project"), duplicate, artifacts_ok.
+    Returns {event, row, ack, clear_invalid[, pause]}: row is the table row (0 for no change), ack the values to copy
+    into note_seen once handled (an invalid change acks nothing; a status change leaves an artifact change for later)."""
+    hold = ctx.get("hold")
+
+    def result(event, row, ack, **extra):
+        return {"event": event, "row": row, "ack": ack, "clear_invalid": hold == "invalid" and event != "invalid", **extra}
+
+    if not ctx.get("managed"):
+        if cur is None or cur.get("assignee") != "agent":
+            return result("none", 2, None)
+        return result("pickup", 1, cur) if cur.get("status") == "backlog" else result("invalid", 3, None)
+    pair = ((cur or {}).get("status"), (cur or {}).get("assignee"))
+    if (cur is None or ctx.get("duplicate") or pair[0] not in NOTE_STATUSES or pair[1] not in ASSIGNEES
+            or pair == ("pending", "agent")):
+        return result("invalid", 4, seen)
+    prev = (seen.get("status"), seen.get("assignee"))
+    art_changed = cur.get("art_sha") != seen.get("art_sha")
+    if pair == prev:
+        if art_changed:
+            if ctx.get("artifacts_ok", True) or not (ctx.get("live") and ctx.get("kind") == "task"):
+                return result("artifacts_edit", 22, cur)
+            return result("artifacts_broken", 23, cur)
+        # A checkbox or sub-item edit alone never needs handling: answers are read on resume.
+        return result("none", 10 if pair == ("in progress", "user") and ctx.get("open_ua") else 0, cur)
+    ack = dict(cur, art_sha=seen.get("art_sha")) if art_changed else cur
+    task = ctx.get("kind") == "task"
+    if prev[0] == "archived":
+        return result("invalid", 19, seen)
+    if pair[0] == "archived":
+        return result("cancel", 17, ack) if task else result("close", 18, ack)
+    found = None
+    if hold == "pause":
+        if pair in NOTE_AGENT_RESUME:
+            found = ("resume", 8)
+        elif pair in NOTE_USER_VALUES:
+            found = ("none", 9)
+        elif task and pair[0] == "done":
+            found = ("cancel", 15)
+        elif not task and pair == ("done", "user") and prev[0] in ("done", "in progress"):
+            found = ("confirm", 14)
+    elif prev[0] == "in progress":
+        if prev[1] == "agent" and pair in NOTE_USER_VALUES:
+            found = ("pause", 5 if ctx.get("active") else 7)
+        elif prev[1] == "user" and pair in NOTE_USER_VALUES[1:]:
+            found = ("pause", 6 if ctx.get("active") else 7)
+        elif prev[1] == "agent" and pair == ("backlog", "agent"):
+            found = ("restore", 12)
+        elif prev[1] == "user" and pair in NOTE_AGENT_RESUME:
+            found = ("resume", 11)
+        elif task and pair[0] == "done":
+            found = ("cancel", 15)
+        elif not task and pair == ("done", "user"):
+            found = ("confirm", 14)
+    elif prev == ("done", "agent"):
+        if pair == ("done", "user"):
+            found = ("confirm", 13 if task else 14)
+        elif pair == ("backlog", "agent"):
+            found = ("follow_up", 16)
+        elif not task and pair[0] == "in progress":
+            return result("reject_done", 21, ack, pause=pair[1] == "user")
+    elif prev == ("done", "user"):
+        if pair == ("done", "agent"):
+            found = ("restore", 20)
+        elif pair == ("backlog", "agent"):
+            found = ("follow_up", 16)
+    return result(found[0], found[1], ack) if found else result("invalid", None, seen)
+
+
+def _branch_group_ok(artifacts, worker):
+    ref = f"{worker.get('cwd')}#{worker.get('branch')}"
+    return any(a.get("kind") == "branch" and a.get("ref") == ref and artifacts[i + 1:i + 2]
+               and artifacts[i + 1].get("kind") == "commit" for i, a in enumerate(artifacts))
+
+
+def artifact_needs(view_task, workers, items):
+    """Unmet needs of a live task on its `## 成果物` rows (3.9), as text for the quarantine user action.
+    items are parse_artifacts rows, not the view, so a group broken by the user is seen as broken."""
+    art_from = view_task.get("art_from")
+    rows = [i for i in items if art_from is None or i["n"] >= art_from]
+    artifacts = artifacts_view(rows)
+    mine = [w for w in workers if w.get("task_id") == view_task["id"]]
+    needs = []
+    for w in mine:
+        if (w.get("intended_state") == "archived" and not view_task.get("cancel") and w.get("observed_state") != "missing"
+                and not w.get("replaced_by") and w["id"] not in _no_result_ids(view_task)
+                and not _delivery_artifacts_ok(w.get("delivery"), artifacts)):
+            needs.append(f"{w['id']} の完了の記録({w.get('delivery')} の成果物)")
+    pr_urls = set(_pr_urls({"artifacts": artifacts}))
+    for ua in view_task.get("user_actions", []):
+        url = (ua.get("follow_up") or {}).get("url")
+        if url and url not in pr_urls:
+            needs.append(f"{ua['id']} の PR {url}")
+        for w in mine:
+            if w.get("kind") == "git" and _is_push_decision(ua, w) and not _branch_group_ok(artifacts, w):
+                needs.append(f"{ua['id']} の対象 {w['id']} の branch {w.get('branch')} と直後の commit")
+    for g in sorted({i["g"] for i in rows}):
+        kinds = [i["kind"] for i in rows if i["g"] == g]
+        if any(k == "branch" and kinds[j + 1:j + 2] != ["commit"] for j, k in enumerate(kinds)):
+            needs.append(f"グループ {g} の branch の直後の commit")
+    return needs
 
 
 def _pr_urls(task):

@@ -819,10 +819,11 @@ class NextStateTest(unittest.TestCase):
         cand["archived"][0]["request"] = ["x"]
         self.assertRejected(cand, "archived T-0002: request must be a string")
 
-    def test_request_change_rejected(self):
+    def test_request_change_accepted(self):
+        # v2: the request is the note's 概要, which the user may edit; it is no longer compared across commits.
         cand = self.candidate()
         find(cand["tasks"], "T-0004")["request"] = "~/notes を整理して"
-        self.assertRejected(cand, "task T-0004: request is verbatim and must not change")
+        st.next_state(self.current, cand, NOW)
         cand = self.candidate()
         find(cand["tasks"], "T-0004")["followups"] = [{"text": "~/notes を整理して", "at": NOW}]
         st.next_state(self.current, cand, NOW)
@@ -851,16 +852,20 @@ class NextStateTest(unittest.TestCase):
         self.assertEqual(find(new["tasks"], "T-0019")["status"], "waiting")
         self.assertEqual(new["archived"][0]["id"], "T-0019")
 
-    def test_revive_rejected_unless_non_cancelled_stub_with_same_request(self):
-        no_request = self.stub()
-        del no_request["request"]
-        for stub in (self.stub(request="別の依頼"), no_request, self.stub(cancelled=True, reason="x")):
-            with self.subTest(stub=stub):
+    def test_revive_rejected_unless_non_cancelled_stub_with_same_uid(self):
+        for stub, uid in ((self.stub(uid="20261101_000000"), "20261102_000000"), (self.stub(uid="20261101_000000"), None),
+                          (self.stub(cancelled=True, reason="x", uid="u"), "u")):
+            with self.subTest(stub=stub, uid=uid):
                 self.current = fixture_state()
                 self.current["archived"].insert(0, stub)
                 cand = self.candidate()
-                self.revived(cand)
-                self.assertRejected(cand, "T-0019: id is an archived stub; revive only a non-cancelled stub with the same request")
+                self.revived(cand)["uid"] = uid
+                self.assertRejected(cand, "T-0019: id is an archived stub; revive only a non-cancelled stub with the same uid")
+        self.current = fixture_state()
+        self.current["archived"].insert(0, self.stub(request="別の依頼", uid="u"))
+        cand = self.candidate()
+        self.revived(cand)["uid"] = "u"
+        st.next_state(self.current, cand, NOW)
 
     def test_rearchive_replaces_stub_and_concatenates_artifacts(self):
         self.current["archived"].insert(0, self.stub())
@@ -2830,6 +2835,9 @@ class ProjectStateTest(unittest.TestCase):
         state["projects"][0]["user_actions"][0]["id"] = "UA-0950"
         self.assertEqual(st.validate(state), [])
         self.assertEqual(st._next_ua_number(state), 951)
+        state["supervisor"]["last_ua_number"] = 980
+        self.assertEqual(st._next_ua_number(state), 981)
+        state["supervisor"]["last_ua_number"] = 10
         actions = st.follow_up_actions(state, "T-0020", "https://github.com/o/r/pull/1",
                                        [{"id": "review-pr", "text": "Review {label}", "done": "pr_closed"}], NOW)
         self.assertEqual(actions[0]["id"], "UA-0951")
@@ -4137,6 +4145,482 @@ class ArtifactSectionTest(unittest.TestCase):
         self.assertTrue(st._pushed_at_head({"artifacts": view}, worker))
         self.assertFalse(st._pushed_at_head({"artifacts": st.artifacts_view(old + [newer_branch, {"n": 4, "g": 3, "kind": "commit", "ref": "bbb"}])}, worker))
         self.assertEqual(st.artifacts_view([{"n": 2, "g": 1, "kind": "commit", "ref": "aaa"}]), [{"kind": "commit", "ref": "aaa"}])
+
+
+
+PUSH_DESC = "Decide whether to push branch claude/license-x1 of /repo/a (and open a PR)"
+BRANCH_A = {"kind": "branch", "ref": "/repo/a#claude/license-x1"}
+COMMIT_A = {"kind": "commit", "ref": "abc123"}
+
+
+def v2_state():
+    state = st.empty_state("/Users/example/supervisor")
+    state["schema_version"] = st.SCHEMA_VERSION
+    return state, {}
+
+
+def v2_note(notes, uid, kind="task", uas=(), groups=(), request="fix the LICENSE year"):
+    ops = [{"op": "ua_add", "ua": ua} for ua in uas]
+    ops += [{"op": "art_add", "g": items[0]["n"], "items": items} for items in groups]
+    text = st.new_note_text(uid, f"{kind} {uid}", kind, "in progress", "agent", NOTE_NOW, request)
+    notes[uid] = st.apply_note_ops(text, ops, NOTE_NOW, 1)[0]
+
+
+def to_v2(item, key, uid):
+    for k in st.NOTE_MOVED_KEYS[key]:
+        item.pop(k, None)
+    item["uid"] = uid
+    return item
+
+
+def v2_git_task(state, notes, task_id, worker_id, uid, uas=(), groups=(), **kw):
+    git_task(state, task_id, worker_id, **kw)
+    v2_note(notes, uid, uas=uas, groups=groups)
+    return to_v2(find(state["tasks"], task_id), "tasks", uid)
+
+
+def ua(num, description, kind="ask", **extra):
+    return dict({"id": f"UA-{num:04d}", "kind": kind, "description": description}, **extra)
+
+
+def drop_line(text, block):
+    return "\n".join(l for l in text.split("\n") if not l.endswith(f"^{block}"))
+
+
+class ViewTest(unittest.TestCase):
+    def setUp(self):
+        self.state, self.notes = v2_state()
+        self.task = v2_git_task(self.state, self.notes, "T-0020", "w-0020", "20261110_090000", uas=[
+            ua(1, "where should this run?", answer_required=True), ua(2, "再開時の指示", kind="slot"),
+            ua(3, "Review repo-a#42", kind="auto", detector="pr_closed", rule="review-pr", url="https://github.com/org/repo-a/pull/42"),
+        ], groups=[[dict(BRANCH_A, n=1), dict(COMMIT_A, n=2)], [{"n": 3, "kind": "pr", "url": "https://github.com/org/repo-a/pull/42"}]])
+
+    def test_join_view_builds_the_v1_task(self):
+        self.assertEqual(st._storage_errors(self.state, self.notes), [])
+        view = st.join_view(self.state, self.notes)
+        self.assertEqual(st.validate(view), [])
+        task = find(view["tasks"], "T-0020")
+        self.assertEqual((task["title"], task["request"]), ("task 20261110_090000", "fix the LICENSE year"))
+        self.assertEqual([ua["id"] for ua in task["user_actions"]], ["UA-0001", "UA-0003"])
+        self.assertTrue(task["user_actions"][0]["needs_answer"])
+        self.assertEqual(task["user_actions"][1]["follow_up"],
+                         {"rule": "review-pr", "url": "https://github.com/org/repo-a/pull/42", "done": "pr_closed"})
+        self.assertEqual([a["kind"] for a in task["artifacts"]], ["branch", "commit", "pr"])
+        self.assertEqual((task["status"], task["last_artifact_number"]), ("needs_user", 3))
+        self.assertEqual(view["supervisor"]["last_ua_number"], 3)
+        self.assertEqual(st._next_ua_number(view), 4)
+
+    def test_missing_note_falls_back_to_uid_and_path(self):
+        self.task["note"] = "2026/11/20261110_090000.md"
+        view = st.join_view(self.state, {})
+        self.assertEqual(find(view["tasks"], "T-0020")["title"], "20261110_090000 (2026/11/20261110_090000.md)")
+        self.assertIn("20261110_090000 (2026/11/20261110_090000.md)", st.digest(view, "/Users/example/supervisor/state.json"))
+
+    def test_split_view_round_trip(self):
+        view = st.join_view(self.state, self.notes)
+        new = st.next_state(view, copy.deepcopy(view), NOW)
+        state, ops = st.split_view(view, new)
+        self.assertEqual(ops, {})
+        self.assertEqual(st._storage_errors(state, self.notes), [])
+        self.assertEqual(dict(state, rev=0, updated_at=None),
+                         dict(self.state, tasks=[dict(self.task, last_artifact_number=3)],
+                              supervisor=dict(self.state["supervisor"], last_ua_number=3)))
+        self.assertEqual(state["supervisor"]["last_ua_number"], 3)
+
+    def test_cancel_acks_every_open_action(self):
+        view = st.join_view(self.state, self.notes)
+        cand = copy.deepcopy(view)
+        find(cand["tasks"], "T-0020")["cancel"] = {"at": NOW, "reason": "Obsidian で archived"}
+        find(cand["workers"], "w-0020").update(intended_state="archived", observed_state="archived")
+        new = st.next_state(view, cand, NOW)
+        state, ops = st.split_view(cand, new)
+        self.assertEqual(ops, {"20261110_090000": [{"op": "ua_ack", "id": "UA-0001"}, {"op": "ua_ack", "id": "UA-0003"}]})
+        self.assertEqual(state["archived"][0]["uid"], "20261110_090000")
+        self.assertNotIn("title", state["archived"][0])
+        self.assertEqual(st._storage_errors(state, self.notes), [])
+
+    def test_waiting_start_action_becomes_a_ua_add(self):
+        state, notes = v2_state()
+        nongit_task(state, "T-0005", "w-0006", "/Users/example/notes", "archived", "idle")
+        nongit_task(state, "T-0007", "w-0007", "/Users/example/notes", "pending", "none", session_id=None)
+        v2_note(notes, "u5", groups=[[{"n": 1, "kind": "file", "path": "/Users/example/notes/a.txt"}]])
+        v2_note(notes, "u7")
+        to_v2(find(state["tasks"], "T-0005"), "tasks", "u5")
+        to_v2(find(state["tasks"], "T-0007"), "tasks", "u7")
+        state["supervisor"]["last_ua_number"] = 40
+        view = st.join_view(state, notes)
+        cand = copy.deepcopy(view)
+        find(cand["workers"], "w-0006")["observed_state"] = "archived"
+        new = st.next_state(view, cand, NOW)
+        out, ops = st.split_view(cand, new)
+        self.assertEqual(ops, {"u7": [{"op": "ua_add", "ua": {
+            "id": "UA-0041", "description": st.waiting_start_description("T-0007"), "kind": "auto",
+            "detector": "start_possible", "since": NOW}}]})
+        self.assertEqual(out["supervisor"]["last_ua_number"], 41)
+        self.assertEqual(out["archived"][0]["uid"], "u5")
+        applied = dict(notes, u7=st.apply_note_ops(notes["u7"], ops["u7"], NOW, 2)[0])
+        self.assertEqual(find(st.join_view(out, applied)["tasks"], "T-0007")["user_actions"][0]["id"], "UA-0041")
+        # Paused or quarantined tasks start nothing, so they get no waiting-start action either.
+        for key, value in (("user_hold", {"at": NOW, "status": "pending", "assignee": "user", "reason": "pause"}),
+                           ("artifacts_quarantine", {"at": NOW, "ua": "UA-0040"})):
+            held = copy.deepcopy(state)
+            find(held["tasks"], "T-0007")[key] = value
+            view = st.join_view(held, notes)
+            cand = copy.deepcopy(view)
+            find(cand["workers"], "w-0006")["observed_state"] = "archived"
+            self.assertNotIn("u7", st.split_view(cand, st.next_state(view, cand, NOW))[1])
+            workers = {w["id"]: w for w in view["workers"]}
+            self.assertEqual(st._startable_workers(view, find(view["tasks"], "T-0007"), workers), [])
+
+    def test_held_worker_reads_as_a_read_action(self):
+        self.task["held"] = ["w-0020"]
+        view = st.join_view(self.state, self.notes)
+        task = find(view["tasks"], "T-0020")
+        self.assertEqual(st._held_ids(task), {"w-0020"})
+        state, _ = st.split_view(view, view)
+        self.assertEqual(find(state["tasks"], "T-0020")["held"], ["w-0020"])
+        cleared = copy.deepcopy(view)
+        find(cleared["tasks"], "T-0020")["user_actions"] = [u for u in task["user_actions"] if not st._read_action_worker(u)]
+        state, ops = st.split_view(view, cleared)
+        self.assertNotIn("held", find(state["tasks"], "T-0020"))
+        self.assertEqual(ops, {})
+
+    def test_task_waiting_for_its_location_needs_no_worker(self):
+        view = st.join_view(self.state, self.notes)
+        task = find(view["tasks"], "T-0020")
+        view["workers"], task["worker_ids"] = [], []
+        self.assertEqual(st.validate(view), [])
+        task["user_actions"] = [u for u in task["user_actions"] if not u.get("needs_answer")]
+        self.assertIn("task T-0020: worker_ids must not be empty", st.validate(view))
+
+    def test_storage_errors(self):
+        cases = [
+            (lambda s: self.task.__setitem__("title", "x"), "['title'] belong to the note"),
+            (lambda s: self.task.__setitem__("uid", "nope"), "note nope not found"),
+            (lambda s: self.task.__setitem__("held", ["w-9999"]), "held must list workers of the task"),
+            (lambda s: self.task.__setitem__("user_hold", {"at": NOW, "reason": "later"}), "user_hold must be"),
+            (lambda s: self.task.__setitem__("note_seen", {"status": 1}), "note_seen must be"),
+            (lambda s: s["archived"].append({"id": "T-0020", "uid": "20261110_090000", "archived_at": NOW}),
+             "a revived task needs art_from"),
+            (lambda s: s["supervisor"].__setitem__("note_journal", {"rev": -1}), "note_journal must be"),
+        ]
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                self.setUp()
+                mutate(self.state)
+                self.assertIn(message, "; ".join(st._storage_errors(self.state, self.notes)))
+        self.setUp()
+        git_task(self.state, "T-0021", "w-0021")
+        to_v2(find(self.state["tasks"], "T-0021"), "tasks", "20261110_090000")
+        self.assertIn("is also used by", "; ".join(st._storage_errors(self.state, self.notes)))
+
+
+def item(**kw):
+    return dict({"id": "T-0020", "worker_ids": ["w-0020"], "user_actions": []}, **kw)
+
+
+def wk(intended="running", observed="idle", **kw):
+    return {"w-0020": dict({"id": "w-0020", "intended_state": intended, "observed_state": observed}, **kw)}
+
+
+class NotePropsTest(unittest.TestCase):
+    def test_task_rows(self):
+        read = {"id": "held-w-0020", "description": "Read the result of w-0020 (held)", "since": NOW}
+        rows = [
+            (item(confirmed={"at": NOW}), wk(), ("done", "user")),
+            (item(cancel={"at": NOW, "reason": "x"}), wk("archived", "idle"), ("archived", None)),
+            (item(user_hold={"at": NOW, "reason": "pause"}), wk(), None),
+            (item(user_hold={"at": NOW, "reason": "pause"}, artifacts_quarantine={"at": NOW, "ua": "UA-0001"},
+                  user_actions=[{"id": "UA-0001", "description": "q", "since": NOW}]), wk(), None),
+            (item(), wk("archived", "archived"), ("done", "agent")),
+            (item(user_actions=[read]), wk(), ("done", "agent")),
+            (item(user_actions=[read, {"id": "UA-0001", "description": "q", "since": NOW}]), wk(), ("in progress", "user")),
+            (item(artifacts_quarantine={"at": NOW, "ua": "UA-0001"},
+                  user_actions=[{"id": "UA-0001", "description": "q", "since": NOW}]), wk(), ("in progress", "user")),
+            (item(), wk("archived", "archived", **{"intended_state": "running"}), ("in progress", "user")),
+            (item(), wk("pending", "none"), ("in progress", "agent")),
+            (item(), wk(), ("in progress", "agent")),
+        ]
+        for task, workers, expected in rows:
+            with self.subTest(task=task, workers=workers):
+                self.assertEqual(st.note_props("task", task, workers), expected)
+        self.assertIsNone(st.note_props("stub", item(), wk()))
+
+    def test_project_rows(self):
+        rows = [
+            ({"confirmed": {"at": NOW}, "close": {"at": NOW, "reason": "x"}}, ("done", "user")),
+            ({"close": {"at": NOW, "reason": "x"}}, ("archived", None)),
+            ({"user_hold": {"at": NOW, "reason": "pause"}, "done_proposed": {"at": NOW, "summary": "s"}}, None),
+            ({"done_proposed": {"at": NOW, "summary": "s"}}, ("done", "agent")),
+            ({"user_actions": [{"id": "UA-0001", "description": "q", "since": NOW}]}, ("in progress", "user")),
+            ({}, ("in progress", "agent")),
+        ]
+        for project, expected in rows:
+            with self.subTest(project=project):
+                self.assertEqual(st.note_props("project", dict({"id": "P-0001", "user_actions": []}, **project), {}), expected)
+
+    def test_archived_is_kept_once_confirmed_is_cleared(self):
+        # #17 / #18 clear confirmed, so a cancel whose worker is still stopping, or a close, stays archived.
+        cancelled = item(cancel={"at": NOW, "reason": "x"})
+        self.assertEqual(st.note_props("task", cancelled, wk("archived", "idle")), ("archived", None))
+        self.assertEqual(st.note_props("task", dict(cancelled, confirmed={"at": NOW}), wk("archived", "idle")), ("done", "user"))
+        self.assertEqual(st.note_props("project", {"close": {"at": NOW, "reason": "x"}}, {}), ("archived", None))
+
+    def project_state(self):
+        current = fixture_state()
+        project = add_project(current)
+        project_worker(current, "T-0020", "w-0020")
+        project_worker(current, "T-0021", "w-0021")
+        project["confirmed"] = {"at": NOW}
+        project["user_actions"] = [{"id": "UA-0900", "description": "配下の T-0020 が稼働中です", "since": NOW,
+                                    "detector": "children_closed"}]
+        return current
+
+    def cancel(self, state, task_id, worker_id):
+        find(state["tasks"], task_id)["cancel"] = {"at": NOW, "reason": "Obsidian で archived"}
+        find(state["workers"], worker_id).update(intended_state="archived", observed_state="archived")
+
+    def test_confirmed_project_closes_with_its_last_task(self):
+        current = self.project_state()
+        cand = copy.deepcopy(current)
+        self.cancel(cand, "T-0020", "w-0020")
+        new = st.next_state(current, cand, NOW)
+        project = find(new["projects"], "P-0001")
+        self.assertNotIn("close", project)
+        self.assertEqual(len(project["user_actions"]), 1)
+        cand = copy.deepcopy(new)
+        self.cancel(cand, "T-0021", "w-0021")
+        new = st.next_state(new, cand, NOW)
+        project = find(new["projects"], "P-0001")
+        self.assertEqual(project["close"], {"at": NOW, "reason": st.AUTO_CLOSE_REASON})
+        self.assertEqual(project["manager"]["intended_state"], "archived")
+        self.assertEqual(project["user_actions"], [])
+        self.assertEqual(st.validate(new), [])
+
+
+def nv(status, assignee, ua="u0", art="a0"):
+    return {"status": status, "assignee": assignee, "ua_sha": ua, "art_sha": art}
+
+
+IPA, IPU, PU, BU, BA = nv("in progress", "agent"), nv("in progress", "user"), nv("pending", "user"), nv("backlog", "user"), nv("backlog", "agent")
+DA, DU, AR, PA = nv("done", "agent"), nv("done", "user"), nv("archived", "agent"), nv("pending", "agent")
+LIVE = {"managed": True, "live": True, "kind": "task"}
+PROJ = {"managed": True, "live": True, "kind": "project"}
+STUB = {"managed": True, "live": False, "kind": "task"}
+PAUSED = dict(LIVE, hold="pause")
+
+
+class UserTransitionTest(unittest.TestCase):
+    ROWS = [
+        # (seen, cur, ctx, event, row)
+        (None, BA, {}, "pickup", 1),
+        (None, BU, {}, "none", 2),
+        (None, nv("new", "user"), {}, "none", 2),
+        (None, nv("todo", None), {}, "none", 2),
+        (None, None, {}, "none", 2),
+        (None, IPA, {}, "invalid", 3),
+        (None, PA, {}, "invalid", 3),
+        (None, nv("new", "agent"), {}, "invalid", 3),
+        (IPA, PA, LIVE, "invalid", 4),
+        (IPA, nv("new", "agent"), LIVE, "invalid", 4),
+        (IPA, nv("in progress", "bot"), LIVE, "invalid", 4),
+        (IPA, None, LIVE, "invalid", 4),
+        (IPA, IPA, dict(LIVE, duplicate=True), "invalid", 4),
+        (IPA, IPU, dict(LIVE, active=True), "pause", 5),
+        (IPA, BU, dict(LIVE, active=True), "pause", 5),
+        (IPA, PU, dict(LIVE, active=True), "pause", 5),
+        (IPU, PU, dict(LIVE, active=True, open_ua=True), "pause", 6),
+        (IPU, BU, dict(LIVE, active=True, open_ua=True), "pause", 6),
+        (IPA, IPU, LIVE, "pause", 7),
+        (IPA, BU, LIVE, "pause", 7),
+        (IPU, PU, dict(LIVE, open_ua=True), "pause", 7),
+        (PU, IPA, PAUSED, "resume", 8),
+        (BU, BA, PAUSED, "resume", 8),
+        (PU, BU, PAUSED, "none", 9),
+        (IPU, PU, PAUSED, "none", 9),
+        (IPU, nv("in progress", "user", ua="u1"), dict(LIVE, open_ua=True), "none", 10),
+        (IPU, IPA, dict(LIVE, open_ua=True), "resume", 11),
+        (IPU, BA, dict(LIVE, open_ua=True), "resume", 11),
+        (IPA, BA, LIVE, "restore", 12),
+        (DA, DU, LIVE, "confirm", 13),
+        (DA, DU, STUB, "confirm", 13),
+        (DA, DU, PROJ, "confirm", 14),
+        (IPA, DU, PROJ, "confirm", 14),
+        (IPU, DU, PROJ, "confirm", 14),
+        (IPA, DU, LIVE, "cancel", 15),
+        (IPA, DA, LIVE, "cancel", 15),
+        (IPU, DU, dict(LIVE, open_ua=True), "cancel", 15),
+        (PU, DU, PAUSED, "cancel", 15),
+        (DA, BA, LIVE, "follow_up", 16),
+        (DU, BA, STUB, "follow_up", 16),
+        (IPA, AR, dict(LIVE, active=True), "cancel", 17),
+        (DU, nv("archived", "user"), STUB, "cancel", 17),
+        (IPU, AR, PROJ, "close", 18),
+        (AR, BA, STUB, "invalid", 19),
+        (AR, IPA, LIVE, "invalid", 19),
+        (DU, DA, LIVE, "restore", 20),
+        (DU, DA, STUB, "restore", 20),
+        (DA, IPA, PROJ, "reject_done", 21),
+        (DA, IPU, PROJ, "reject_done", 21),
+        (IPA, nv("in progress", "agent", art="a1"), dict(LIVE, artifacts_ok=True), "artifacts_edit", 22),
+        (DU, nv("done", "user", art="a1"), dict(STUB, artifacts_ok=False), "artifacts_edit", 22),
+        (IPA, nv("in progress", "agent", art="a1"), dict(LIVE, artifacts_ok=False), "artifacts_broken", 23),
+        (IPA, IPA, LIVE, "none", 0),
+        (IPA, nv("in progress", "agent", ua="u1"), LIVE, "none", 0),
+    ]
+
+    def test_table(self):
+        for seen, cur, ctx, event, row in self.ROWS:
+            with self.subTest(seen=seen, cur=cur, ctx=ctx):
+                got = st.user_transition(seen, cur, ctx)
+                self.assertEqual((got["event"], got["row"]), (event, row))
+        rows = {row for *_, row in self.ROWS}
+        self.assertTrue(set(range(1, 24)) <= rows, set(range(1, 24)) - rows)
+
+    def test_unlisted_combinations_are_invalid(self):
+        for seen, cur, ctx in ((DU, IPU, LIVE), (DU, PU, LIVE), (DA, IPA, LIVE), (IPA, DA, PROJ), (BU, IPA, LIVE),
+                               (PU, PA, PAUSED), (BU, DU, dict(PROJ, hold="pause"))):
+            with self.subTest(seen=seen, cur=cur, ctx=ctx):
+                got = st.user_transition(seen, cur, ctx)
+                self.assertEqual(got["event"], "invalid")
+                self.assertEqual(got["ack"], seen)
+
+    def test_write_lost_regressions(self):
+        # A UA answered and handed back is a resume; an agent value turned to user is a pause (v1 write_lost removed).
+        self.assertEqual(st.user_transition(IPU, IPA, dict(LIVE, open_ua=True))["event"], "resume")
+        self.assertEqual(st.user_transition(IPA, IPU, dict(LIVE, active=True))["event"], "pause")
+
+    def test_acks(self):
+        cur = nv("in progress", "user", art="a1")
+        got = st.user_transition(IPA, cur, dict(LIVE, active=True))
+        self.assertEqual(got["ack"], dict(cur, art_sha="a0"))
+        self.assertEqual(st.user_transition(IPU, nv("in progress", "user", ua="u9"), LIVE)["ack"]["ua_sha"], "u9")
+        self.assertEqual(st.user_transition(None, BA, {})["ack"], BA)
+        self.assertIsNone(st.user_transition(None, IPA, {})["ack"])
+        self.assertFalse(st.user_transition(DA, IPA, PROJ)["pause"])
+        self.assertTrue(st.user_transition(DA, IPU, PROJ)["pause"])
+
+    def test_fixing_an_invalid_value_clears_the_hold(self):
+        ctx = dict(LIVE, hold="invalid", active=True)
+        self.assertFalse(st.user_transition(IPA, PA, ctx)["clear_invalid"])
+        self.assertTrue(st.user_transition(IPA, IPU, ctx)["clear_invalid"])
+        self.assertTrue(st.user_transition(IPA, IPA, ctx)["clear_invalid"])
+
+
+class ArtifactDependencyTest(unittest.TestCase):
+    UID = "20261110_090000"
+
+    def setUp(self):
+        self.state, self.notes = v2_state()
+        self.task = v2_git_task(self.state, self.notes, "T-0020", "w-0020", self.UID, intended="archived", observed="archived",
+                                uas=[ua(1, PUSH_DESC), ua(2, "Review repo-a#42", kind="auto", detector="pr_closed",
+                                                         rule="review-pr", url="https://github.com/org/repo-a/pull/42")],
+                                groups=[[dict(BRANCH_A, n=1), dict(COMMIT_A, n=2)],
+                                        [{"n": 3, "kind": "pr", "url": "https://github.com/org/repo-a/pull/42"}],
+                                        [{"n": 4, "kind": "ci", "url": "https://ci.example.com/4"}]])
+        self.state["workers"].append(dict(find(self.state["workers"], "w-0020"), id="w-0021", session_id="sess_w-0021",
+                                          intended_state="running", observed_state="idle",
+                                          branch="claude/license-x2", worktree_path="/repo/a/.claude/worktrees/license-x2"))
+        self.task["worker_ids"].append("w-0021")
+
+    def needs(self, text=None):
+        notes = dict(self.notes, **({self.UID: text} if text else {}))
+        view = st.join_view(self.state, notes)
+        items = st.parse_artifacts(note_section(notes[self.UID], "成果物"))[0]
+        return st.artifact_needs(find(view["tasks"], "T-0020"), view["workers"], items)
+
+    def test_intact_rows_satisfy_every_need(self):
+        self.assertEqual(st.validate(st.join_view(self.state, self.notes)), [])
+        self.assertEqual(self.needs(), [])
+
+    def test_missing_rows_are_reported(self):
+        text = self.notes[self.UID]
+        # (1) the commit of the push decision's group, (2) the branch an archived worker delivered, (3) the follow-up PR.
+        cases = {
+            "sv-art-2": ["w-0020 の完了の記録(commit の成果物)", "UA-0001 の対象 w-0020 の branch claude/license-x1 と直後の commit",
+                         "グループ 1 の branch の直後の commit"],
+            "sv-art-1": ["w-0020 の完了の記録(commit の成果物)", "UA-0001 の対象 w-0020 の branch claude/license-x1 と直後の commit"],
+            "sv-art-3": ["UA-0002 の PR https://github.com/org/repo-a/pull/42"],
+        }
+        for block, expected in cases.items():
+            with self.subTest(block=block):
+                self.assertEqual(self.needs(drop_line(text, block)), expected)
+        broken = text.replace('"kind":"pr"', '"kind":"pull"')
+        self.assertEqual(self.needs(broken), ["UA-0002 の PR https://github.com/org/repo-a/pull/42"])
+        # A row nothing depends on can go: that is an artifacts_edit.
+        self.assertEqual(self.needs(drop_line(text, "sv-art-4")), [])
+        seen, cur = nv("in progress", "user", art="a0"), nv("in progress", "user", art="a1")
+        self.assertEqual(st.user_transition(seen, cur, dict(LIVE, artifacts_ok=False))["event"], "artifacts_broken")
+        self.assertEqual(st.user_transition(seen, cur, dict(LIVE, artifacts_ok=True))["event"], "artifacts_edit")
+
+    def quarantined(self, quarantine=True):
+        self.notes[self.UID] = drop_line(self.notes[self.UID], "sv-art-1")
+        if quarantine:
+            self.task["artifacts_quarantine"] = {"at": NOW, "ua": "UA-0005"}
+        return st.join_view(self.state, self.notes)
+
+    def test_quarantine_relieves_only_what_current_already_has(self):
+        self.assertIn("w-0020: archive requested but task lacks commit artifacts", "; ".join(st.validate(self.quarantined(False))))
+        current = self.quarantined()
+        cand = copy.deepcopy(current)
+        find(cand["tasks"], "T-0020")["next_action"] = "wait for the user"
+        st.next_state(current, cand, NOW)
+        cand = copy.deepcopy(current)
+        find(cand["workers"], "w-0021").update(intended_state="archived", observed_state="archived")
+        with self.assertRaises(st.StateError) as ctx:
+            st.next_state(current, cand, NOW)
+        self.assertIn("w-0021: archive requested but task lacks commit artifacts", str(ctx.exception))
+        self.assertNotIn("w-0020", str(ctx.exception))
+
+    def test_follow_up_url_is_relieved_while_quarantined(self):
+        self.notes[self.UID] = drop_line(self.notes[self.UID], "sv-art-3")
+        self.assertIn("is not a pr artifact of the task", "; ".join(st.validate(st.join_view(self.state, self.notes))))
+        self.task["artifacts_quarantine"] = {"at": NOW, "ua": "UA-0005"}
+        current = st.join_view(self.state, self.notes)
+        st.next_state(current, copy.deepcopy(current), NOW)
+
+    def test_delete_answer_resolves_the_quarantine(self):
+        current = self.quarantined()
+        cand = copy.deepcopy(current)
+        task = find(cand["tasks"], "T-0020")
+        task["no_result"] = [{"worker_id": "w-0020", "summary": "成果物の記録をユーザーが削除(UA-0005)", "at": NOW}]
+        task["user_actions"] = [u for u in task["user_actions"] if u["id"] != "UA-0001"]
+        del task["artifacts_quarantine"]
+        self.assertEqual(st.validate(cand), [])
+        st.next_state(current, cand, NOW)
+
+    def test_quarantined_task_starts_nothing(self):
+        view = self.quarantined()
+        view["workers"].append(dict(find(view["workers"], "w-0021"), id="w-0022", kind="non-git", delivery="files",
+                                    cwd="/Users/example/notes", intended_state="pending", observed_state="none"))
+        task = find(view["tasks"], "T-0020")
+        task["worker_ids"].append("w-0022")
+        self.assertEqual(st._startable_workers(view, task, {w["id"]: w for w in view["workers"]}), [])
+        del task["artifacts_quarantine"]
+        self.assertEqual(len(st._startable_workers(view, task, {w["id"]: w for w in view["workers"]})), 1)
+
+    def test_revived_stub_keeps_only_rows_before_art_from(self):
+        state, notes = v2_state()
+        task = v2_git_task(state, notes, "T-0019", "w-0019", "u19", intended="pending", observed="none",
+                           groups=[[dict(BRANCH_A, n=1), dict(COMMIT_A, n=2)], [dict(BRANCH_A, n=3), dict(COMMIT_A, n=4, ref="def456")]])
+        task["art_from"] = 3
+        state["archived"].append({"id": "T-0019", "uid": "u19", "archived_at": NOW, "last_artifact_number": 2})
+        self.assertEqual(st._storage_errors(state, notes), [])
+        view = st.join_view(state, notes)
+        self.assertEqual([a["ref"] for a in view["archived"][0]["artifacts"]], ["/repo/a#claude/license-x1", "abc123"])
+        self.assertEqual([a["ref"] for a in find(view["tasks"], "T-0019")["artifacts"]], ["/repo/a#claude/license-x1", "def456"])
+        self.assertEqual(find(view["tasks"], "T-0019")["last_artifact_number"], 4)
+        self.assertEqual(st.validate(view), [])
+
+    def test_stub_row_deletion_falls_back_to_an_older_group(self):
+        state, notes = v2_state()
+        v2_note(notes, "u19", groups=[[dict(BRANCH_A, n=1), dict(COMMIT_A, n=2)], [dict(BRANCH_A, n=3), dict(COMMIT_A, n=4, ref="def456")]])
+        state["archived"].append({"id": "T-0019", "uid": "u19", "archived_at": NOW})
+        notes["u19"] = drop_line(notes["u19"], "sv-art-4")
+        stub = st.join_view(state, notes)["archived"][0]
+        self.assertEqual([a["ref"] for a in stub["artifacts"]], ["/repo/a#claude/license-x1", "abc123"])
+        got = st.user_transition(nv("done", "user"), nv("done", "user", art="a1"), dict(STUB, artifacts_ok=False))
+        self.assertEqual(got["event"], "artifacts_edit")
 
 
 if __name__ == "__main__":
