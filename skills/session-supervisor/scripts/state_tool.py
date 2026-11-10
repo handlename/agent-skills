@@ -4505,8 +4505,11 @@ def cmd_export_v1(args):
     state = _read_json(args.state)
     _require_v2(state, args.state)
     texts, uids = _index_vault(_vault_path(args.state))
-    _write_atomic(args.out, serialize(export_v1(state, _notes_by_uid(texts, uids))))
-    print(json.dumps({"out": args.out}))
+    out = export_v1(state, _notes_by_uid(texts, uids))
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    _write_atomic(args.out, serialize(out))
+    # Schema 1 requires every task to have a worker, so the previous version's commit rejects these tasks.
+    print(json.dumps({"out": args.out, "tasks_without_workers": [t["id"] for t in out["tasks"] if not t.get("worker_ids")]}))
     return 0
 
 

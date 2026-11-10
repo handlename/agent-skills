@@ -742,7 +742,7 @@ python3 "<dir>/.supervisor/state_tool.py" migrate-v2 --state "<dir>/state.json" 
 python3 "<dir>/.supervisor/state_tool.py" migrate-v2 --state "<dir>/state.json"
 ```
 
-The dry run lists the notes it would write. The real run writes one note per task, project, and stub (a revived task and its stub share one; project proposal user actions become backlog/user proposal notes; read user actions become `held`), then `state.json`. Rerun it after an interruption; it refuses a note that exists with other content. Rollback: write the v1 form with `export-v1 --state "<dir>/state.json" --out "<dir>/state.v1.json"`, check it, and replace `state.json` with it from a supervisor on the previous skill version (`setup` from that version reinstalls its script). Held workers come back as read user actions; follow-ups stay quoted in the notes.
+The dry run lists the notes it would write. The real run writes one note per task, project, and stub (a revived task and its stub share one; project proposal user actions become backlog/user proposal notes; read user actions become `held`), then `state.json`. Rerun it after an interruption; it refuses a note that exists with other content. Rollback: write the v1 form with `export-v1 --state "<dir>/state.json" --out "<dir>/state.v1.json"`, check it (it prints `tasks_without_workers`: the previous version rejects a task without workers, so cancel those tasks or let their workers start first, and export again), and replace `state.json` with it from a supervisor on the previous skill version (`setup` from that version reinstalls its script). Held workers come back as read user actions; follow-ups stay quoted in the notes.
 
 ## Verification
 

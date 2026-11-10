@@ -5311,14 +5311,21 @@ class MigrateExportTest(unittest.TestCase):
         self.assertEqual(len(st._index_vault(str(env.vault))[0]), 13)
         self.assertEqual(env.run("migrate-v2", "--state", str(env.state_path))[0], 1)
         self.assertEqual(env.scan(), {"events": [], "warnings": []})
-        out_path = env.dir / "state.v1.json"
+        out_path = env.dir / "rollback" / "state.v1.json"
         self.assertEqual(env.run("export-v1", "--state", str(env.state_path), "--out", str(env.state_path))[0], 1)
-        code, _, err = env.run("export-v1", "--state", str(env.state_path), "--out", str(out_path))
+        code, out, err = env.run("export-v1", "--state", str(env.state_path), "--out", str(out_path))
         self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["tasks_without_workers"], [])
         exported = json.loads(out_path.read_text(encoding="utf-8"))
         self.assertEqual([t["title"] for t in exported["tasks"]], [t["title"] for t in self.v1["tasks"]])
         code, _, err = env.commit()
         self.assertEqual(code, 0, err)
+        state = env.load()
+        state["tasks"][0]["worker_ids"] = []
+        env.state_path.write_text(st.serialize(state), encoding="utf-8")
+        code, out, err = env.run("export-v1", "--state", str(env.state_path), "--out", str(out_path))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["tasks_without_workers"], [state["tasks"][0]["id"]])
 
     def test_main_digest_reads_the_export(self):
         main_tool = subprocess.run(["git", "-C", str(SKILL), "show", "main:skills/session-supervisor/scripts/state_tool.py"],
