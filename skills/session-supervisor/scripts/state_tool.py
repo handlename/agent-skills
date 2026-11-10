@@ -26,6 +26,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -3165,8 +3166,8 @@ def _row_is(row, flag):
 
 
 def manager_reconcile(manager, rows, events=None):
-    """Decisions for one manager session from list rows (include_archived) and an optional summary of its latest events.
-    rows: objects with sessionId (or session_id / id), startedBy, and running / archived flags.
+    """Decisions for one manager session from rows (manager_rows_from_hc) and an optional summary of its latest message.
+    rows: objects with session_id, started_by, and running / archived flags.
     events: {"last_message_ref": str | null, "pending_approval": bool}; without it, handle_turn and pending_approval are not judged."""
     sid = manager.get("session_id")
     previous = set(manager.get("previous_session_ids", []))
@@ -3986,11 +3987,16 @@ def cmd_prepare_dir(args):
 REPORT_TOOL = "--allowedTools=Bash(hc send sv:*)"
 
 
+def _session_cwd(worker):
+    """Where Claude runs: a git worker in its worktree, a non-git worker in its directory."""
+    return worker.get("worktree_path") if worker.get("kind") == "git" else worker.get("cwd")
+
+
 def _herdr_target(state, ident):
     """(kind, session, cwd, label) for a worker id or a manager handle m-p-NNNN."""
     for w in state.get("workers", []):
         if w.get("id") == ident:
-            return "worker", w, w.get("cwd"), f"task={w.get('task_id')}"
+            return "worker", w, _session_cwd(w), f"task={w.get('task_id')}"
     for p in _projects(state):
         if manager_handle(p.get("id")) == ident:
             return "manager", p.get("manager") or {}, p.get("dir"), f"project={p.get('id')}"
@@ -4006,7 +4012,8 @@ def launch_argv(state, ident, prompt, herdr):
     if not (isinstance(sid, str) and UUID_RE.match(sid)):
         raise StateError(f"{ident} has no uuid session_id: set a uuid4 in the candidate and commit it before launch")
     if not cwd or not os.path.isabs(cwd):
-        raise StateError(f"{ident} has no absolute cwd")
+        where = "worktree_path (run prepare-worktree first)" if session.get("kind") == "git" else "cwd"
+        raise StateError(f"{ident} has no absolute {where}")
     if not prompt.strip():
         raise StateError("the prompt is empty")
     if kind == "worker":
@@ -4084,6 +4091,76 @@ def _hc_json(runner, argv):
 
 def _run_hc(argv):
     return subprocess.run(argv, capture_output=True, text=True)
+
+
+def last_assistant_message(lines):
+    """{message_ref, text} of the last assistant message with text in a Claude Code transcript (jsonl lines), or None.
+    One message is stored as several entries sharing message.id; their text parts are joined in order."""
+    entries = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("type") == "assistant" and not entry.get("isSidechain"):
+            message = entry.get("message") or {}
+            texts = [c.get("text") for c in message.get("content") or []
+                     if isinstance(c, dict) and c.get("type") == "text" and c.get("text")]
+            entries.append((message.get("id"), entry.get("uuid"), texts))
+    with_text = [e for e in entries if e[2]]
+    if not with_text:
+        return None
+    message_id, ref, _ = with_text[-1]
+    parts = [t for mid, _, texts in with_text if mid == message_id for t in texts] if message_id else with_text[-1][2]
+    return {"message_ref": ref, "text": "\n".join(parts)}
+
+
+def transcript_dir_name(cwd):
+    """Claude Code's folder name for a working directory: every character outside [A-Za-z0-9] of the NFD form becomes '-'."""
+    return re.sub(r"[^A-Za-z0-9]", "-", unicodedata.normalize("NFD", cwd))
+
+
+def _transcript_path(cwd, session_id):
+    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    direct = root / transcript_dir_name(cwd) / f"{session_id}.jsonl"
+    if direct.is_file():
+        return direct
+    found = sorted(root.glob(f"*/{session_id}.jsonl"))
+    if not found:
+        raise StateError(f"no transcript {session_id}.jsonl under {root}; read the screen with hc read instead")
+    return found[0]
+
+
+def cmd_last_message(args):
+    state = _read_json(args.state)
+    _, session, cwd, _ = _herdr_target(state, args.id)
+    sid = session.get("session_id")
+    if session.get("runtime") != "herdr" or not (isinstance(sid, str) and UUID_RE.match(sid)):
+        raise StateError(f"{args.id} is not a herdr session with a uuid session_id")
+    path = _transcript_path(cwd or "", sid)
+    with open(path, encoding="utf-8") as f:
+        found = last_assistant_message(f)
+    if found is None:
+        raise StateError(f"{path} has no assistant message with text yet")
+    _write_atomic(args.out, found["text"])
+    print(json.dumps({"message_ref": found["message_ref"], "path": str(path)}, ensure_ascii=False))
+    return 0
+
+
+def manager_rows_from_hc(manager, handle, terminals):
+    """manager-reconcile rows from `hc ls --all --json` terminals: the manager's own row (by terminal name) and a
+    row for each live terminal it started, so its agents show up as foreign sessions."""
+    sid = manager.get("session_id")
+    rows = []
+    own = next((t for t in terminals if t.get("name") == handle), None)
+    if own is not None and sid is not None:
+        status = own.get("status")
+        word = status.get("state") if isinstance(status, dict) else status
+        rows.append({"session_id": sid, "running": word == "working", "archived": own.get("state") == "finished",
+                     "blocked": word == "blocked"})
+        rows += [{"session_id": t.get("name") or t.get("address"), "started_by": sid, "running": True}
+                 for t in terminals if t.get("parent") == own.get("address") and t.get("state") == "live"]
+    return rows
 
 
 def cmd_observe_hc(args):
@@ -4203,10 +4280,9 @@ def cmd_waits(args):
 
 def cmd_manager_reconcile(args):
     project = _project(_load_view(args.state), args.project)
-    rows = _read_json(args.rows)
-    if isinstance(rows, dict):
-        rows = rows.get("sessions", rows.get("rows", []))
-    events = _read_json(args.events) if args.events else None
+    data = _read_json(args.from_file) if args.from_file else _hc_json(_run_hc, ["hc", "ls", "--all", "--json"])
+    rows = manager_rows_from_hc(project["manager"], manager_handle(project["id"]), data.get("terminals", []))
+    events = {"last_message_ref": args.last_message_ref, "pending_approval": any(r.get("blocked") for r in rows)}
     print(json.dumps(manager_reconcile(project["manager"], rows, events), ensure_ascii=False))
     return 0
 
@@ -4561,11 +4637,11 @@ def build_parser():
     p.add_argument("--review-minutes", type=int, default=REVIEW_WAIT_MINUTES)
     p.set_defaults(func=cmd_waits)
 
-    p = sub.add_parser("manager-reconcile", help="judge a project manager session from list rows and its latest events (JSON)")
+    p = sub.add_parser("manager-reconcile", help="judge a project manager session from its hc terminal and its latest message (JSON)")
     p.add_argument("--state", required=True)
     p.add_argument("--project", required=True)
-    p.add_argument("--rows", required=True, help="JSON file with the list rows (include_archived)")
-    p.add_argument("--events", help='JSON file {"last_message_ref": ..., "pending_approval": bool} summarizing the latest events')
+    p.add_argument("--from", dest="from_file", help="read `hc ls --all --json` output from this file instead of running hc")
+    p.add_argument("--last-message-ref", help="message_ref printed by last-message for the manager; omit while it is running")
     p.set_defaults(func=cmd_manager_reconcile)
 
     p = sub.add_parser("guard", help="PreToolUse hook: exit 3 with a reason on stderr when the call is blocked, else 0")
@@ -4616,6 +4692,12 @@ def build_parser():
     p.add_argument("--worker", required=True, help="a worker id (w-0123) or a manager handle (m-p-0006)")
     p.add_argument("--prompt-file", required=True)
     p.set_defaults(func=cmd_launch_plan)
+
+    p = sub.add_parser("last-message", help="write the last assistant message of a herdr worker or manager from its transcript")
+    p.add_argument("--state", required=True)
+    p.add_argument("--id", required=True, help="worker id (w-NNNN) or manager handle (m-p-NNNN)")
+    p.add_argument("--out", required=True)
+    p.set_defaults(func=cmd_last_message)
 
     p = sub.add_parser("observe-hc", help="map hc terminals to observed states of herdr workers and managers (reads only)")
     p.add_argument("--state", required=True)

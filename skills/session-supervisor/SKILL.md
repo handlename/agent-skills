@@ -271,7 +271,7 @@ The prefixes `Answer w-NNNN (` (report-blocker guidance, 6.3 step 4), `Answer th
 | Task: resume instructions / follow-up request | `slot` | 6.13 (`pause`, task done) | Read at `resume` / `follow_up` and acked then |
 | Task: missing artifact rows (quarantine, 3.9) | `ask answer` | 6.13 (`artifacts_broken`) | 「行を戻した」 or 「削除」 (6.13) |
 | Project: "Answer the P-xxxx project manager in its session: `<question>`" | `auto=manager_report` | 6.11 step 4 | The manager's next report processed in 6.11 (by difference) |
-| Project: "Approve the pending tool request of the P-xxxx project manager in its session" | `auto=approval_cleared` | 6.4 (`pending_approval`) | `manager-reconcile --events` no longer reporting `pending_approval` |
+| Project: "Approve the pending tool request of the P-xxxx project manager in its session" | `auto=approval_cleared` | 6.4 (`pending_approval`) | `manager-reconcile` no longer reporting `pending_approval` |
 | Project: "Session `<name>` was started by the P-xxxx project manager; check it in Herdr" | `auto=foreign_session_gone` | 6.4 (`foreign_session`) | Reconciliation no longer reporting that session |
 | Project: "Project manager of P-xxxx disappeared 3 times: start another one or close the project?" | `ask answer` | 6.12 | The user's instruction carried out |
 | Project: "Please archive the previous P-xxxx manager session in Herdr" | `auto=archived_observed` | 6.4 (`stale_previous`) | Reconciliation observing that session `archived` |
@@ -497,7 +497,7 @@ List the sessions:
 python3 "<dir>/.supervisor/state_tool.py" observe-hc --state "<dir>/state.json"
 ```
 
-It prints one row per herdr worker and manager, matched by its terminal name (`handle`). In the rules below, "listed as active" means `observed_state` `running`, `idle`, or `needs_input`; "listed as archived" means `archived` (finished while intended archived) or, for a worker not intended archived, a finished terminal (`observed_state: missing` with an `exit_code` or `reason`); "not listed" means `missing` without them. Workers without `runtime: "herdr"` (started by an earlier desktop-app version) are not in `hc`: treat them as not listed, which hands them to 6.8 or to the user (section 7). Evaluate the first rule before "Listed as active":
+It prints one row per herdr worker and manager, matched by its terminal name (`handle`). In the rules below, "listed as active" means `observed_state` `running`, `idle`, or `needs_input`; "listed as archived" means `archived` (finished while intended archived) or, for a worker not intended archived, a finished terminal (`observed_state: missing` with an `exit_code` or `reason`); "not listed" means `missing` without them. Workers and managers without `runtime: "herdr"` (started in the desktop app by an earlier version) are never in its output. They are not "not listed": leave them as they are, never mark them `missing`, never replace them with 6.8, and never `hc kill` them. The user finishes or archives them in the app (section 7); when the user says one is done or archived, record it in one candidate as `observed_state: archived` with `intended_state: archived` (no `archive_consent` is needed), after verifying its result as for "Listed as archived" below when its task still needs one. Evaluate the first rule before "Listed as active":
 
 - Replaced worker listed as active (it has `replaced_by`, 6.8):
   - Successor still `pending`: in one candidate, remove the successor, remove `replaced_by` from the old worker, set it to `intended_state: running`, remove its `no_result` entry if any, and update its observed state from the list. In the same candidate, read its latest message again and run `parse-report` on it; if it reports `needs_input`, `blocked`, or `failed`, add its guidance again (6.3 step 4), because 6.3 step 1 stops on the unchanged `message_ref`. From then on handle it as a live worker.
@@ -528,10 +528,10 @@ It prints one row per herdr worker and manager, matched by its terminal name (`h
   - A missing or malformed result: follow 6.0 step 3 and its `pr-state` exception.
 - Not listed (a held investigation worker: call `hc get` first, and only when it is still not found follow "Held investigation worker" above): a worker already intended `archived` without `replaced_by` has its result verified and its artifacts recorded (or its task was cancelled): set `missing` only if it is not observed `archived`, and never replace it (`commit` rejects `replaced_by` on it). Otherwise call `hc get` for its handle. If still not found, set `missing`, remove its guidance (6.3 step 4), and replace the worker with 6.8 in the same candidate (when the user said in this chat that the work should stop, follow 6.6 or 6.9 instead). Never treat it as done. A `missing` worker still intended `running` keeps its task active; 6.8 sets it to `intended_state: archived`, which counts it as finished (no `hc kill`, no `archive_consent` needed); for cancel, see 6.6. If a worker you gave up as `missing` (intended archived) shows up as active again, do not just update its observed state: either set it back to `intended_state: running` (removing its `no_result` entry if any, and re-adding its guidance as in "Successor still pending" above when its latest message reports `needs_input`, `blocked`, or `failed`) and handle it as a live worker, or verify its deliverables through an observer (`repo-side` or `verify-files`) and archive it as in 6.3 step 6. A worker that has `replaced_by` follows the first rule above instead.
   - Project worker with `review.state` `requested`, `superseded`, or `rejected`: set `missing` and do not replace it with 6.8. When `rejected` without `replaced_by`, add the redo successor as above.
-- Project managers: for each project, write `<dir>/.supervisor/manager-rows.json` from its `observe-hc` row: a list with one object `{"session_id": <manager.session_id>, "running": <observed_state is running>, "archived": <observed_state is archived, or the terminal finished>}` (an empty list when the manager is not listed), plus one object `{"session_id": "<handle>", "started_by": <manager.session_id>, "running": true}` for each live terminal in `hc ls --json` whose `parent` is the manager's address. When the manager is listed and not running, read its latest message (section 2) and write `<dir>/.supervisor/manager-events.json` as `{"last_message_ref": "<its message_ref, or null>", "pending_approval": <true when its row is needs_input>}`; otherwise omit `--events`. Then run:
+- Project managers: for each project, when its `observe-hc` row is not `running`, read the manager's latest message (section 2, `--id m-p-NNNN`) for its `message_ref`. Then run (it reads `hc ls --all --json` itself; omit `--last-message-ref` while the manager is running or when no message could be read):
 
   ```bash
-  python3 "<dir>/.supervisor/state_tool.py" manager-reconcile --state "<dir>/state.json" --project P-0001 --rows "<dir>/.supervisor/manager-rows.json" --events "<dir>/.supervisor/manager-events.json"
+  python3 "<dir>/.supervisor/state_tool.py" manager-reconcile --state "<dir>/state.json" --project P-0001 --last-message-ref "<message_ref>"
   ```
 
   Act on each decision it prints:
@@ -617,7 +617,7 @@ A follow-up that asks for work and also consents to push: never record that cons
 
 #### 6.8 Replacement workers
 
-A worker that went missing (6.4 "Not listed") or was archived outside the supervisor without a verifiable result (6.4) is replaced without asking. A worker that is not progressing is not (6.3 step 3), and neither is a worker whose result was already verified, i.e. one already intended `archived` without `replaced_by` (its delivery artifacts are recorded, or its task was cancelled); `commit` rejects adding `replaced_by` to it.
+A worker that went missing (6.4 "Not listed") or was archived outside the supervisor without a verifiable result (6.4) is replaced without asking. A worker without `runtime: "herdr"` is never replaced (6.4). A worker that is not progressing is not (6.3 step 3), and neither is a worker whose result was already verified, i.e. one already intended `archived` without `replaced_by` (its delivery artifacts are recorded, or its task was cancelled); `commit` rejects adding `replaced_by` to it.
 
 1. Count `n` before marking the failed worker: the workers of the same task with the same `cwd` that have `replaced_by`, except those with `review.state: rejected` (replaced as a redo successor, 6.11).
 2. `n` < 3: in one candidate,
@@ -739,7 +739,7 @@ python3 "<dir>/.supervisor/state_tool.py" digest --state "<dir>/state.json"
 Then:
 
 1. Run the Capability check. A re-created supervisor runs in a new `hc` terminal that must again be named `sv` (section 3): workers report to that name, and `sv-watch` forwards the `hc` notes that still go to the old `sv` terminal.
-2. Run reconciliation, project managers included (the digest has a `projects:` section). Workers and managers with `runtime: "herdr"` are taken over as they are, whatever terminal started them. Workers and managers without `runtime` were started in the desktop app by an earlier version: tell the user once to finish or archive them in the app; reconciliation treats them as not listed (6.4).
+2. Run reconciliation, project managers included (the digest has a `projects:` section). Workers and managers with `runtime: "herdr"` are taken over as they are, whatever terminal started them. Workers and managers without `runtime` were started in the desktop app by an earlier version: tell the user once to finish or archive them in the app. Reconciliation leaves them untouched until the user says they are done (6.4).
 3. If any worker or manager is `running`, `idle`, or `needs_input`, restart periodic reconciliation.
 4. Launch every startable `pending` worker and manager (6.4, last paragraph).
 5. Before building a brief (6.2 step 4) or a Follow-up message (6.7), read the task's `redos` and `proposal` from `state.json`, and its request and follow-ups from its note (`note-show`).
@@ -785,6 +785,8 @@ python3 "<dir>/.supervisor/state_tool.py" migrate-v2 --state "<dir>/state.json"
 ```
 
 The dry run lists the notes it would write. The real run writes one note per task, project, and stub (a revived task and its stub share one; project proposal user actions become backlog/user proposal notes; read user actions become `held`), then `state.json`. Rerun it after an interruption; it refuses a note that exists with other content. Rollback: write the v1 form with `export-v1 --state "<dir>/state.json" --out "<dir>/state.v1.json"`, check it (it prints `tasks_without_workers`: the previous version rejects a task without workers, so cancel those tasks or let their workers start first, and export again), and replace `state.json` with it from a supervisor on the previous skill version (`setup` from that version reinstalls its script). Held workers come back as read user actions; follow-ups stay quoted in the notes.
+
+Moving a supervisor from the desktop app to Herdr needs no state migration: run `setup` again, start `sv` and `sv-watch` in Herdr (section 3), and leave the remaining desktop-app workers and managers to the user (6.4, section 7).
 
 ## Verification
 

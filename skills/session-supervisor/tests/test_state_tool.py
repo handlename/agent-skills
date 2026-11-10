@@ -2982,9 +2982,9 @@ class ProjectCliTest(unittest.TestCase):
             self.assertEqual(proc.returncode, 0)
             self.assertIn("| w-0020 |", run("roster", "--state", str(path), "--project", "P-0001").stdout)
             self.assertEqual(json.loads(run("waits", "--state", str(path), "--now", NOW).stdout), [])
-            rows = Path(d) / "rows.json"
-            rows.write_text(json.dumps([]), encoding="utf-8")
-            proc = run("manager-reconcile", "--state", str(path), "--project", "P-0001", "--rows", str(rows))
+            hc_ls = Path(d) / "hc-ls.json"
+            hc_ls.write_text(json.dumps({"terminals": []}), encoding="utf-8")
+            proc = run("manager-reconcile", "--state", str(path), "--project", "P-0001", "--from", str(hc_ls))
             self.assertEqual(json.loads(proc.stdout), [{"decision": "missing", "session_id": "sess_mgr_P-0001"}])
             self.assertEqual(run("roster", "--state", str(path), "--project", "P-0009").returncode, 1)
 
@@ -5067,7 +5067,7 @@ def herdr_worker(state, task_id="T-0030", worker_id="w-0030", **kw):
     git_task(state, task_id, worker_id)
     w = find(state["workers"], worker_id)
     w.update(runtime="herdr", session_id=SID, handle=worker_id, title=f"{task_id}|{worker_id} fix it",
-             cwd="/trees/a/fix", model="sonnet", **kw)
+             worktree_path="/trees/a/fix", model="sonnet", **kw)
     return w
 
 
@@ -5143,6 +5143,19 @@ class LaunchPlanTest(unittest.TestCase):
             "--allowedTools=Bash(hc send sv:*)", "Fix it."])
         self.assertEqual(argv[-1], "Fix it.")
 
+    def test_git_worker_runs_in_its_worktree_and_non_git_in_its_cwd(self):
+        state = fixture_state()
+        w = herdr_worker(state)
+        self.assertNotEqual(w["cwd"], "/trees/a/fix")
+        argv = st.launch_argv(state, "w-0030", "Fix it.", {})
+        self.assertEqual(argv[argv.index("--cwd") + 1], "/trees/a/fix")
+        w["worktree_path"] = None
+        with self.assertRaisesRegex(st.StateError, "worktree_path"):
+            st.launch_argv(state, "w-0030", "Fix it.", {})
+        w.update(kind="non-git", cwd="/work/T-0030-docs")
+        argv = st.launch_argv(state, "w-0030", "Fix it.", {})
+        self.assertEqual(argv[argv.index("--cwd") + 1], "/work/T-0030-docs")
+
     def test_manager_argv(self):
         state = fixture_state()
         add_project(state)
@@ -5181,6 +5194,69 @@ class LaunchPlanTest(unittest.TestCase):
                                  "--worker", "w-0030", "--prompt-file", str(env.dir / "prompt.md"))
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)["argv"][-1], "Fix it.\nThen report.")
+
+
+class HerdrTranscriptTest(unittest.TestCase):
+    def test_last_assistant_message_joins_the_last_message_parts(self):
+        with open(FIXTURES / "transcript_small.jsonl", encoding="utf-8") as f:
+            got = st.last_assistant_message(f)
+        self.assertEqual(got, {"message_ref": "a6",
+                               "text": "Done.\n```supervisor-report\ntask: T-0030\n```\nTrailing part."})
+        self.assertIsNone(st.last_assistant_message(['{"type": "assistant", "message": {"content": []}}']))
+
+    def test_dir_name_matches_claude_code(self):
+        self.assertEqual(st.transcript_dir_name("/private/tmp/claude-501/x_y.z"), "-private-tmp-claude-501-x-y-z")
+        # macOS keeps paths in NFD, so a voiced kana counts as two characters.
+        self.assertEqual(st.transcript_dir_name("/a/ドライブ"), "-a-" + "-" * 6)
+
+    def test_cli_reads_the_worktree_transcript_and_fails_without_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = fixture_state()
+            herdr_worker(state)
+            path = Path(d) / "state.json"
+            path.write_text(json.dumps(state), encoding="utf-8")
+            out = Path(d) / "last-message.txt"
+            env = dict(os.environ, CLAUDE_CONFIG_DIR=str(Path(d) / "cfg"))
+            run = lambda: subprocess.run([sys.executable, str(SCRIPT), "last-message", "--state", str(path),
+                                          "--id", "w-0030", "--out", str(out)], capture_output=True, text=True, env=env)
+            proc = run()
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("hc read", proc.stderr)
+            folder = Path(d) / "cfg" / "projects" / st.transcript_dir_name("/trees/a/fix")
+            folder.mkdir(parents=True)
+            shutil.copy(FIXTURES / "transcript_small.jsonl", folder / f"{SID}.jsonl")
+            proc = run()
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(json.loads(proc.stdout)["message_ref"], "a6")
+            self.assertTrue(out.read_text(encoding="utf-8").startswith("Done."))
+
+
+class ManagerHcRowsTest(unittest.TestCase):
+    def manager(self, **kw):
+        return dict({"session_id": SID, "intended_state": "running", "observed_state": "idle", "last_report": None}, **kw)
+
+    def test_blocked_manager_and_its_agents(self):
+        terminals = [
+            {"address": "t5", "name": "m-p-0001", "state": "live", "status": {"state": "blocked", "msg": "approve"}},
+            {"address": "t6", "name": "helper", "parent": "t5", "state": "live", "status": "working"},
+            {"address": "t7", "name": "old", "parent": "t5", "state": "finished"},
+        ]
+        rows = st.manager_rows_from_hc(self.manager(), "m-p-0001", terminals)
+        decisions = st.manager_reconcile(self.manager(), rows, {"last_message_ref": "a9", "pending_approval": True})
+        self.assertIn({"decision": "foreign_session", "session_id": "helper"}, decisions)
+        self.assertIn({"decision": "pending_approval", "session_id": SID}, decisions)
+        self.assertIn({"decision": "handle_turn", "message_ref": "a9"}, decisions)
+        self.assertNotIn("old", [d.get("session_id") for d in decisions])
+
+    def test_finished_and_missing_manager(self):
+        finished = [{"address": "t5", "name": "m-p-0001", "state": "finished"}]
+        rows = st.manager_rows_from_hc(self.manager(), "m-p-0001", finished)
+        self.assertEqual(st.manager_reconcile(self.manager(), rows), [{"decision": "external_archive", "session_id": SID}])
+        rows = st.manager_rows_from_hc(self.manager(intended_state="archived"), "m-p-0001", finished)
+        self.assertEqual(st.manager_reconcile(self.manager(intended_state="archived"), rows),
+                         [{"decision": "update", "observed_state": "archived"}])
+        self.assertEqual(st.manager_reconcile(self.manager(), st.manager_rows_from_hc(self.manager(), "m-p-0001", [])),
+                         [{"decision": "missing", "session_id": SID}])
 
 
 class ObserveHcTest(unittest.TestCase):

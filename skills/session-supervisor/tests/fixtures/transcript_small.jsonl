@@ -1,0 +1,9 @@
+{"type": "user", "uuid": "u1", "message": {"role": "user", "content": "Fix it."}}
+{"type": "assistant", "uuid": "a1", "message": {"id": "msg_1", "content": [{"type": "text", "text": "Looking."}]}}
+{"type": "assistant", "uuid": "a2", "message": {"id": "msg_2", "content": [{"type": "tool_use", "name": "Bash", "input": {}}]}}
+{"type": "assistant", "uuid": "a3", "isSidechain": true, "message": {"id": "msg_s", "content": [{"type": "text", "text": "subagent text"}]}}
+{"type": "assistant", "uuid": "a4", "message": {"id": "msg_3", "content": [{"type": "thinking", "thinking": "..."}]}}
+{"type": "assistant", "uuid": "a5", "message": {"id": "msg_3", "content": [{"type": "text", "text": "Done.\n```supervisor-report\ntask: T-0030\n```"}]}}
+{"type": "assistant", "uuid": "a6", "message": {"id": "msg_3", "content": [{"type": "text", "text": "Trailing part."}]}}
+{"type": "system", "uuid": "s1", "subtype": "stop_hook_summary"}
+not json
