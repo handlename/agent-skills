@@ -88,6 +88,7 @@ Run at the start of every supervisor session and after every recovery (section 7
    | Rename a session (`title`) | Retitling a reused worker; optional, see 6.2.2 Rename outcome | `set_session_title` |
    | Archive a session | Finishing workers | `archive_session` |
    | Recurring self-paced turns | Periodic reconciliation | `/loop` |
+   | Send a push notification (optional; skip the notification when missing) | Telling the user that a start waits for a chat message (6.2) | `PushNotification` |
    | Publish / read an Artifact | Dashboard | `Artifact` |
    | Run a subagent with a brief and a `model` (run it without `model` when the capability has none) | Observation and investigation (6.0) | `Agent` |
    | Delete a session | **Never used** | `delete_session` |
@@ -116,7 +117,7 @@ Run at the start of every supervisor session and after every recovery (section 7
 
 Facts the procedures rely on (observed in the desktop app):
 
-- In event-triggered turns (automatic continuation, the result of a send, a periodic `/loop` turn) **start is refused**; only turns that carry the user's own words may start sessions. send and archive work in every turn. So a note delegated in Obsidian is taken in by the next reconciliation (`/loop` included), and its worker or manager starts on the user's next chat message.
+- In event-triggered turns (automatic continuation, the result of a send, a periodic `/loop` turn) **start is refused**; only turns that carry the user's own words may start sessions. send and archive work in every turn. So a note delegated in Obsidian is taken in by the next reconciliation (`/loop` included), and its worker or manager starts on the user's next chat message. The supervisor tells the user with a push notification when that happens (6.2).
 - A git repository that has never been opened in the app cannot get a worktree: start is refused, and retrying without a worktree is forbidden. The app may instead show a "Trust repository" button in the supervisor session.
 - Archive stops the session and keeps the branch. The worktree may remain; leave it and mention it to the user (they may run `git worktree remove`). In auto mode archive completes immediately without an approval card.
 - Archive is refused while the session is mid-turn, doing background work, pinned, or shown on screen. It also takes along side sessions that share the worktree.
@@ -317,7 +318,9 @@ Every fact from outside `<dir>` reaches the supervisor as a result file written 
 
 #### 6.2 Launch
 
-Start only in a turn that carries the user's own words. A start refused in an event-triggered turn is not retried; the task stays `waiting` and is launched on the user's next message. Never start a pending worker or manager of a task or project with `user_hold` (paused, or invalid values) or `artifacts_quarantine`; `commit` offers no waiting-start action for them either.
+Start only in a turn that carries the user's own words. A start refused in an event-triggered turn is not retried; the task stays `waiting` and is launched on the user's next message.
+
+Start wait notification: when an event-triggered turn commits a worker or manager that has to be started (a new `pending` worker or manager of a task or project without `user_hold` or `artifacts_quarantine`, for example after a `pickup`, a `resume`, a push consent, or a follow-up), send one push notification at the end of that turn, one line naming each of them, e.g. `T-0114 の w-0123 (push と draft PR) が起動待ちです。チャットで何か送ってください`. Notify only in the turn that committed it: a later `/loop` turn that finds the same worker still waiting does not notify again. Skip it when the push capability is missing; a result saying the notification was not sent needs no handling. Never start a pending worker or manager of a task or project with `user_hold` (paused, or invalid values) or `artifacts_quarantine`; `commit` offers no waiting-start action for them either.
 
 1. Non-git: check the directory first. It is busy when an occupying worker's `cwd` is the same directory, an ancestor, or a descendant. If it prints busy, do not start; the task derives as `waiting`.
 
