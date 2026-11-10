@@ -1,6 +1,6 @@
 ---
 name: session-supervisor
-description: Run a single supervisor session in the Claude desktop app that accepts tasks spanning several repositories or directories, starts one or more worker sessions per task (an app worktree per git worker, one running worker per non-git directory), verifies each worker's committed or recorded results, archives finished workers automatically, and keeps everything in a validated state.json with a published dashboard that survives compaction, resume, /clear, and re-creation of the supervisor; tasks may belong to a project whose read-only project manager session reviews its workers' results, answers their questions, and proposes redo work and new tasks. Triggers include "監督セッションとして動いて", "このタスクを作業用セッションに振り分けて", "supervisorとして複数repoの作業を回して", "act as the session supervisor", "dispatch these tasks to worker sessions", "supervise worker sessions", "プロジェクトを作って管理セッションを置いて", "create a project with a project manager session".
+description: Run a single supervisor session in the Claude desktop app that accepts tasks spanning several repositories or directories, starts one or more worker sessions per task (an app worktree per git worker, one running worker per non-git directory), verifies each worker's committed or recorded results, archives finished workers automatically, and keeps everything in a validated state.json and an Obsidian vault that survive compaction, resume, /clear, and re-creation of the supervisor; tasks may belong to a project whose read-only project manager session reviews its workers' results, answers their questions, and proposes redo work and new tasks. Triggers include "監督セッションとして動いて", "このタスクを作業用セッションに振り分けて", "supervisorとして複数repoの作業を回して", "act as the session supervisor", "dispatch these tasks to worker sessions", "supervise worker sessions", "プロジェクトを作って管理セッションを置いて", "create a project with a project manager session".
 ---
 
 # Session Supervisor
@@ -13,13 +13,13 @@ One supervisor session, opened in a dedicated non-git directory (the supervisor 
 2. detects when a worker's turn ends (the app's automatic continuation, plus periodic reconciliation),
 3. verifies the result through an observer subagent: a committed branch (pushed / PR, by a worker, only when the user explicitly allowed it in this chat or told that worker to in its own session), or result files recorded under the directory,
 4. archives the worker without asking, based on the user's one-time archive consent (a worker of an investigation task waits until the user says they have read its result), and
-5. records every state change in `state.json` and republishes a dashboard to the same artifact URL.
+5. records every state change in `state.json` and in the task and project notes of the Obsidian vault, whose kanban note `Supervisor.md` is the dashboard.
 
 The supervisor decides where to delegate without asking the user: it picks the most likely target directory (cloning a repository or creating a work directory under the `## Locations` of `<dir>/CLAUDE.md` when none exists), routes a follow-up request to its existing task, and replaces a worker that went missing or unverified. It asks about delegation only when a worker is not progressing or replacements reached their limit (6.8), or when a request from a note names no place it can resolve (6.1 step 2; asked in the note, not in this chat).
 
 A task may belong to a **project** (6.10): an id, a name, a context document (a GitHub issue or a Notion page), a project directory under `work_root`, and a **project manager** session that the supervisor starts there. The manager only reads (repositories, PRs, the context document) and returns decisions in a `project-report` block: verdicts on the reviews the supervisor requests after verifying a project worker's `done` (the worker is archived only after an approval), redo work, new-task proposals (started only after the user approves), and questions. Project workers send questions about other work of the project to the manager directly and wait with `awaiting_manager`. Tasks without a project behave as before.
 
-Determinism lives in `scripts/state_tool.py` (Python 3 stdlib): validated atomic commits, status derivation, dashboard rendering, the recovery digest, report parsing, the project roster, wait timeouts, and the mapping of a manager's report to actions. The supervisor (the LLM) only operates session tools, delegates observation to subagents, and makes judgments.
+Determinism lives in `scripts/state_tool.py` (Python 3 stdlib): validated atomic commits, status derivation, note writing, the recovery digest, report parsing, the project roster, wait timeouts, and the mapping of a manager's report to actions. The supervisor (the LLM) only operates session tools, delegates observation to subagents, and makes judgments.
 
 Every task and project also has a note in the Obsidian vault `<dir>/vault`, joined to `state.json` by its `uid`. The note holds what the item means (title, `## 概要` with the request, `status`, `assignee`, `## ユーザーアクション`, `## 成果物`, `## ログ`); `state.json` (schema 2) holds runtime data only. The user delegates from Obsidian by setting a note to `backlog` / `agent`, answers user actions inside the note, and moves cards on the kanban note `Supervisor.md`. `commit` also writes each note's `task_id` / `project_id` so the kanban shows them. The supervisor reads those changes with `notes-scan` (6.13) and writes notes only through `commit --notes` (section 4).
 
@@ -58,7 +58,7 @@ Decide which case applies before anything else:
 
 ### 1. Core rules
 
-- The supervisor may only: operate sessions (start, list, get, read events, send, archive); change state through the state-change set (section 4); publish the dashboard; talk to the user; and read files under `<dir>` (state, digest, observation results, the last-message file, `.claude/settings.json`).
+- The supervisor may only: operate sessions (start, list, get, read events, send, archive); change state through the state-change set (section 4); talk to the user; and read files under `<dir>` (state, digest, observation results, the last-message file, `.claude/settings.json`).
 - The supervisor must not: edit or write outside `<dir>` (the only exception is `state_tool.py prepare-dir`, which clones repositories into `clone_root`, creates work directories under `work_root` (6.1), and creates project directories with their `.claude/settings.json` guard hook under `work_root` (6.10)); run any mutating git / jj / gh command (committing, pushing, merging, rebasing, resetting, tagging, creating or removing worktrees, creating / merging / editing / commenting on PRs and issues, non-GET API calls, and jj changes); read repository files or run git / gh observation itself; answer questions about code by reading it. Changes go to a worker; observation and investigation go to an observer subagent (6.0).
 - The PreToolUse guard installed by `setup` enforces the edit and mutating-command part for the supervisor and its subagents alike. A block (`[session-supervisor guard] blocked: ...`) means "delegate": never work around it with scripts, other interpreters, or shell tricks. `prepare-dir` is the one permitted exception, not a way around the guard: use it only as 6.1 and 6.10 describe. The guard is a guardrail against mistakes, not a security boundary; the rules above apply to what it misses.
 - `state.json` has a single writer: this supervisor. Every state change, without exception, goes through the state-change set (section 4). Never edit `state.json` directly and never write `task.status` (it is derived).
@@ -89,7 +89,6 @@ Run at the start of every supervisor session and after every recovery (section 7
    | Archive a session | Finishing workers | `archive_session` |
    | Recurring self-paced turns | Periodic reconciliation | `/loop` |
    | Send a push notification (optional; skip the notification when missing) | Telling the user that a start waits for a chat message (6.2) | `PushNotification` |
-   | Publish / read an Artifact | Dashboard | `Artifact` |
    | Run a subagent with a brief and a `model` (run it without `model` when the capability has none) | Observation and investigation (6.0) | `Agent` |
    | Delete a session | **Never used** | `delete_session` |
 
@@ -133,7 +132,7 @@ Run from the Entry (section 0) for a new directory, and again whenever the versi
 python3 "<skill-dir>/scripts/state_tool.py" setup --dir "$HOME/supervisor"
 ```
 
-`setup` is idempotent. It creates the directory (aborts inside a git repository), copies `state_tool.py` and `dashboard.template.html` to `<dir>/.supervisor/`, adds a SessionStart hook (matcher `startup|resume|clear|compact`) and a PreToolUse guard to `<dir>/.claude/settings.json` unless already present (aborts on invalid JSON or a malformed `hooks.SessionStart` / `hooks.PreToolUse`, before writing `state.json`; existing entries are kept), sets `"model": "opus"` there when the file has no `model` key (an existing value is kept; the Capability check reports a supervisor that is not on opus), creates `state.json` and `CLAUDE.md` if missing, and prints what it created, kept, or updated. The created `CLAUDE.md` contains a commented-out `## Follow-ups` example; the user enables follow-ups by writing that section ([references/follow-ups-format.md](references/follow-ups-format.md)).
+`setup` is idempotent. It creates the directory (aborts inside a git repository), copies `state_tool.py` to `<dir>/.supervisor/`, adds a SessionStart hook (matcher `startup|resume|clear|compact`) and a PreToolUse guard to `<dir>/.claude/settings.json` unless already present (aborts on invalid JSON or a malformed `hooks.SessionStart` / `hooks.PreToolUse`, before writing `state.json`; existing entries are kept), sets `"model": "opus"` there when the file has no `model` key (an existing value is kept; the Capability check reports a supervisor that is not on opus), creates `state.json` and `CLAUDE.md` if missing, and prints what it created, kept, or updated. The created `CLAUDE.md` contains a commented-out `## Follow-ups` example; the user enables follow-ups by writing that section ([references/follow-ups-format.md](references/follow-ups-format.md)).
 
 `CLAUDE.md` also gets a `## Locations` section, the places where `prepare-dir` (6.1) may write:
 
@@ -144,7 +143,7 @@ Values are absolute paths or start with `~`. `setup` writes the section when it 
 
 The guard (matcher `Edit|MultiEdit|Write|NotebookEdit|Bash`) runs `state_tool.py guard --dir <dir>` before each such tool call of the supervisor and its subagents:
 
-- Edits and writes are allowed under `<dir>`, in Claude's auto-memory directories (`projects/*/memory/` under `$CLAUDE_CONFIG_DIR` or `~/.claude`), and in temp directories. Everything else is blocked, and so are the protected paths inside `<dir>`: `.claude/`, `state.json`, `.supervisor/state_tool.py`, and `.supervisor/dashboard.template.html` (only `setup` and `commit` write them).
+- Edits and writes are allowed under `<dir>`, in Claude's auto-memory directories (`projects/*/memory/` under `$CLAUDE_CONFIG_DIR` or `~/.claude`), and in temp directories. Everything else is blocked, and so are the protected paths inside `<dir>`: `.claude/`, `state.json`, and `.supervisor/state_tool.py` (only `setup` and `commit` write them).
 - Edits and writes under `<dir>/vault` are blocked (`vault notes are written only by state_tool commit`).
 - Bash commands are blocked when they run a mutating git / jj / gh command (the deny-list described in section 1), including inside `sh -c` and command substitution. Read-only forms pass.
 - A block exits 2 with a message starting `[session-supervisor guard] blocked:` that names the matched command. Any other failure of the guard (missing or stale script, malformed input) lets the call through, which is why the Capability check looks for the guard entry.
@@ -158,7 +157,7 @@ The guard (matcher `Edit|MultiEdit|Write|NotebookEdit|Bash`) runs `state_tool.py
 
 Optional jj tracking is a manual step, never done by `setup`: when `<dir>` is a jj repository with the user's own `.claude/hooks/commit-state.sh`, propose widening it to the vault (`jj --no-pager diff --name-only state.json vault` and `jj commit -m "Update supervisor state to rev $rev" state.json vault`) and adding `/vault/.obsidian/workspace*.json` to `<dir>/.gitignore`. These files are the user's; change them only after the user approves, and keep the hook's existing handling of a signing failure.
 
-When telling the user to open the new session, also explain that the dashboard is a private artifact republished on every visible change, and that periodic reconciliation (about every 5 minutes while workers run) uses some usage even when nothing changes.
+When telling the user to open the new session, also explain that the dashboard is the kanban note `vault/Supervisor.md` (open the vault in Obsidian), and that periodic reconciliation (about every 5 minutes while workers run) uses some usage even when nothing changes.
 
 ### 4. The state-change set
 
@@ -177,8 +176,8 @@ Every state change runs this set. Never skip it, never batch unrelated edits acr
    python3 "<dir>/.supervisor/state_tool.py" commit --state "<dir>/state.json" --candidate "<dir>/state.next.json" --notes "<dir>/state.next.notes.json"
    ```
 
-4. Exit 0 means the state was committed; it prints `{"rev": n, "dashboard_changed": bool, "notes_written": [...], "notes_deferred": [...], "notes_failed": [...], "note_problems": [...]}`. If `dashboard_changed` is true, republish the dashboard (6.5). If the output also has `dashboard_error`, the HTML was not updated (a warning is on stderr); the next commit rewrites it, so continue and skip republishing until then. `notes_deferred`: the user changed that note's status or assignee after your scan, so its props were not written; the next `notes-scan` reports the change. `notes_failed`: the next commit re-applies the write once (twice at most, then it warns). Tell the user `note_problems` (for example an `art_set` row the user deleted).
-5. Non-zero exit means nothing of this candidate was written: the `error:` lines on stderr name each violated invariant or malformed field, and `state.json`, `dashboard.html`, and this candidate's note ops are unchanged (the re-application of an earlier commit's unwritten note changes, step 4, may already have happened; that is committed state). Copy `state.json` again (never reuse the rejected candidate), redo the edit correctly, and commit again. Never bypass the invariants. When the error says a note changed after `notes-scan`, or a delivery check (`archive requested but task lacks ...`) or a follow-up url check fails, the user may have edited the note meanwhile: run `notes-scan` again, handle its events, and rebuild the candidate and the ops from fresh copies.
+4. Exit 0 means the state was committed; it prints `{"rev": n, "notes_written": [...], "notes_deferred": [...], "notes_failed": [...], "note_problems": [...]}`. `notes_deferred`: the user changed that note's status or assignee after your scan, so its props were not written; the next `notes-scan` reports the change. `notes_failed`: the next commit re-applies the write once (twice at most, then it warns). Tell the user `note_problems` (for example an `art_set` row the user deleted).
+5. Non-zero exit means nothing of this candidate was written: the `error:` lines on stderr name each violated invariant or malformed field, and `state.json` and this candidate's note ops are unchanged (the re-application of an earlier commit's unwritten note changes, step 4, may already have happened; that is committed state). Copy `state.json` again (never reuse the rejected candidate), redo the edit correctly, and commit again. Never bypass the invariants. When the error says a note changed after `notes-scan`, or a delivery check (`archive requested but task lacks ...`) or a follow-up url check fails, the user may have edited the note meanwhile: run `notes-scan` again, handle its events, and rebuild the candidate and the ops from fresh copies.
 6. Follow-ups: in every candidate that records a newly verified `pr` artifact (6.3 step 6, 6.3 step 7 "Verification", and 6.4 for an external archive or a missing worker that reappeared), run this once, after all Edits and right before step 3:
 
    ```bash
@@ -217,9 +216,9 @@ A user action is a checklist item in the note's `## ユーザーアクション`
 
 Kinds: `ask` is resolved by the user, who checks it, writes any answer as sub-items, and sets the note back to `agent`; while the assignee is `user` nothing is processed (AC-12). `ask` with `answer` needs a sub-item answer: without one, keep it, and say in a `log` op that an answer is needed. `auto=<detector>` is resolved when the supervisor detects it; the user's check alone does not resolve it. `slot` is the place for resume instructions or a follow-up request (6.13) and never counts as open. An answer given in this chat instead is recorded with `ua_answer` + `ua_check` + `ua_ack`.
 
-A project's user actions (`projects[].user_actions`, 6.10) follow the same rule. They change no task's status and are shown in the project's group on the dashboard. The table says for each row whether it is a task's or a project's user action.
+A project's user actions (`projects[].user_actions`, 6.10) follow the same rule. They change no task's status and are shown in the project's note. The table says for each row whether it is a task's or a project's user action.
 
-Links: when the user has to open a page to act (a PR, a CI run, an issue, a document), put its URL in the description so they can open it from the dashboard: `[label](https://…)` or a bare `https://…` URL (only http(s) URLs become links). Use only a URL you observed (an observer result, a worker report, an artifact), never a guessed one. For a wording quoted in this file, keep the quoted text unchanged at the start and append the link after it, e.g. "Failed verification of w-0004: [CI run](https://github.com/org/repo-a/actions/runs/123) is red". A follow-up needs no link in its description: the dashboard links `follow_up.url` itself.
+Links: when the user has to open a page to act (a PR, a CI run, an issue, a document), put its URL in the description so they can open it from the note: `[label](https://…)` or a bare `https://…` URL (only http(s) URLs become links). Use only a URL you observed (an observer result, a worker report, an artifact), never a guessed one. For a wording quoted in this file, keep the quoted text unchanged at the start and append the link after it, e.g. "Failed verification of w-0004: [CI run](https://github.com/org/repo-a/actions/runs/123) is red". A follow-up needs no link in its description: the dashboard links `follow_up.url` itself.
 
 The prefixes `Answer w-NNNN (` (report-blocker guidance, 6.3 step 4), `Hub wait w-NNNN (`, `Review wait w-NNNN (` (6.4), and `Read the result of w-NNNN (` (6.3 step 6) are reserved; never start another user action with them.
 
@@ -465,7 +464,7 @@ Call list with `include_archived: true` and `limit: 100`. Do not use `linked`. M
   - Apply the same check when an approved project worker with `intended_state: archived` is listed as archived: if its latest message id differs from `review.message_ref`, roll back in the candidate that records `observed_state: archived` and hand the new report to 6.3 (verify with `repo-side`).
 - Held investigation worker (a read user action names it, 6.3 step 6) listed as archived, or not listed and still not found by get: the user closed it or it vanished, which counts as read. This rule comes before the two rules below and their project branches.
   - In one candidate: set `observed_state` `archived` or `missing`, `intended_state: archived`, remove the read user action and its guidance, and add the push decision when its recorded `commit` artifact is not pushed (6.3 step 6). Do not verify again, do not process an unprocessed report, and never replace it with 6.8.
-  - When an unprocessed report exists, say in one line that the last turn of w-xxxx was not verified and the dashboard keeps the previous conclusion.
+  - When an unprocessed report exists, say in one line that the last turn of w-xxxx was not verified and the note keeps the previous conclusion.
   - Project task with `review.state: approved` whose `last_report.message_ref` or latest message id differs from `review.message_ref` (it reported after the approval): in the same candidate set `review` to `{id, state: waived, at, reason: "session closed while holding R-NNNN; later turns were not reviewed"}`, keeping its id. The recorded `findings` and artifacts are the approved ones, so nothing unreviewed is archived.
 - Listed as archived while `intended_state` is not `archived` (the user or the app archived it, e.g. after a PR merge; a held investigation worker follows the rule above): set `observed_state: archived` and remove its guidance (6.3 step 4); the task derives `needs_user`. First, when its latest message (event-reading capability) holds a report not yet processed (its message id differs from `last_report.message_ref`) whose `parse-report` status is `done`, and for git its `worktree_path` still exists (the `verify-git` observer finds it), handle the worker with 6.3 steps 1-6 instead (pass `expected_sha` for a push worker), without the archive call and without `archive_consent`: in one candidate record `last_report`, remove its failed-verification user actions and guidance, record the No result or the artifacts, and set `intended_state: archived`. This keeps a user who closed the session right after declaring the work complete from getting a replacement. Otherwise (no such report, the worktree is gone, or step 5 finds neither a verified result nor a No result), verify the result on the repo side through an observer (6.0, purpose `repo-side` in `cwd`, since the worktree may be gone; non-git: `verify-files`). A merged PR whose head equals the recorded commit is enough (6.3 step 5, "Merged PR"). Otherwise `branch_exists` is true, `commit_count` (`base_branch..branch`) is 1 or more, and the PR / remote rules of 6.3 step 5 hold for `branch_head`; non-git: the reported files exist. If verified, record the artifacts (for `commit` delivery: when `remote_sha` or `pr.headRefOid` equals `branch_head`, the `commit` artifact `url` = `<web_url>/commit/<branch_head>`, any `pr` artifact appended after the group, and no push decision; when `web_url` is null, treat it as not pushed; otherwise the push-decision user action) and set `intended_state: archived` in one candidate; `archive_consent` is not needed for a worker already observed archived. Otherwise replace the worker with 6.8. When the user said in this chat that the work should stop, follow 6.6 or 6.9 instead.
   - Project worker: first compare its latest message id with `last_report.message_ref`, and hand an unprocessed report to 6.3 in the candidate that records the external archive (`requested` and not `done`: `superseded`; `done`: verify with `repo-side` and request a new review).
@@ -507,15 +506,7 @@ In a turn that carries the user's words, after reconciliation, start every `pend
 
 #### 6.5 Dashboard
 
-1. First publish: publish `<dir>/dashboard.html` as-is with `icon: dashboard`. Do not load the artifact-design skill and do not edit or redesign the HTML; `state_tool.py` renders it from the bundled template. Record the URL in `supervisor.dashboard.url`.
-2. Within the same conversation, republish the same file path whenever `dashboard_changed` is true.
-3. After a recovery or a new supervisor session, read the artifact by `supervisor.dashboard.url`, then publish to that `url` so the link stays the same.
-4. The displayed rev may lag behind `state.json`; that is acceptable.
-5. If Artifacts are unavailable, give the user the local path `<dir>/dashboard.html` instead.
-6. Each task card header and archived entry shows the task ID as a click-to-copy button (label `Copy T-0007`, keyboard-focusable, briefly shows `Copied`; falls back to selecting the ID when the clipboard is refused) that copies exactly the ID, so the user can paste it into chat. There are no separate Copy buttons.
-7. A task whose only remaining user actions are follow-ups stays on the dashboard, together with its archived workers, until the last follow-up is removed.
-8. The Artifact dashboard stays alongside the vault's kanban note `Supervisor.md`: the note shows the notes' status columns live in Obsidian, the Artifact shows workers, reports, and artifacts. Both read the same data.
-9. With projects, the header holds a project index (one jump link per project and one for tasks outside projects, each with its task count); the header and each project heading stay fixed while scrolling.
+The dashboard is the kanban note `vault/Supervisor.md` that `setup` creates: one kanban for the user's turn (`assignee: user`) and one for the agent's turn (`assignee: agent`), each grouped by `status` and showing `task_id` / `project_id`. `commit` keeps it current by writing the notes, so there is nothing to publish. When the user asks where the dashboard is, give `<dir>/vault/Supervisor.md` and tell them to open the vault in Obsidian. Workers, reports, and verified results are in each note's `## ログ` and `## 成果物`.
 
 #### 6.6 Cancel
 
@@ -593,7 +584,7 @@ A worker that went missing (6.4 "Not listed") or was archived outside the superv
 
 #### 6.9 Corrections
 
-When the user corrects a delegation decision in this chat (the dashboard does not change):
+When the user corrects a delegation decision in this chat:
 
 - **Replace a worker**: use `replaced_by` as in 6.8 (the new `cwd` may differ). Archiving the old worker needs `archive_consent`. Remove the old worker's guidance (6.3 step 4) in the same candidate. Tell the user that its branch and any unpushed commits remain. A replacement in the same `cwd` counts toward the limit of 6.8. A project worker under review needs no approval when replaced (`replaced_by` exempts it); a later verdict for its review id is ignored (`plan-actions` reports it as `stale_silent`).
 - **Move a follow-up**: remove it from one task's `followups` and append it to another task. Tell the original worker with send that the request is withdrawn, and tell the user that commits already made remain.
@@ -689,7 +680,7 @@ A task finishing (`commit` derives `done`) writes `done` / `agent` and needs a `
 
 ### 7. Recovery (compact / resume / clear / re-creation)
 
-The SessionStart hook runs `state_tool.py digest` and injects at most 10,000 characters: the state and dashboard paths, `rev`, the dashboard URL, `session_ids`, whether `archive_consent` exists, user actions (a follow-up ends with `[follow-up <rule> <done>]` and its PR url when the description does not contain it), one line per task, and the instruction to run the Capability check and reconciliation before acting. When the vault cannot be read, the digest shows `<uid> (<note path>)` instead of titles; it also lists the notes on hold for invalid values. If the digest is missing (hook did not fire), run it yourself:
+The SessionStart hook runs `state_tool.py digest` and injects at most 10,000 characters: the state path, `rev`, `session_ids`, whether `archive_consent` exists, user actions (a follow-up ends with `[follow-up <rule> <done>]` and its PR url when the description does not contain it), one line per task, and the instruction to run the Capability check and reconciliation before acting. When the vault cannot be read, the digest shows `<uid> (<note path>)` instead of titles; it also lists the notes on hold for invalid values. If the digest is missing (hook did not fire), run it yourself:
 
 ```bash
 python3 "<dir>/.supervisor/state_tool.py" digest --state "<dir>/state.json"
@@ -765,7 +756,6 @@ The dry run lists the notes it would write. The real run writes one note per tas
 - A blocker reported again with the same text kept the id and `since` of its existing guidance.
 - Every push / PR was made by a worker, either with `push_consent` recorded from the user's words in this chat or on the user's own instruction in that worker's session (observed as in 6.3 step 6).
 - The delete capability was never called, and the branches of archived workers still exist (`branch_exists` from a `repo-side` observer).
-- The dashboard URL in `supervisor.dashboard.url` is unchanged after republishes and recoveries.
 - While any worker is `running`, `idle`, or `needs_input`, periodic reconciliation is active; with none, it is stopped.
 - Every `pr` artifact recorded in this session has the follow-up user actions its `## Follow-ups` rules require (none when the section is absent or invalid).
 - A `pr_closed` follow-up whose PR was merged or closed is gone after the first user turn that followed the merge or close.
@@ -775,4 +765,4 @@ The dry run lists the notes it would write. The real run writes one note per tas
 - A new task proposed by a project manager was started only after the user approved it (its proposal note set to `backlog` / `agent`, or in this chat).
 - No project manager started or archived a session (no `foreign_session` user action).
 - Every worker of an investigation task (except push-only workers) became `intended_state: archived` only in a release candidate of 6.3 step 6 (a verified `done` with `read_confirmed: true`, the user's confirmation in this chat, `approve_ok` of such a report, or a worker observed `archived` or `missing`), or by cancel or `replaced_by`.
-- Every dashboard link to a worker session (`findings`) was built from an observed `session_id`.
+- Every link to a worker session (`findings`) was built from an observed `session_id`.

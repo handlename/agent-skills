@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """State tool for the session-supervisor skill.
 
-Functional core: validate, next_state, render, digest, parse_report, cwd_busy, serialize,
+Functional core: validate, next_state, digest, parse_report, cwd_busy, serialize,
 parse_project_report, plan_actions, roster, waits, manager_reconcile,
 guard_decision (bash_violations, path_violation), parse_follow_ups, new_pr_urls, follow_up_actions,
 parse_locations, default_locations, add_missing_locations, clone_url_parts,
@@ -13,10 +13,8 @@ Imperative shell: the argparse subcommands at the bottom of this file.
 """
 
 import argparse
-import contextlib
 import copy
 import hashlib
-import html
 import json
 import os
 import re
@@ -34,7 +32,6 @@ VIEW_SCHEMA_VERSION = 1
 ARCHIVED_KEEP = 20
 DIGEST_LIMIT = 10000
 HERE = Path(__file__).resolve().parent
-TEMPLATE_NAME = "dashboard.template.html"
 
 KINDS = ("git", "non-git")
 DELIVERIES = ("push_pr", "commit", "files")
@@ -56,7 +53,6 @@ PROJECT_REPORT_RE = re.compile(r"```project-report[ \t]*\r?\n(.*?)\r?\n[ \t]*```
 REPORT_FIELDS = ("task_id", "worker_id", "status", "summary", "artifacts", "blockers", "next_action")
 REPORT_ARTIFACT_KEYS = ("branch", "commit", "pr", "ci")
 
-FOOTER_RE = re.compile(r"<!--sv-footer-->.*?<!--/sv-footer-->", re.S)
 REPORT_RE = re.compile(r"```supervisor-report[ \t]*\r?\n(.*?)\r?\n[ \t]*```", re.S)
 UA_ID_RE = re.compile(r"^UA-(\d+)$")
 HUB_WAIT_PREFIX = "Hub wait {wid} ("
@@ -120,7 +116,7 @@ PROJECT_NAME_RE = re.compile(r"^P-\d{4,}-[a-z0-9-]{1,40}$")
 
 GUARD_MATCHER = "Edit|MultiEdit|Write|NotebookEdit|Bash"
 GUARD_INPUT_KEYS = {"Edit": "file_path", "MultiEdit": "file_path", "Write": "file_path", "NotebookEdit": "notebook_path", "Bash": "command"}
-GUARD_PROTECTED = (".claude", "state.json", ".supervisor/state_tool.py", ".supervisor/" + TEMPLATE_NAME)
+GUARD_PROTECTED = (".claude", "state.json", ".supervisor/state_tool.py")
 GUARD_SEPARATOR_CHARS = frozenset(";&|()\n")
 GUARD_SHELLS = ("sh", "bash", "zsh")
 GUARD_WORD_RE = re.compile(r"(?<![\w./-])(git|jj|gh)(?![\w.-])")
@@ -202,7 +198,6 @@ def empty_state(supervisor_dir):
             "dir": supervisor_dir,
             "session_ids": [],
             "archive_consent": None,
-            "dashboard": {"url": None, "path": os.path.join(supervisor_dir, "dashboard.html")},
             "last_project_number": 0,
             "last_ua_number": 0,
             "note_warnings": {},
@@ -588,7 +583,7 @@ def _shape_errors(state):
     """Type checks that let the remaining validation index fields safely."""
     errors = []
     sup = state["supervisor"]
-    for key in ("archive_consent", "dashboard"):
+    for key in ("archive_consent",):
         if sup.get(key) is not None and not isinstance(sup.get(key), dict):
             errors.append(f"supervisor.{key} must be an object or null")
     for key in ("tasks", "workers", "archived"):
@@ -845,10 +840,6 @@ def validate(state, relief=None):
     errors = _shape_errors(state)
     if errors:
         return errors
-
-    dashboard_url = (sup.get("dashboard") or {}).get("url")
-    if dashboard_url is not None and not _is_http_url(dashboard_url):
-        errors.append("supervisor.dashboard.url must be http(s)")
 
     tasks, workers = state["tasks"], state["workers"]
     task_ids = [t.get("id") for t in tasks]
@@ -1215,6 +1206,9 @@ def next_state(current, candidate, now):
     if not isinstance(candidate, dict) or candidate.get("rev") != current.get("rev"):
         raise StateError(f"candidate rev {candidate.get('rev') if isinstance(candidate, dict) else None!r} does not match current rev {current.get('rev')!r}")
     state = copy.deepcopy(candidate)
+    if isinstance(state.get("supervisor"), dict):
+        # The Artifact dashboard was removed; a state.json from an older version still carries its record.
+        state["supervisor"].pop("dashboard", None)
     relief = _quarantine_relief(current, state)
     errors = validate(state, relief)
     if errors:
@@ -1295,344 +1289,6 @@ def _auto_close_projects(state, referenced, now):
             p["user_actions"] = [ua for ua in p.get("user_actions", []) if ua.get("detector") != "children_closed"]
 
 
-def _esc(value):
-    # Braces are escaped too so state strings can never form a {{SLOT}} of the template.
-    return html.escape("" if value is None else str(value)).replace("{", "&#123;").replace("}", "&#125;")
-
-
-_MD_CODE = re.compile(r"(`[^`\n]+`)")
-# A bare URL takes ASCII URL characters only, so Japanese text right after it stays outside,
-# and never ends in punctuation that usually belongs to the sentence.
-_MD_LINK_OR_URL = re.compile(
-    r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)"
-    r"|(https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()+,;=%]*[A-Za-z0-9\-_~/#=&%+])")
-_MD_BOLD = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*")
-_MD_ITEM = re.compile(r"^\s*(?:([-*])|\d+[.)])\s+(.*)$")
-
-
-def _a(url, text):
-    # The dashboard runs inside the artifact frame, where most sites refuse to load; open links in a new tab.
-    return f'<a href="{_esc(url)}" target="_blank" rel="noopener noreferrer">{_esc(text)}</a>'
-
-
-def _md_links(text):
-    out, pos = [], 0
-    for m in _MD_LINK_OR_URL.finditer(text):
-        out.append(_esc(text[pos:m.start()]))
-        out.append(_a(m.group(2), m.group(1)) if m.group(2) else _a(m.group(3), m.group(3)))
-        pos = m.end()
-    out.append(_esc(text[pos:]))
-    return "".join(out)
-
-
-def _md_inline(text):
-    out = []
-    for part in _MD_CODE.split(text):
-        if len(part) > 2 and part.startswith("`") and part.endswith("`"):
-            out.append(f"<code>{_esc(part[1:-1])}</code>")
-            continue
-        out.append(_MD_BOLD.sub(r"<strong>\1</strong>", _md_links(part)))
-    return "".join(out)
-
-
-def _md(value):
-    """Render a markdown subset (paragraphs, lists, `code`, **bold**, [text](http-url), bare http(s) URLs) as escaped HTML."""
-    blocks, para, items, ordered = [], [], [], False
-
-    def flush():
-        nonlocal para, items
-        if para:
-            blocks.append(f'<p>{"<br>".join(_md_inline(line) for line in para)}</p>')
-        if items:
-            tag = "ol" if ordered else "ul"
-            blocks.append(f'<{tag}>{"".join(f"<li>{_md_inline(i)}</li>" for i in items)}</{tag}>')
-        para, items = [], []
-
-    for line in ("" if value is None else str(value)).splitlines():
-        item = _MD_ITEM.match(line)
-        if not line.strip():
-            flush()
-        elif item:
-            if para or (items and ordered != (item.group(1) is None)):
-                flush()
-            ordered = item.group(1) is None
-            items.append(item.group(2))
-        elif items:
-            items[-1] += " " + line.strip()
-        else:
-            para.append(line.strip())
-    flush()
-    return "".join(blocks)
-
-
-def _chip(state):
-    return f'<span class="chip" data-state="{_esc(state)}">{_esc(state)}</span>'
-
-
-def _link_or_text(url, text):
-    if _is_http_url(url):
-        return _a(url, text)
-    return f"<code>{_esc(text)}</code>"
-
-
-def _time(iso, cls="rel"):
-    # HH:MM is the static fallback; the page script swaps in a relative time and keeps the ISO value as a tooltip.
-    if not iso:
-        return ""
-    clock = iso[11:16] if len(iso) >= 16 else iso
-    return f'<time class="{cls}" datetime="{_esc(iso)}" title="{_esc(iso)}">{_esc(clock)}</time>'
-
-
-def _render_artifact(a):
-    kind = a.get("kind")
-    label = a.get("label") or a.get("ref") or a.get("path") or a.get("url")
-    if kind == "file":
-        return f"{_esc(kind)}: <code>{_esc(a.get('path'))}</code>"
-    return f"{_esc(kind)}: {_link_or_text(a.get('url'), label)}"
-
-
-_ARTIFACT_KIND_LABELS = {"pr": "PR", "ci": "CI"}
-
-
-def _render_artifact_list(artifacts):
-    # Collapsed by default; the summary keeps a per-kind tally visible.
-    if not artifacts:
-        return ""
-    counts = {}
-    for a in artifacts:
-        counts[a.get("kind")] = counts.get(a.get("kind"), 0) + 1
-    tally = " · ".join(f"{n} {_ARTIFACT_KIND_LABELS.get(k, k)}" for k, n in counts.items())
-    items = "".join(f'<li data-kind="{_esc(a.get("kind"))}">{_render_artifact(a)}</li>' for a in artifacts)
-    return (f'<details class="artifacts-fold"><summary><span class="label">Artifacts</span>'
-            f'<span class="artifacts-fold__tally">{_esc(tally)}</span></summary>'
-            f'<ul class="artifacts">{items}</ul></details>')
-
-
-def _in_review(worker):
-    return (worker.get("review") or {}).get("state") in ("requested", "superseded", "rejected")
-
-
-def _task_attention(task, workers):
-    """Everything in one task waiting on the user: its user actions, needs_input / missing workers, and workers archived outside the supervisor."""
-    items = [("user", ua) for ua in task.get("user_actions", [])]
-    for w in workers:
-        # A worker under review keeps its review even when its session is gone, so it does not read as unchecked.
-        if _in_review(w) and (w.get("observed_state") == "missing" or _archived_externally(w)):
-            items.append(("review", w))
-        elif w.get("observed_state") in ("missing", "needs_input"):
-            items.append(("worker", w))
-        elif _archived_externally(w):
-            items.append(("external", w))
-    return items
-
-
-def _render_attention_row(kind, obj):
-    if kind == "user":
-        url = (obj.get("follow_up") or {}).get("url")
-        open_link = ""
-        if _is_http_url(url) and url not in (obj.get("description") or ""):
-            open_link = f'<span>{_a(url, "open ↗")}</span>'
-        return (f'<li class="act" data-kind="user"><span class="act__kind">Action</span>'
-                f'<div class="act__text md">{_md(obj.get("description"))}</div>'
-                f'<p class="act__meta"><span class="id">{_esc(obj.get("id"))}</span>'
-                f'<span>since {_time(obj.get("since"))}</span>{open_link}</p></li>')
-    if kind == "review":
-        text = f'is waiting for review {_esc(obj["review"]["id"])} of the project manager'
-    elif kind == "worker":
-        text = f'is {_chip(obj["observed_state"])}'
-    else:
-        text = "was archived outside the supervisor; its results need checking"
-    return (f'<li class="act" data-kind="{kind}"><span class="act__kind">Worker</span>'
-            f'<p class="act__text"><span class="id">{_esc(obj["id"])}</span> {_esc(obj.get("title"))} {text} '
-            f'<code>{_esc(obj.get("cwd"))}</code></p></li>')
-
-
-def _segment_state(worker):
-    if _finished(worker):
-        return "done"
-    # Archived outside the supervisor still needs a look, so it must not read as an empty slot.
-    return "external" if _archived_externally(worker) else worker.get("observed_state")
-
-
-def _render_report(r, awaiting_since=None):
-    if r is None:
-        return '<p class="wk__report" data-report="none">No report yet</p>'
-    if r.get("status") == "unparsed":
-        return f'<p class="wk__report" data-report="unparsed"><span class="wk__rs">unparsed</span> {_esc(r.get("error"))}</p>'
-    since = f' <span class="wk__since">since {_time(awaiting_since)}</span>' if r.get("status") == "awaiting_manager" else ""
-    return (f'<p class="wk__report" data-report="{_esc(r.get("status"))}"><span class="wk__rs">{_esc(r.get("status"))}</span> '
-            f'{_esc(r.get("summary"))}{since}</p>')
-
-
-def _render_finding(f, with_summary):
-    sid = _esc(f["session_id"])
-    summary = f'<p class="finding__summary">{_esc(f["summary"])}</p>' if with_summary else ""
-    return (f'<div class="finding"><p class="finding__link"><span class="label">Result</span> '
-            f'<a href="#local_{sid}">{_esc(f["title"])}</a> <code>{sid}</code></p>{summary}</div>')
-
-
-def _copy_id(cls, text):
-    # Click-to-copy control whose text is the ID itself (see the click handler in the template).
-    return (f'<button type="button" class="{cls} copyable" data-copy aria-label="Copy {_esc(text)}" '
-            f'title="クリックでコピー">{_esc(text)}</button>')
-
-
-_REVIEW_CHIPS = {"requested": "review", "rejected": "rejected", "superseded": "superseded", "waived": "review waived"}
-
-
-def _render_worker(w):
-    seg = _segment_state(w)
-    label = _REVIEW_CHIPS.get((w.get("review") or {}).get("state"))
-    review = f' {_chip(label)} <span class="id">{_esc(w["review"]["id"])}</span>' if label else ""
-    branch = f' · <code>{_esc(w.get("branch"))}</code>' if w.get("branch") else ""
-    model = f' · {_esc(w.get("model"))}' if w.get("model") else ""
-    return (
-        f'<li class="wk" data-state="{_esc(seg)}"><span class="dot" data-state="{_esc(seg)}" aria-hidden="true"></span>'
-        f'<div class="wk__body"><p class="wk__title"><span class="id">{_esc(w.get("id"))}</span> {_esc(w.get("title"))} {_chip(w.get("observed_state"))}{review}</p>'
-        f'<p class="wk__meta"><code>{_esc(w.get("cwd"))}</code>{branch} · {_esc(w.get("delivery"))}{model}</p>'
-        f'{_render_report(w.get("last_report"), w.get("awaiting_since"))}</div></li>')
-
-
-def _render_tasks(state):
-    tasks = state["tasks"]
-    workers_by_id = {w["id"]: w for w in state["workers"]}
-    projects = _projects(state)
-    if projects:
-        groups = [_render_project(p, [t for t in tasks if t.get("project_id") == p["id"]], workers_by_id) for p in projects]
-        rest = [t for t in tasks if not t.get("project_id")]
-        groups.append(f'<section class="project" id="project-none" data-project="none"><header class="project__head">'
-                      f'<h3 class="project__title">Outside projects</h3></header>{_task_list(rest, workers_by_id)}</section>')
-        body = f'<div class="project-list">{"".join(groups)}</div>'
-    else:
-        body = _task_list(tasks, workers_by_id)
-    return (f'<section class="tasks" id="tasks" aria-labelledby="tasks-label"><h2 class="section-label" id="tasks-label">'
-            f'Tasks <span class="count">{len(tasks)}</span></h2>{body}</section>')
-
-
-def _render_index(state):
-    """Jump links to each project group; empty without projects, so such dashboards keep their header."""
-    projects = _projects(state)
-    if not projects:
-        return ""
-    tasks = state["tasks"]
-    links = [(f'project-{p["id"]}', f'{p["id"]} {p["name"]}', sum(1 for t in tasks if t.get("project_id") == p["id"]))
-             for p in projects]
-    links.append(("project-none", "Outside projects", sum(1 for t in tasks if not t.get("project_id"))))
-    items = "".join(f'<a href="#{_esc(anchor)}" data-jump>{_esc(text)} <span class="count">{n}</span></a>'
-                    for anchor, text, n in links)
-    return f'<nav class="pindex" aria-label="Projects">{items}</nav>'
-
-
-def _render_project(project, tasks, workers_by_id):
-    m = project["manager"]
-    sid = m.get("session_id")
-    title = f'{project["id"]} {project["name"]}'
-    manager = (f'manager <a href="#local_{_esc(sid)}">{_esc(title)}</a> <code>{_esc(sid)}</code>' if sid
-               else f'manager {_esc(title)} <span class="id">not started</span>')
-    closed = f' {_chip("closed")}' if project.get("close") else ""
-    attention = ""
-    if project.get("user_actions"):
-        rows = "".join(_render_attention_row("user", ua) for ua in project["user_actions"])
-        attention = (f'<div class="task__attention"><span class="label">Needs you</span>'
-                     f'<ul class="task__attention-list">{rows}</ul></div>')
-    return (f'<section class="project" id="project-{_esc(project["id"])}" data-project="{_esc(project["id"])}"><header class="project__head">'
-            f'{_copy_id("id project__id", project["id"])}<h3 class="project__title">{_esc(project["name"])}</h3>'
-            f'{_chip(m.get("observed_state"))}{closed}</header>'
-            f'<p class="project__meta">{manager} · {_a(project["context_doc_url"], "context doc ↗")}</p>'
-            f'{attention}{_task_list(tasks, workers_by_id)}</section>')
-
-
-def _task_list(tasks, workers_by_id):
-    if not tasks:
-        cards = '<p class="empty">No active tasks.</p>'
-    else:
-        entries = []
-        for task in tasks:
-            workers = [workers_by_id[wid] for wid in task.get("worker_ids", []) if wid in workers_by_id]
-            entries.append((task, workers, _task_attention(task, workers)))
-        # Tasks waiting on the user come first; the sort is stable, so state.json order holds within each group.
-        entries.sort(key=lambda e: not (e[2] or e[0].get("status") == "needs_user"))
-        out = []
-        for i, (task, workers, attention) in enumerate(entries):
-            done = sum(1 for w in workers if _finished(w))
-            segs = "".join(f'<span class="seg" data-state="{_esc(_segment_state(w))}"></span>' for w in workers)
-            if attention:
-                rows = "".join(_render_attention_row(kind, obj) for kind, obj in attention)
-                next_or_attention = (f'<div class="task__attention"><span class="label">Needs you</span>'
-                                     f'<ul class="task__attention-list">{rows}</ul></div>')
-            else:
-                next_or_attention = f'<p class="task__next"><span class="label">Next</span> {_esc(task.get("next_action"))}</p>'
-            # The worker row already shows its latest summary; repeat the recorded conclusion only when it differs.
-            summaries = {w["id"]: (w.get("last_report") or {}).get("summary") for w in workers}
-            findings = "".join(_render_finding(f, f["summary"] != summaries.get(f["worker_id"]))
-                               for f in task.get("findings", []))
-            cancel = ""
-            if task.get("cancel"):
-                cancel = f'<p class="task__cancel">{_chip("cancelled")} {_esc(task["cancel"].get("reason"))}</p>'
-            out.append(
-                f'<article class="task" data-status="{_esc(task.get("status"))}"{" data-cancelled" if task.get("cancel") else ""} style="--i:{i}">'
-                f'<header class="task__head">{_copy_id("id task__id", task["id"])}'
-                f'<h3 class="task__title">{_esc(task.get("title"))}</h3>{_chip(task.get("status"))}</header>'
-                f'{cancel}'
-                f'<div class="task__progress"><div class="task__segments" role="img" aria-label="{done} of {len(workers)} workers finished">{segs}</div>'
-                f'<p class="task__progress-label"><b>{done}</b>/{len(workers)} done</p>'
-                f'<p class="task__elapsed">started {_time(task.get("created_at"))}</p></div>'
-                f'{next_or_attention}'
-                f'<ul class="task__workers">{"".join(_render_worker(w) for w in workers)}</ul>'
-                f'{findings}{_render_artifact_list(task.get("artifacts", []))}</article>')
-        cards = "".join(out)
-    return f'<div class="task-list">{cards}</div>'
-
-
-def _render_archived(state):
-    stubs = state["archived"]
-    if not stubs:
-        rows = '<p class="empty">No archived tasks.</p>'
-    else:
-        items = []
-        for stub in stubs:
-            cancelled = ""
-            if stub.get("cancelled"):
-                cancelled = f' {_chip("cancelled")} <span class="arc__reason">{_esc(stub.get("reason"))}</span>'
-            no_result = stub.get("no_result", [])
-            chip = f' {_chip("no result")}' if no_result else ""
-            findings = stub.get("findings", [])
-            finding_ids = {f["worker_id"] for f in findings}
-            notes = "".join(f'<p class="arc__note"><span class="id">{_esc(n["worker_id"])}</span> {_esc(n["summary"])}</p>'
-                            for n in no_result if n["worker_id"] not in finding_ids)
-            notes += "".join(_render_finding(f, True) for f in findings)
-            project = f'<span class="id">{_esc(stub["project"]["id"])}</span> ' if stub.get("project") else ""
-            items.append(
-                f'<li class="arc"{" data-cancelled" if stub.get("cancelled") else ""}><p class="arc__title">{_copy_id("id", stub["id"])} {project}'
-                f'{_esc(stub.get("title"))}{cancelled}{chip}</p><p class="arc__meta">archived {_time(stub.get("archived_at"))}</p>'
-                f'{notes}{_render_artifact_list(stub.get("artifacts", []))}</li>')
-        rows = f'<ul class="arc-list">{"".join(items)}</ul>'
-    return (f'<section class="archived" id="archived" aria-labelledby="archived-label"><h2 class="section-label" id="archived-label">'
-            f'Archived <span class="count">{len(stubs)}</span></h2>{rows}</section>')
-
-
-def render(state, template):
-    """Return (body, footer). body keeps the {{FOOTER}} slot so it can be hashed without rev/updated_at."""
-    body = (
-        template.replace("{{INDEX}}", _render_index(state))
-        .replace("{{TASKS}}", _render_tasks(state))
-        .replace("{{ARCHIVED}}", _render_archived(state))
-    )
-    rev = _esc(state.get("rev"))
-    footer = (f'<!--sv-footer--><footer class="foot" data-rev="{rev}">rev {rev} · updated '
-              f'{_time(state.get("updated_at"), "abs")}</footer><!--/sv-footer-->')
-
-    return body, footer
-
-
-def assemble(body, footer):
-    return body.replace("{{FOOTER}}", footer)
-
-
-def body_of(page):
-    return FOOTER_RE.sub("{{FOOTER}}", page)
-
-
 def _digest_follow_up(ua):
     fu = ua.get("follow_up")
     if not isinstance(fu, dict):
@@ -1644,15 +1300,12 @@ def _digest_follow_up(ua):
 
 def digest(state, state_path, limit=DIGEST_LIMIT):
     sup = state.get("supervisor", {})
-    dashboard = sup.get("dashboard") or {}
     workers_by_id = {w.get("id"): w for w in state.get("workers", [])}
     lines = [
         f"[session-supervisor] state rev {state.get('rev')} (updated {state.get('updated_at')})",
         "Before acting: use the session-supervisor skill, run its capability check, then reconcile workers with the live session list. "
         "If any worker is running, idle or needs_input, resume the periodic reconciliation loop.",
         f"state: {state_path}",
-        f"dashboard html: {dashboard.get('path')}",
-        f"dashboard url: {dashboard.get('url') or '(not published)'}",
         f"supervisor session_ids: {', '.join(sup.get('session_ids', [])) or '(none)'}",
         f"archive_consent: {'recorded' if sup.get('archive_consent') else 'missing (ask the user once)'}",
         f"archived tasks: {len(state.get('archived', []))}",
@@ -3025,6 +2678,7 @@ def migrate_v2(state, now):
     if errors:
         raise StateError(errors)
     out, taken, creates, rev = copy.deepcopy(state), set(), [], state["rev"]
+    out["supervisor"].pop("dashboard", None)
     at_now = state.get("updated_at") or now
     workers_by_id = {w["id"]: w for w in state["workers"]}
     stubs = {s["id"]: s for s in state["archived"]}
@@ -3473,58 +3127,26 @@ def _write_atomic(path, text):
     os.replace(_write_tmp(os.path.dirname(os.path.abspath(path)), text), path)
 
 
-def _default_html(state_path):
-    return os.path.join(os.path.dirname(os.path.abspath(state_path)), "dashboard.html")
-
-
 def cmd_version(args):
-    h = hashlib.sha256()
-    for name in (Path(__file__).name, TEMPLATE_NAME):
-        h.update((HERE / name).read_bytes())
-    print(h.hexdigest()[:12])
+    print(hashlib.sha256((HERE / Path(__file__).name).read_bytes()).hexdigest()[:12])
     return 0
 
 
-def _write_state_and_dashboard(state_path, html_path, new, view, template):
-    """Write the dashboard temp file, replace state.json, then the dashboard. Returns the result dict."""
-    body, footer = render(view, template)
-    old_body = body_of(Path(html_path).read_text(encoding="utf-8")) if os.path.exists(html_path) else None
-    html_tmp = _write_tmp(os.path.dirname(os.path.abspath(html_path)), assemble(body, footer))
-    try:
-        state_tmp = _write_tmp(os.path.dirname(os.path.abspath(state_path)), serialize(new))
-        try:
-            os.replace(state_tmp, state_path)
-        except BaseException:
-            os.unlink(state_tmp)
-            raise
-    except BaseException:
-        os.unlink(html_tmp)
-        raise
-    result = {"rev": new["rev"], "dashboard_changed": old_body != body}
-    try:
-        os.replace(html_tmp, html_path)
-    except OSError as e:
-        # The state is already committed, so report success; the stale HTML makes the
-        # next commit see a changed body and rewrite it.
-        with contextlib.suppress(OSError):
-            os.unlink(html_tmp)
-        result.update(dashboard_changed=True, dashboard_error=str(e))
-        print(f"warning: state committed at rev {new['rev']} but the dashboard was not written: {e}", file=sys.stderr)
-    return result
+def _write_state(state_path, new):
+    _write_atomic(state_path, serialize(new))
+    return {"rev": new["rev"]}
 
 
 def cmd_commit(args):
-    html_path = args.html or _default_html(args.state)
-    template = Path(args.template).read_text(encoding="utf-8")
     current = _read_json(args.state)
     if isinstance(current, dict) and current.get("schema_version") == SCHEMA_VERSION:
-        result = _commit_v2(args, current, html_path, template)
+        result = _commit_v2(args, current)
     else:
         # A v1 state.json keeps the v1 flow until migrate-v2 converts it.
         if args.notes:
             raise StateError("--notes needs a schema_version 2 state")
         new = next_state(current, _read_json(args.candidate), _now())
-        result = _write_state_and_dashboard(args.state, html_path, new, new, template)
+        result = _write_state(args.state, new)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 
@@ -3661,7 +3283,7 @@ def _date_props(status, now):
     return {}
 
 
-def _commit_v2(args, current, html_path, template):
+def _commit_v2(args, current):
     now = _now()
     vault = _vault_path(args.state)
     candidate = _read_json(args.candidate)
@@ -3809,7 +3431,7 @@ def _commit_v2(args, current, html_path, template):
         raise StateError(errors)
 
     # 7. state.json (with the journal) first, then the notes.
-    result = _write_state_and_dashboard(args.state, html_path, state_new, view_new, template)
+    result = _write_state(args.state, state_new)
     written_paths, failed = [], []
     for uid in written:
         target = os.path.join(vault, paths[uid])
@@ -3871,7 +3493,7 @@ This directory belongs to the session-supervisor skill. It is not a project.
 - Write `state.json` only through `python3 .supervisor/state_tool.py commit`.
 - `supervisor.archive_consent` in `state.json` is the user's explicit consent that archiving requires. It covers only worker sessions whose `startedBy` is in `supervisor.session_ids`.
 - Never delete sessions.
-- The supervisor only operates sessions, changes state through commit, publishes the dashboard, and talks to the user. Workers edit, commit, push, and open PRs; observer subagents run read-only checks and investigations, write results under .supervisor/observations/, and return the path.
+- The supervisor only operates sessions, changes state through commit, and talks to the user. Workers edit, commit, push, and open PRs; observer subagents run read-only checks and investigations, write results under .supervisor/observations/, and return the path.
 - A PreToolUse hook (state_tool.py guard) blocks edits outside this directory and mutating git / jj / gh commands. The one allowed exception is `state_tool.py prepare-dir`, which writes only under the `## Locations` roots. To disable it, remove its entry from .claude/settings.json by hand; the supervisor asks before restoring a missing entry.
 - `vault/` is an Obsidian vault with one note per task and project: the note holds the meaning (title, `## 概要`, status, assignee, `## ユーザーアクション`, `## 成果物`). Only `python3 .supervisor/state_tool.py commit --notes <ops.json>` writes it (the guard blocks edits); read changes with `notes-scan` and a note with `note-show`. `vault/Supervisor.md` is the kanban dashboard: moving a card changes the note's status. Delegate a task by setting a note to `backlog` / `agent`.
 - `## Follow-ups` (optional) turns each newly verified PR into a user action such as "Review org/repo#42". Format: references/follow-ups-format.md in the session-supervisor skill. Check it with `python3 .supervisor/state_tool.py validate-follow-ups --claude-md CLAUDE.md`.
@@ -3900,13 +3522,13 @@ def cmd_setup(args):
     report = []
     sv_dir = target / ".supervisor"
     sv_dir.mkdir(parents=True, exist_ok=True)
-    for name in (Path(__file__).name, TEMPLATE_NAME):
-        dest = sv_dir / name
-        src_bytes = (HERE / name).read_bytes()
-        status = "exists" if dest.exists() and dest.read_bytes() == src_bytes else ("updated" if dest.exists() else "created")
-        if status != "exists":
-            shutil.copyfile(HERE / name, dest)
-        report.append((status, dest))
+    name = Path(__file__).name
+    dest = sv_dir / name
+    src_bytes = (HERE / name).read_bytes()
+    status = "exists" if dest.exists() and dest.read_bytes() == src_bytes else ("updated" if dest.exists() else "created")
+    if status != "exists":
+        shutil.copyfile(HERE / name, dest)
+    report.append((status, dest))
 
     state_path = target / "state.json"
     script = sv_dir / Path(__file__).name
@@ -4516,20 +4138,17 @@ def cmd_export_v1(args):
 def build_parser():
     parser = argparse.ArgumentParser(prog="state_tool.py", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    default_template = str(HERE / TEMPLATE_NAME)
 
     p = sub.add_parser("setup", help="install the supervisor directory (idempotent)")
     p.add_argument("--dir", required=True)
     p.set_defaults(func=cmd_setup)
 
-    p = sub.add_parser("version", help="print the sha256 prefix of this script and its template")
+    p = sub.add_parser("version", help="print the sha256 prefix of this script")
     p.set_defaults(func=cmd_version)
 
-    p = sub.add_parser("commit", help="validate a candidate and atomically write state.json and the dashboard")
+    p = sub.add_parser("commit", help="validate a candidate and atomically write state.json (and the notes)")
     p.add_argument("--state", required=True)
     p.add_argument("--candidate", required=True)
-    p.add_argument("--template", default=default_template)
-    p.add_argument("--html", help="dashboard path (default: dashboard.html next to the state)")
     p.add_argument("--notes", help="JSON file {uid: [note op, ...]} applied to the vault notes (schema_version 2)")
     p.set_defaults(func=cmd_commit)
 

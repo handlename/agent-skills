@@ -17,7 +17,6 @@ from pathlib import Path
 TESTS = Path(__file__).resolve().parent
 SKILL = TESTS.parent
 SCRIPT = SKILL / "scripts" / "state_tool.py"
-TEMPLATE = (SKILL / "scripts" / "dashboard.template.html").read_text(encoding="utf-8")
 FIXTURES = TESTS / "fixtures"
 sys.path.insert(0, str(SKILL / "scripts"))
 
@@ -28,11 +27,6 @@ NOW = "2026-10-17T11:00:00+09:00"
 
 def fixture_state():
     return json.loads((FIXTURES / "state_valid.json").read_text(encoding="utf-8"))
-
-
-def task_card(page, task_id):
-    start = page.rindex('<article class="task"', 0, page.index(f'>{task_id}</button>'))
-    return page[start:page.index("</article>", start)]
 
 
 def find(items, item_id):
@@ -1164,7 +1158,6 @@ class GuardTest(unittest.TestCase):
             (self.dir / ".claude" / "settings.json", None),
             (self.dir / "state.json", None),
             (self.dir / ".supervisor" / "state_tool.py", None),
-            (self.dir / ".supervisor" / "dashboard.template.html", None),
             (self.config / "plans" / "p.md", None),
             (self.config / "settings.json", None),
         ]
@@ -1243,7 +1236,6 @@ class CommitCliTest(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.state = self.dir / "state.json"
         self.cand = self.dir / "state.next.json"
-        self.html = self.dir / "dashboard.html"
         self.state.write_text(st.serialize(fixture_state()), encoding="utf-8")
 
     def tearDown(self):
@@ -1262,28 +1254,21 @@ class CommitCliTest(unittest.TestCase):
     def test_commit_writes_and_leaves_no_temp_files(self):
         code, out, _ = self.run_commit(self.current())
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out), {"rev": 13, "dashboard_changed": True})
+        self.assertEqual(json.loads(out), {"rev": 13})
         self.assertEqual(self.current()["rev"], 13)
-        self.assertTrue(self.html.exists())
-        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["dashboard.html", "state.json", "state.next.json"])
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["state.json", "state.next.json"])
 
-    def test_rev_only_change_is_not_dashboard_change(self):
-        self.run_commit(self.current())
-        code, out, _ = self.run_commit(self.current())
-        self.assertEqual(json.loads(out), {"rev": 14, "dashboard_changed": False})
-        self.assertIn("rev 14", self.html.read_text(encoding="utf-8"))
-
-    def test_visible_change_is_dashboard_change(self):
-        self.run_commit(self.current())
+    def test_legacy_dashboard_record_is_dropped(self):
         cand = self.current()
-        find(cand["tasks"], "T-0004")["next_action"] = "Review PR #42"
-        _, out, _ = self.run_commit(cand)
-        self.assertTrue(json.loads(out)["dashboard_changed"])
+        cand["supervisor"]["dashboard"] = {"url": "https://claude.ai/artifact/x", "path": str(self.dir / "dashboard.html")}
+        self.state.write_text(st.serialize(cand), encoding="utf-8")
+        code, _, err = self.run_commit(self.current())
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("dashboard", self.current()["supervisor"])
 
     def test_failure_leaves_files_unchanged(self):
         self.run_commit(self.current())
         before_state = self.state.read_bytes()
-        before_html = self.html.read_bytes()
         cand = self.current()
         cand["rev"] = 1
         code, out, err = self.run_commit(cand)
@@ -1291,30 +1276,7 @@ class CommitCliTest(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("error:", err)
         self.assertEqual(self.state.read_bytes(), before_state)
-        self.assertEqual(self.html.read_bytes(), before_html)
-        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["dashboard.html", "state.json", "state.next.json"])
-
-
-    def test_html_rename_failure_after_state_replace_reports_success(self):
-        self.run_commit(self.current())
-        real_replace = os.replace
-
-        def failing_replace(src, dst):
-            if str(dst) == str(self.html):
-                raise OSError("disk full")
-            return real_replace(src, dst)
-
-        before_html = self.html.read_bytes()
-        with mock.patch.object(st.os, "replace", failing_replace):
-            code, out, err = self.run_commit(self.current())
-        self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out), {"rev": 14, "dashboard_changed": True, "dashboard_error": "disk full"})
-        self.assertIn("warning: state committed at rev 14", err)
-        self.assertEqual(self.current()["rev"], 14)
-        self.assertEqual(self.html.read_bytes(), before_html)
-        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["dashboard.html", "state.json", "state.next.json"])
-        _, out, _ = self.run_commit(self.current())
-        self.assertEqual(json.loads(out), {"rev": 15, "dashboard_changed": False})
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["state.json", "state.next.json"])
 
     def test_malformed_candidate_is_an_error_line(self):
         cand = self.current()
@@ -1449,264 +1411,11 @@ class NoResultTest(unittest.TestCase):
         state = st.next_state(state, cand, NOW)
         self.assertNotIn("no_result", find(state["archived"], "T-0004"))
 
-    def test_archived_stub_shows_no_result_chip_and_summary(self):
-        state = fixture_state()
-        state["archived"][0]["no_result"] = [no_result("w-0009", "<b>nothing</b> kept")]
-        page = st.assemble(*st.render(state, TEMPLATE))
-        archived = page[page.index('id="archived"'):]
-        self.assertEqual(archived.count('data-state="no result"'), 1)
-        self.assertIn("&lt;b&gt;nothing&lt;/b&gt; kept", archived)
-        self.assertNotIn("<b>nothing</b>", archived)
-        plain = st.assemble(*st.render(fixture_state(), TEMPLATE))
-        self.assertNotIn('data-state="no result"', plain)
-        self.assertNotIn('class="arc__note"', plain)
-
-
-class RenderTest(unittest.TestCase):
-    def page(self, state):
-        return st.assemble(*st.render(state, TEMPLATE))
-
-    def test_deterministic(self):
-        self.assertEqual(self.page(fixture_state()), self.page(fixture_state()))
-
-    def test_section_order_and_title(self):
-        page = self.page(fixture_state())
-        self.assertIn("<title>Supervisor Dashboard</title>", page)
-        self.assertLess(page.index('id="tasks"'), page.index('id="archived"'))
-        self.assertNotIn('id="artifacts"', page)
-        self.assertNotIn("{{", page)
-
-    def test_task_card_lists_its_artifacts(self):
-        page = self.page(fixture_state())
-        tasks = page[page.index('id="tasks"'):page.index('id="archived"')]
-        self.assertIn('href="https://github.com/org/repo-a/pull/42"', tasks)
-
-    def test_archived_stubs_show_artifacts_and_cancelled_marker(self):
-        page = self.page(fixture_state())
-        archived = page[page.index('id="archived"'):]
-        self.assertIn('href="https://github.com/org/repo-a/pull/40"', archived)
-        self.assertIn("T-0002", archived)
-        self.assertIn('data-state="cancelled"', archived)
-        self.assertIn("ユーザーが不要と判断", archived)
-        self.assertEqual(archived.count('data-state="cancelled"'), 1)
-
-    def test_task_card_lists_every_attention_source(self):
-        state = fixture_state()
-        find(state["workers"], "w-0004")["observed_state"] = "archived"
-        card = task_card(self.page(state), "T-0003")
-        # UA-0002, UA-0003 (follow-up), w-0005 needs_input, w-0004 archived outside the supervisor
-        attention = card[card.index('class="task__attention-list"'):card.index('class="task__workers"')]
-        self.assertEqual(attention.count('class="act"'), 4)
-        for item_id in ("UA-0002", "UA-0003", "w-0005", "w-0004"):
-            self.assertIn(item_id, attention)
-        self.assertIn("since <time", attention)
-        self.assertNotIn('class="task__next"', card)
-
-    def test_task_card_shows_next_when_nothing_waits(self):
-        state = fixture_state()
-        find(state["tasks"], "T-0003")["user_actions"] = []
-        find(state["workers"], "w-0005")["observed_state"] = "running"
-        card = task_card(self.page(state), "T-0003")
-        self.assertNotIn('class="task__attention"', card)
-        self.assertIn('class="task__next"', card)
-
-    def test_attention_rows_omit_task_id(self):
-        card = task_card(self.page(fixture_state()), "T-0003")
-        attention = card[card.index('class="task__attention-list"'):card.index('class="task__workers"')]
-        metas = re.findall(r'<p class="act__meta">.*?</p>', attention)
-        self.assertTrue(metas)
-        for meta in metas:
-            self.assertNotIn("T-0003", meta)
-
-    def test_tasks_needing_user_come_first_in_stable_order(self):
-        state = fixture_state()
-        base = find(state["tasks"], "T-0004")
-        tasks = []
-        for n, (kind, status) in enumerate([(None, "waiting"), ("user", "needs_user"), (None, "waiting"),
-                                            ("worker", "running"), (None, "needs_user")], start=1):
-            task = copy.deepcopy(base)
-            task.update(id=f"T-01{n:02d}", status=status, user_actions=[], worker_ids=[])
-            if kind == "user":
-                task["user_actions"] = [{"id": f"UA-01{n:02d}", "description": "approve", "since": "2026-10-17T10:00:00+09:00"}]
-            if kind == "worker":
-                worker = copy.deepcopy(find(state["workers"], "w-0005"))
-                worker.update(id=f"w-01{n:02d}", task_id=task["id"])
-                state["workers"].append(worker)
-                task["worker_ids"] = [worker["id"]]
-            tasks.append(task)
-        state["tasks"] = tasks
-        page = self.page(state)
-        order = sorted(t["id"] for t in tasks)
-        order.sort(key=lambda tid: page.index(f'>{tid}</button>'))
-        self.assertEqual(order, ["T-0102", "T-0104", "T-0105", "T-0101", "T-0103"])
-
-    def test_page_has_no_hero(self):
-        page = self.page(fixture_state())
-        self.assertNotIn('id="actions"', page)
-        self.assertNotIn('class="hero', page)
-        self.assertNotIn("{{HERO}}", TEMPLATE)
-
-    def test_task_card_shows_progress_reports_and_cancel(self):
-        state = fixture_state()
-        find(state["tasks"], "T-0003")["cancel"] = {"at": "2026-10-17T11:00:00+09:00", "reason": "今回は不要"}
-        find(state["workers"], "w-0004")["intended_state"] = "archived"
-        tasks = self.page(state).split('id="tasks"', 1)[1].split('id="archived"', 1)[0]
-        self.assertIn("<b>0</b>/2 done", tasks)
-        self.assertIn('<span class="seg" data-state="idle"></span><span class="seg" data-state="needs_input"></span>', tasks)
-        self.assertIn('data-report="unparsed"><span class="wk__rs">unparsed</span> no supervisor-report block found', tasks)
-        self.assertIn('data-report="none">No report yet', tasks)
-        self.assertIn('<p class="task__cancel"><span class="chip" data-state="cancelled">cancelled</span> 今回は不要</p>', tasks)
-
-    def test_externally_archived_worker_segment_is_not_empty(self):
-        state = fixture_state()
-        find(state["workers"], "w-0004")["observed_state"] = "archived"
-        self.assertIn('<span class="seg" data-state="external"></span>', self.page(state))
-
-    def test_rev_and_updated_at_only_in_footer(self):
-        body, footer = st.render(fixture_state(), TEMPLATE)
-        self.assertNotIn("2026-10-17T10:42:00", body)
-        self.assertNotIn("rev 12", body)
-        self.assertIn('data-rev="12">rev 12', footer)
-
-    def test_task_card_attention_lists_externally_archived_worker(self):
-        state = fixture_state()
-        find(state["workers"], "w-0004")["observed_state"] = "archived"
-        card = task_card(self.page(state), "T-0003")
-        self.assertIn("archived outside the supervisor", card)
-
-    def test_task_card_attention_lists_missing_and_needs_input(self):
-        state = fixture_state()
-        find(state["workers"], "w-0004")["observed_state"] = "missing"
-        card = task_card(self.page(state), "T-0003")
-        self.assertIn("w-0004", card)
-        self.assertIn("w-0005", card)
-        self.assertIn("needs_input", card)
-        self.assertIn("UA-0002", card)
-
-    def test_escapes_script_and_blocks_javascript_links(self):
-        state = fixture_state()
-        find(state["tasks"], "T-0003")["title"] = "<script>alert(1)</script>{{TASKS}}"
-        find(state["tasks"], "T-0003")["artifacts"].append({"kind": "branch", "label": "x", "ref": "r", "url": "javascript:alert(1)"})
-        page = self.page(state)
-        self.assertEqual(page.count("<script>"), TEMPLATE.count("<script>"))
-        self.assertIn("&lt;script&gt;", page)
-        self.assertNotIn('href="javascript:', page)
-        self.assertNotIn("{{TASKS}}", page)
-
-    def test_user_action_description_renders_markdown(self):
-        state = fixture_state()
-        task = next(t for t in state["tasks"] if t.get("user_actions"))
-        task["user_actions"][0]["description"] = (
-            "Push `a/<b>` **now**: [PR](https://x.test/1?a=1&b=2)\n"
-            "- one `**x**`\n- two\n\n1. first\n2. [bad](javascript:alert(1))")
-        page = self.page(state)
-        card = task_card(page, task["id"])
-        self.assertIn("<p>Push <code>a/&lt;b&gt;</code> <strong>now</strong>: "
-                      '<a href="https://x.test/1?a=1&amp;b=2" target="_blank" rel="noopener noreferrer">PR</a></p>', card)
-        self.assertIn("<ul><li>one <code>**x**</code></li><li>two</li></ul>", card)
-        self.assertIn("<ol><li>first</li><li>[bad](javascript:alert(1))</li></ol>", card)
-        self.assertNotIn('href="javascript:', page)
-
-    def test_markdown_never_emits_raw_html_or_template_slots(self):
-        self.assertEqual(st._md("<img src=x onerror=1> `{{HERO}}` **{{TASKS}}**"),
-                         "<p>&lt;img src=x onerror=1&gt; <code>&#123;&#123;HERO&#125;&#125;</code> "
-                         "<strong>&#123;&#123;TASKS&#125;&#125;</strong></p>")
-        self.assertEqual(st._md('[x](https://a.test/"onmouseover=1)'),
-                         '<p><a href="https://a.test/&quot;onmouseover=1" target="_blank" rel="noopener noreferrer">x</a></p>')
-
-    def test_markdown_links_bare_urls(self):
-        a = '<a href="{0}" target="_blank" rel="noopener noreferrer">{0}</a>'
-        self.assertEqual(st._md("PR https://github.com/org/repo-b/pull/17をレビュー"),
-                         "<p>PR " + a.format("https://github.com/org/repo-b/pull/17") + "をレビュー</p>")
-        self.assertEqual(st._md("(see https://x.test/a?b=1&c=2)."),
-                         "<p>(see " + a.format("https://x.test/a?b=1&amp;c=2") + ").</p>")
-        self.assertEqual(st._md('"https://x.test/a" `https://x.test/b`'),
-                         "<p>&quot;" + a.format("https://x.test/a") + "&quot; <code>https://x.test/b</code></p>")
-        self.assertEqual(st._md("[https://x.test/a](https://x.test/b)"),
-                         '<p><a href="https://x.test/b" target="_blank" rel="noopener noreferrer">https://x.test/a</a></p>')
-        self.assertEqual(st._md("javascript:alert(1) ftp://x.test/a"), "<p>javascript:alert(1) ftp://x.test/a</p>")
-
-    def test_every_dashboard_link_opens_in_a_new_tab(self):
-        page = self.page(fixture_state())
-        anchors = re.findall(r"<a\b[^>]*>", page)
-        self.assertTrue(anchors)
-        for tag in anchors:
-            self.assertIn('target="_blank" rel="noopener noreferrer"', tag)
-
-    def test_follow_up_url_is_linked_unless_in_description(self):
-        state = fixture_state()
-        task = find(state["tasks"], "T-0003")
-        link = '<a href="https://github.com/org/repo-a/pull/42" target="_blank" rel="noopener noreferrer">open ↗</a>'
-        self.assertIn(link, task_card(self.page(state), "T-0003"))
-        task["user_actions"][1]["description"] = "Review https://github.com/org/repo-a/pull/42"
-        self.assertNotIn("open ↗", task_card(self.page(state), "T-0003"))
-
-    def test_artifacts_are_collapsed_with_a_tally(self):
-        page = self.page(fixture_state())
-        card = task_card(page, "T-0003")
-        self.assertIn('<details class="artifacts-fold"><summary><span class="label">Artifacts</span>'
-                      '<span class="artifacts-fold__tally">1 branch · 1 commit · 1 PR · 1 CI</span></summary>', card)
-        self.assertNotIn("<details open", page)
-        archived = page[page.index('id="archived"'):]
-        self.assertIn('<span class="artifacts-fold__tally">1 PR</span>', archived)
-        self.assertNotIn("artifacts-fold", task_card(page, "T-0004"))
-
-    def test_file_artifact_is_not_a_link(self):
-        state = fixture_state()
-        find(state["tasks"], "T-0004")["artifacts"] = [{"kind": "file", "path": "/Users/handlename/notes/a.txt"}]
-        page = self.page(state)
-        self.assertIn("<code>/Users/handlename/notes/a.txt</code>", page)
-        self.assertNotIn('href="/Users', page)
-
-    def test_task_and_archived_ids_are_click_to_copy_controls(self):
-        state = fixture_state()
-        find(state["tasks"], "T-0004")["id"] = "T-0004"
-        state["archived"] = [{"id": "T-0900", "title": "old", "artifacts": [], "archived_at": "2026-01-01T00:00:00Z"}]
-        page = self.page(state)
-        tasks = page[page.index('id="tasks"'):page.index('id="archived"')]
-        archived = page[page.index('id="archived"'):]
-        ctl = '<button type="button" class="{cls} copyable" data-copy aria-label="Copy {id}" title="クリックでコピー">{id}</button>'
-        for t in state["tasks"]:
-            self.assertIn(ctl.format(cls="id task__id", id=t["id"]), tasks)
-        self.assertEqual(tasks.count('class="id task__id copyable"'), len(state["tasks"]))
-        self.assertIn(ctl.format(cls="id", id="T-0900"), archived)
-        self.assertNotIn(">Copy</button>", page)
-        self.assertIn("navigator.clipboard.writeText", page)
-
-    def test_copy_control_text_is_html_escaped(self):
-        self.assertEqual(st._copy_id("id", 'T-<1>"'),
-                         '<button type="button" class="id copyable" data-copy aria-label="Copy T-&lt;1&gt;&quot;" '
-                         'title="クリックでコピー">T-&lt;1&gt;&quot;</button>')
-
-    def test_external_resources_are_google_fonts_only(self):
-        page = self.page(fixture_state())
-        self.assertIsNone(re.search(r"<script\b[^>]*\bsrc=", page))
-        for href in re.findall(r'<link\b[^>]*\bhref="([^"]+)"', page):
-            self.assertRegex(href, r"^https://fonts\.(googleapis|gstatic)\.com")
-        self.assertIn("prefers-color-scheme: dark", page)
-        self.assertIn(':root[data-theme="dark"]', page)
-
-    def test_nothing_animates_forever(self):
-        self.assertNotIn("infinite", TEMPLATE)
-        self.assertIn("@media (prefers-reduced-motion: reduce)", TEMPLATE)
-
-    def test_copyable_hover_changes_no_box_property(self):
-        rules = re.findall(r"([^{}]*\.copyable[^{}]*:hover[^{}]*)\{([^}]*)\}", TEMPLATE)
-        self.assertTrue(rules)
-        for selector, body in rules:
-            self.assertNotRegex(body, r"\b(padding|margin|border(?!-radius)|font|letter-spacing|width)[a-z-]*\s*:", selector)
-
-    def test_copyable_rest_background_has_matching_hover_fill(self):
-        for selector, body in re.findall(r"([^{}]*\.copyable[^{}:]*)\{([^}]*)\}", TEMPLATE):
-            if re.search(r"\bbackground\s*:", body):
-                self.assertRegex(TEMPLATE, re.escape(selector.strip()) + r":hover\s*\{[^}]*background:\s*var\(--hover-bg\)")
-
-
 class DigestTest(unittest.TestCase):
     def test_contents(self):
         text = st.digest(fixture_state(), "/Users/handlename/supervisor/state.json")
         self.assertLessEqual(len(text), 10000)
-        for needle in ("/Users/handlename/supervisor/state.json", "/Users/handlename/supervisor/dashboard.html",
+        for needle in ("/Users/handlename/supervisor/state.json",
                        "sess_sup_01", "sess_sup_02", "periodic reconciliation", "UA-0002", "T-0004", "sess_abc123 idle"):
             self.assertIn(needle, text)
 
@@ -1841,8 +1550,7 @@ class SetupTest(unittest.TestCase):
         target = self.root / "sup"
         proc = self.setup_dir(target)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(self.files(target), [".claude/settings.json", ".supervisor/dashboard.template.html",
-                                              ".supervisor/state_tool.py", "CLAUDE.md", "state.json",
+        self.assertEqual(self.files(target), [".claude/settings.json", ".supervisor/state_tool.py", "CLAUDE.md", "state.json",
                                               "vault/.obsidian/templates.json", "vault/Supervisor.md",
                                               "vault/_templates/project.md", "vault/_templates/task.md"])
         entries = self.hooks(target)
@@ -2707,14 +2415,6 @@ class WorkerModelTest(unittest.TestCase):
                 errors = st.validate(self.state_with(model=model))
                 self.assertTrue(any("w-0005: model must be one of" in e for e in errors), errors)
 
-    def test_dashboard_shows_model(self):
-        page = st.assemble(*st.render(fixture_state(), TEMPLATE))
-        worker = page[page.index('<span class="id">w-0004</span>'):]
-        self.assertIn("· sonnet</p>", worker[:worker.index("</li>")])
-        other = page[page.index('<span class="id">w-0005</span>'):]
-        self.assertNotIn("sonnet", other[:other.index("</li>")])
-
-
 class CliSurfaceTest(unittest.TestCase):
     def test_init_and_render_are_gone(self):
         for command in ("init", "render"):
@@ -3403,61 +3103,7 @@ class SubcommandSurfaceTest(unittest.TestCase):
                          "manager-reconcile"} <= names, names)
 
 
-class ProjectRenderTest(unittest.TestCase):
-    SLOTS = "{{TASKS}}\n{{ARCHIVED}}\n{{FOOTER}}\n"
-
-    def test_golden_without_projects(self):
-        golden = (FIXTURES / "dashboard_no_projects.html").read_text(encoding="utf-8")
-        state = fixture_state()
-        self.assertEqual(st.assemble(*st.render(state, self.SLOTS)), golden)
-        state["projects"] = []
-        self.assertEqual(st.assemble(*st.render(state, self.SLOTS)), golden)
-        self.assertNotIn("pindex", st.assemble(*st.render(state, TEMPLATE)).split("<body>")[1].split("<script>")[0])
-
-    def test_project_groups(self):
-        state = fixture_state()
-        p1 = add_project(state, last_review=3)
-        p1["user_actions"] = [{"id": "UA-0900", "description": "Approve new task proposal of P-0001 (`Nature MCP`): Add docs",
-                               "since": NOW, "proposal": {"title": "Add docs", "text": "x", "message_ref": "m"}}]
-        add_project(state, "P-0002", name="<b>Other</b>", directory="/Users/handlename/supervisor-work/P-0002-other")
-        w = project_worker(state)
-        w["last_report"], w["review"] = rep("m1"), review()
-        w2 = project_worker(state, "T-0021", "w-0021")
-        w2["last_report"], w2["review"] = rep("m2"), review("R-0002", "rejected", ref="m2")
-        w3 = project_worker(state, "T-0022", "w-0022")
-        w3["last_report"], w3["awaiting_since"] = rep("m3", "awaiting_manager"), NOW
-        w3["review"] = review("R-0003", "waived", reason="push-only after R-0001")
-        w4 = project_worker(state, "T-0023", "w-0023", pid="P-0002")
-        w4["observed_state"] = "archived"
-        p2 = state["projects"][1]
-        p2["last_review_number"] = 1
-        w4["review"] = review("R-0001", ref="external:" + NOW)
-        self.assertEqual(st.validate(state), [])
-        page = st.assemble(*st.render(state, TEMPLATE))
-        self.assertEqual(page.count('<section class="project"'), 3)
-        index = page.split('<nav class="pindex"')[1].split("</nav>")[0]
-        self.assertEqual(re.findall(r'href="#(project-[^"]+)" data-jump', index), ["project-P-0001", "project-P-0002", "project-none"])
-        for anchor in ("project-P-0001", "project-P-0002", "project-none"):
-            self.assertIn(f'id="{anchor}"', page)
-        self.assertIn("P-0002 &lt;b&gt;Other&lt;/b&gt;", index)
-        self.assertIn('data-project="none"', page)
-        self.assertIn('manager <a href="#local_sess_mgr_P-0001">P-0001 Nature MCP</a> <code>sess_mgr_P-0001</code>', page)
-        self.assertIn('href="https://github.com/org/repo/issues/1"', page)
-        self.assertIn("Add docs", page)
-        for chip in ("review", "rejected", "review waived"):
-            self.assertIn(f'data-state="{chip}"', page)
-        self.assertIn('data-report="awaiting_manager"', page)
-        self.assertIn("is waiting for review R-0001 of the project manager", page)
-        self.assertNotIn("its results need checking", page.split('data-project="P-0002"')[1].split("</section>")[0])
-        self.assertIn("&lt;b&gt;Other&lt;/b&gt;", page)
-        self.assertNotIn("<b>Other</b>", page)
-
-    def test_archived_stub_shows_project(self):
-        state = fixture_state()
-        state["archived"][0]["project"] = {"id": "P-0001", "name": "Nature MCP"}
-        page = st.assemble(*st.render(state, TEMPLATE))
-        self.assertIn('<span class="id">P-0001</span>', page)
-
+class ProjectDigestTest(unittest.TestCase):
     def test_digest_projects(self):
         plain = st.digest(fixture_state(), "/s/state.json")
         self.assertNotIn("projects:", plain)
@@ -3604,34 +3250,6 @@ class InvestigationTest(unittest.TestCase):
         for value in ({"task_id": "T-0090"}, {"task_id": "", "context": "c"}, "T-0090", []):
             task["derived_from"] = value
             self.assertInvalid(state, "task T-0093: derived_from must be {task_id, context} with non-empty strings")
-
-    def test_card_shows_finding_link_and_summary_only_when_different(self):
-        state = self.held()
-        nongit_task(state, "T-0094", "w-0094", "/data/other", "running", "idle")
-        find(state["workers"], "w-0090")["last_report"]["summary"] = "Cause: retry is skipped on 429"
-        page = st.assemble(*st.render(state, TEMPLATE))
-        card = task_card(page, "T-0090")
-        self.assertIn('<a href="#local_sess_w-0090">T-0090|w-0090 survey</a> <code>sess_w-0090</code>', card)
-        self.assertNotIn("finding__summary", card)
-        self.assertNotIn('class="finding"', task_card(page, "T-0094"))
-
-        find(state["tasks"], "T-0090")["findings"][0]["summary"] = "Cause: <retry> is skipped"
-        card = task_card(st.assemble(*st.render(state, TEMPLATE)), "T-0090")
-        self.assertIn('<p class="finding__summary">Cause: &lt;retry&gt; is skipped</p>', card)
-
-    def test_archived_stub_shows_finding_and_no_duplicate_no_result_note(self):
-        state = fixture_state()
-        state["archived"].insert(0, {"id": "T-0091", "title": "old survey", "request": "x", "artifacts": [], "archived_at": NOW,
-                                     "investigation": True, "findings": [finding("w-0090", summary="Cause: <x>")],
-                                     "no_result": [no_result("w-0090"), no_result("w-0089", "other worker note")]})
-        page = st.assemble(*st.render(state, TEMPLATE))
-        start = page.rindex('<li class="arc"', 0, page.index(">T-0091</button>"))
-        stub = page[start:page.index("</li>", start)]
-        self.assertIn(st._chip("no result"), stub)
-        self.assertNotIn("investigated only, nothing kept", stub)
-        self.assertIn("other worker note", stub)
-        self.assertIn('<a href="#local_sess_w-0090">T-0090|w-0090 survey</a>', stub)
-        self.assertIn('<p class="finding__summary">Cause: &lt;x&gt;</p>', stub)
 
     # Stage 2: holding for the read confirmation
 
@@ -4920,13 +4538,13 @@ class NoteCommitTest(unittest.TestCase):
         self.assertNotIn("^sv-log-r1-0", self.env.text(U1))
 
     def test_note_saved_during_the_commit_is_built_upon(self):
-        real = st._write_state_and_dashboard
+        real = st._write_state
 
         def user_saves(*a, **kw):
             result = real(*a, **kw)
             self.env.put(U1, self.env.text(U1).replace("fix the LICENSE year", "fix the LICENSE year (edited)"))
             return result
-        with mock.patch.object(st, "_write_state_and_dashboard", user_saves):
+        with mock.patch.object(st, "_write_state", user_saves):
             code, out, err = self.env.commit(None, {U1: [{"op": "log", "text": "済"}]})
         self.assertEqual(code, 0, err)
         self.assertIn("(edited)", self.env.text(U1))
@@ -5085,20 +4703,6 @@ class SetupVaultTest(unittest.TestCase):
             self.assertTrue(all(l.startswith("exists:") for l in proc.stdout.splitlines()), proc.stdout)
             self.assertEqual((vault / "Supervisor.md").read_text(encoding="utf-8"), "mine\n")
             self.assertEqual(st._index_vault(str(vault)), ({}, {}))
-
-
-class JoinViewRenderTest(unittest.TestCase):
-    def test_dashboard_is_rendered_from_the_notes(self):
-        env = VaultEnv(self)
-        env.add_task("T-0020", "w-0020", U1)
-        env.save()
-        body, _ = st.render(st.join_view(env.state, {U1: env.text(U1)}), TEMPLATE)
-        self.assertIn(f"task {U1}", body)
-        code, out, err = env.commit()
-        self.assertEqual(code, 0, err)
-        self.assertIn(f"task {U1}", (env.dir / "dashboard.html").read_text(encoding="utf-8"))
-        code, out, _ = env.run("roster", "--state", str(env.state_path), "--project", "P-0001")
-        self.assertEqual(code, 1)
 
 
 class DigestFallbackTest(unittest.TestCase):
@@ -5309,6 +4913,7 @@ class MigrateExportTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(env.load()["schema_version"], 2)
         self.assertEqual(len(st._index_vault(str(env.vault))[0]), 13)
+        self.assertNotIn("dashboard", env.load()["supervisor"])
         self.assertEqual(env.run("migrate-v2", "--state", str(env.state_path))[0], 1)
         self.assertEqual(env.scan(), {"events": [], "warnings": []})
         out_path = env.dir / "rollback" / "state.v1.json"
