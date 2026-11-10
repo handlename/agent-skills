@@ -76,7 +76,7 @@ PR_URL_RE = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)/?$", re.I)
 NOTE_STATUSES = ("backlog", "in progress", "pending", "done", "archived")
 ASSIGNEES = ("user", "agent")
 NOTE_KEYS = ("uid", "title", "para", "aliases", "created_at", "archived_at", "tags", "start_date", "due_date",
-             "pending_until", "completed_at", "status", "assignee", "parent", "follows")
+             "pending_until", "completed_at", "status", "assignee", "task_id", "project_id", "parent", "follows")
 NOTE_RAW_KEYS = ("created_at", "archived_at")
 NOTE_SECTIONS = ("概要", "ユーザーアクション", "サブタスク", "関連ノート", "関連資料", "成果物", "ログ")
 UA_SECTION = "ユーザーアクション"
@@ -2070,7 +2070,7 @@ def new_note_text(uid, title, kind, status, assignee, now, request="", parent=No
         "completed_at": None, "status": status, "assignee": assignee,
         "parent": f"[[{parent}]]" if parent else None, "follows": f"[[{follows}]]" if follows else None,
     }
-    head = "".join(_prop_line(k, values[k]) + "\n" for k in NOTE_KEYS if values[k] is not None or k not in ("parent", "follows"))
+    head = "".join(_prop_line(k, values[k]) + "\n" for k in NOTE_KEYS if k in values and (values[k] is not None or k not in ("parent", "follows")))
     content = (request or "").strip("\n")
     body = "\n".join(f"## {name}\n\n{content}\n" if name == "概要" and content else f"## {name}\n\n" for name in NOTE_SECTIONS)
     return f"---\n{head}---\n{body}"
@@ -2745,6 +2745,25 @@ def note_props(kind, item, workers_by_id):
     return ("in progress", "user") if status == "needs_user" else ("in progress", "agent")
 
 
+def id_props(state):
+    """{uid: {task_id, project_id}} commit and migrate-v2 write to the notes of a state or view, so the kanban shows
+    them. A live task wins over its stub; a project note has no task_id."""
+    out = {}
+    for sb in state.get("archived", []):
+        out[sb.get("uid")] = {"task_id": sb["id"], "project_id": (sb.get("project") or {}).get("id")}
+    for t in state.get("tasks", []):
+        out[t.get("uid")] = {"task_id": t["id"], "project_id": t.get("project_id")}
+    for p in state.get("projects", []):
+        out[p.get("uid")] = {"task_id": None, "project_id": p["id"]}
+    out.pop(None, None)
+    return out
+
+
+def _id_changes(text, ids):
+    props = parse_frontmatter(text)[0]
+    return {k: v for k, v in ids.items() if props.get(k) != v}
+
+
 NOTE_USER_VALUES = (("in progress", "user"), ("pending", "user"), ("backlog", "user"))
 NOTE_AGENT_RESUME = (("in progress", "agent"), ("backlog", "agent"))
 
@@ -3076,6 +3095,10 @@ def migrate_v2(state, now):
     out["schema_version"] = SCHEMA_VERSION
     out["supervisor"].update(last_ua_number=max([_ua_number(i) for i in _ua_ids(state)] + [0]), note_warnings={},
                              note_journal=None)
+    ids = id_props(out)
+    for c in creates:
+        if c["uid"] in ids:
+            c["text"] = set_props(c["text"], _id_changes(c["text"], ids[c["uid"]]))
     notes = {c["uid"]: c["text"] for c in creates}
     errors = _storage_errors(out, notes) + validate(join_view(out, notes))
     if errors:
@@ -3733,6 +3756,14 @@ def _commit_v2(args, current, html_path, template):
                 props[uid] = changes
             except StateError as e:
                 problems.append(f"{paths[uid]}: props not written ({e})")
+    for uid, ids in id_props(view_new).items():
+        changes = _id_changes(after[uid], ids) if after.get(uid) else {}
+        if changes:
+            try:
+                after[uid] = set_props(after[uid], changes)
+                props[uid] = dict(props.get(uid, {}), **changes)
+            except StateError as e:
+                problems.append(f"{paths[uid]}: props not written ({e})")
 
     # 6. Storage form, the ops commit itself adds, note_seen and the journal.
     state_new, ops_all = split_view(view_cand, view_new, ops)
@@ -3908,26 +3939,31 @@ def cmd_setup(args):
     return 0
 
 
-SUPERVISOR_NOTE = """```base
+def _kanban_base(name, assignee):
+    return f"""```base
 filters:
   and:
     - or:
         - file.hasTag("task")
         - file.hasTag("project")
     - '!file.inFolder("_templates")'
+    - 'assignee == "{assignee}"'
 formulas:
   title: link(file.name, title)
 views:
   - type: kanban
-    name: Tasks
+    name: {name}
     groupBy:
       property: status
       direction: ASC
-    order: [formula.title, assignee, parent, created_at]
+    order: [formula.title, task_id, project_id, created_at]
     groupOrder: [backlog, in progress, pending, done, archived]
     hideEmptyGroups: false
 ```
 """
+
+
+SUPERVISOR_NOTE = f"## ユーザーの番\n\n{_kanban_base('ユーザー', 'user')}\n## エージェントの番\n\n{_kanban_base('エージェント', 'agent')}"
 ART_SECTION_NOTE = ("<!-- state_tool が書く行です。表示テキストは直せますが、メタデータ(sv-art)のある行に書き足した文字は、"
                     "成果物のグループを置き換えるときに行ごと消えます。 -->")
 

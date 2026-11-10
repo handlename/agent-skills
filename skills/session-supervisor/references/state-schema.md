@@ -355,7 +355,9 @@ A project with `confirmed`, no `close`, and no live task left gets `close = {at,
 | task derived `needs_user` / project with open user actions | `in progress` / `user` |
 | otherwise | `in progress` / `agent` |
 
-Props are written only when the note's current values equal the candidate's `note_seen`; otherwise the note is reported in `notes_deferred` and handled by the next scan. Stubs get no props.
+Props are written only when the note's current values equal the candidate's `note_seen`; otherwise the note is reported in `notes_deferred` and handled by the next scan. Stubs get no `status` / `assignee`.
+
+Every commit also writes `task_id` and `project_id` (`id_props`) to each note of a task, stub, or project whose values differ, so the kanban shows them: a task note gets its `T-` id and its project's `P-` id (none outside a project), a project note only its `P-` id. A live task wins over its stub. These are not user values: `notes-scan` ignores them, and `migrate-v2` writes them too.
 
 ### User changes (`user_transition`)
 

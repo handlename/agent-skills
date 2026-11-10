@@ -3806,7 +3806,7 @@ class FrontmatterTest(unittest.TestCase):
     def test_reads_json_shapes(self):
         props, _, errors = st.parse_frontmatter(note("task_managed"))
         self.assertEqual(errors, [])
-        self.assertEqual(list(props), list(st.NOTE_KEYS[:-1]))
+        self.assertEqual(list(props), [k for k in st.NOTE_KEYS if k not in ("task_id", "project_id", "follows")])
         self.assertEqual((props["uid"], props["aliases"], props["tags"]), ("20261109_221500", [], ["task", "oss"]))
         self.assertEqual((props["status"], props["assignee"], props["parent"]), ("in progress", "user", "[[20261101_090000]]"))
         self.assertEqual(props["created_at"], "2026-11-09 22:15:00")
@@ -3866,7 +3866,7 @@ class NoteTemplateTest(unittest.TestCase):
                                         'tags: ["task"]\n'))
         props, body, errors = st.parse_frontmatter(text)
         self.assertEqual(errors, [])
-        self.assertEqual(list(props), list(st.NOTE_KEYS[:-1]))
+        self.assertEqual(list(props), [k for k in st.NOTE_KEYS if k not in ("task_id", "project_id", "follows")])
         self.assertEqual((props["status"], props["assignee"], props["parent"]), ("in progress", "agent", "[[20261101_090000]]"))
         self.assertFalse(re.search(r"^# ", body, re.M))
         sections = st.parse_sections(body)
@@ -4648,6 +4648,7 @@ class VaultEnv:
     def add_task(self, task_id, worker_id, uid, uas=(), groups=(), **kw):
         notes = {}
         task = v2_git_task(self.state, notes, task_id, worker_id, uid, uas=uas, groups=groups, **kw)
+        notes[uid] = st.set_props(notes[uid], {"task_id": task_id})
         self.put(uid, notes[uid])
         task.update(note=st._new_note_path(uid), note_seen=st.note_values(notes[uid]))
         return task
@@ -4730,6 +4731,16 @@ class NoteCommitTest(unittest.TestCase):
         self.assertEqual(note_section(text, "概要").strip(), "README の typo を直して")
         task = find(self.env.load()["tasks"], "T-0022")
         self.assertEqual((task["note"], task["note_seen"]), (reserved["path"], st.note_values(text)))
+        self.assertEqual(self.env.scan(), {"events": [], "warnings": []})
+
+    def test_commit_writes_the_id_props_once(self):
+        self.env.put(U1, "\n".join(l for l in self.env.text(U1).split("\n") if not l.startswith("task_id:")))
+        code, out, err = self.env.commit()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["notes_written"], [st._new_note_path(U1)])
+        props = st.parse_frontmatter(self.env.text(U1))[0]
+        self.assertEqual((props["task_id"], "project_id" in props), ("T-0020", False))
+        self.assertEqual(self.env.commit()[1]["notes_written"], [])
         self.assertEqual(self.env.scan(), {"events": [], "warnings": []})
 
     def test_pickup_writes_the_derived_props_with_the_ack(self):
@@ -5053,7 +5064,10 @@ class SetupVaultTest(unittest.TestCase):
             proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             vault = target / "vault"
-            self.assertIn('type: kanban', (vault / "Supervisor.md").read_text(encoding="utf-8"))
+            dashboard = (vault / "Supervisor.md").read_text(encoding="utf-8")
+            self.assertEqual(dashboard.count("type: kanban"), 2)
+            self.assertIn("""'assignee == "user"'""", dashboard)
+            self.assertIn("""'assignee == "agent"'""", dashboard)
             self.assertIn("groupOrder: [backlog, in progress, pending, done, archived]", (vault / "Supervisor.md").read_text(encoding="utf-8"))
             self.assertEqual(json.loads((vault / ".obsidian" / "templates.json").read_text(encoding="utf-8")), {"folder": "_templates"})
             for kind in ("task", "project"):
@@ -5187,6 +5201,18 @@ class MigrateExportTest(unittest.TestCase):
 
     def note_of(self, task_id, key="tasks"):
         return self.notes[find(self.v2[key], task_id)["uid"]]
+
+    def test_notes_carry_the_task_and_project_ids(self):
+        ids = {}
+        for key in ("archived", "tasks", "projects"):
+            for item in self.v2.get(key, []):
+                pid = item["id"] if key == "projects" else item.get("project_id") or (item.get("project") or {}).get("id")
+                ids[item["uid"]] = (None if key == "projects" else item["id"], pid)
+        for uid, (task_id, project_id) in ids.items():
+            with self.subTest(uid=uid):
+                props = st.parse_frontmatter(self.notes[uid])[0]
+                self.assertEqual((props.get("task_id"), props.get("project_id")), (task_id, project_id))
+        self.assertTrue(any(pid for _, pid in ids.values()))
 
     def test_fixture_covers_the_live_shapes(self):
         shapes = {"+".join(sorted(a)) for o in self.v1["tasks"] + self.v1["archived"] for a in o["artifacts"]}
