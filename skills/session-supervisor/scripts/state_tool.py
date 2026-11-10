@@ -5,6 +5,7 @@ Functional core: validate, next_state, digest, parse_report, cwd_busy, serialize
 parse_project_report, plan_actions, roster, waits, manager_reconcile,
 guard_decision (bash_violations, path_violation), parse_follow_ups, new_pr_urls, follow_up_actions,
 parse_locations, default_locations, add_missing_locations, clone_url_parts,
+parse_herdr, default_herdr, add_missing_herdr, launch_argv, observe_hc, watch_messages,
 parse_frontmatter, set_props, new_note_text, parse_sections, parse_user_actions, ua_open, render_ua_line,
 apply_note_ops, parse_artifacts, render_artifact_line, artifacts_view, art_sha,
 join_view, split_view, note_props, user_transition, artifact_needs, note_values, journal_reflected, number_note_ops,
@@ -24,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -100,11 +102,20 @@ UA_LINE_RE = re.compile(r"^([ \t]*)[-*+] \[(.)\] (UA-\d+)\b(.*?)<!--[ \t]*sv[ \t
 ART_COMMENT_RE = re.compile(r"<!--[ \t]*sv-art[ \t]+(.*?)[ \t]*-->")
 
 LOCATIONS_HEADING = "## Locations"
-LOCATION_KEYS = ("clone_root", "work_root")
-LOCATIONS_NOTE = ("`python3 .supervisor/state_tool.py prepare-dir` is the only command that writes outside this directory: "
-                  "it clones repositories into `clone_root/<host>/<owner>/<repo>` and creates work directories "
-                  "and project directories (with a guard hook) under `work_root`. "
-                  "A missing key uses its default.")
+LOCATION_KEYS = ("clone_root", "work_root", "worktree_root")
+LOCATIONS_NOTE = ("`python3 .supervisor/state_tool.py prepare-dir` and `prepare-worktree` are the only commands that write outside "
+                  "this directory: they clone repositories into `clone_root/<host>/<owner>/<repo>`, create work directories "
+                  "and project directories (with a guard hook) under `work_root`, and add worker worktrees under "
+                  "`worktree_root/<repo>/<slug>`. A missing key uses its default.")
+RUNTIMES = ("herdr",)
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+HERDR_HEADING = "## Herdr"
+HERDR_KEYS = ("max_workers", "worker_path")
+HERDR_NOTE = ("Settings for workers started with `hc run` (Herdr). `max_workers`: how many herdr workers may run at once. "
+              "`worker_path`: the PATH workers start with, because hc does not run them through an interactive shell. "
+              "A missing key uses its default (8; the core's PATH).")
+DEFAULT_MAX_WORKERS = 8
+MISE_SHIMS = "~/.local/share/mise/shims"
 CLONE_URL_RES = (
     re.compile(r"^https://([^/]+)/([^/]+)/([^/]+?)(?:\.git)?/?$"),
     re.compile(r"^git@([^:/]+):([^/]+)/([^/]+?)(?:\.git)?$"),
@@ -119,11 +130,16 @@ GUARD_INPUT_KEYS = {"Edit": "file_path", "MultiEdit": "file_path", "Write": "fil
 GUARD_PROTECTED = (".claude", "state.json", ".supervisor/state_tool.py")
 GUARD_SEPARATOR_CHARS = frozenset(";&|()\n")
 GUARD_SHELLS = ("sh", "bash", "zsh")
-GUARD_WORD_RE = re.compile(r"(?<![\w./-])(git|jj|gh)(?![\w.-])")
+GUARD_WORD_RE = re.compile(r"(?<![\w./-])(git|jj|gh|hc)(?![\w.-])")
+HC_DENY = frozenset({"keys", "exec", "attach", "server", "update", "machine", "file", "put", "connect"})
+# Catches the denied hc subcommands also where tokens cannot see them, e.g. a Python list ['hc', 'keys', ...].
+HC_DENY_RE = re.compile(r"(?<![\w./-])hc(?![\w.-])['\"]?\s*,?\s*['\"]?(" + "|".join(sorted(HC_DENY)) + r")(?![\w-])")
+HC_TARGET_RE = re.compile(r"^(w-\d+|m-p-\d+|sv-watch)$")
 GUARD_VALUE_OPTIONS = {
     "git": ("-C", "-c", "--git-dir", "--work-tree", "--namespace"),
     "jj": ("-R", "--repository", "--at-op", "--at-operation", "--color", "--config", "--config-file"),
     "gh": ("-R", "--repo"),
+    "hc": (),
 }
 GIT_DENY = frozenset({
     "commit", "push", "pull", "fetch", "merge", "rebase", "reset", "add", "rm", "mv", "cherry-pick", "revert",
@@ -371,7 +387,26 @@ def _gh_violation(sub, args):
     return _action_violation(sub, pos[0] if pos else None, GH_DENY_ACTIONS, {})
 
 
-GUARD_CHECKS = {"git": _git_violation, "jj": _jj_violation, "gh": _gh_violation}
+def _hc_labels(args):
+    labels = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--label"]
+    return labels + [a.split("=", 1)[1] for a in args if a.startswith("--label=")]
+
+
+def _hc_violation(sub, args):
+    if sub in HC_DENY:
+        return f"{sub} (the supervisor never types into, attaches to or manages terminals directly)"
+    if sub == "run" and not any(label.startswith("sv=") for label in _hc_labels(args)):
+        return "run without --label sv=... (start sessions only with the argv from launch-plan)"
+    if sub in ("kill", "rm"):
+        pos = _positionals(args)
+        if not pos or not HC_TARGET_RE.match(pos[0]):
+            return f"{sub} {pos[0] if pos else ''} (only terminals named w-NNNN, m-p-NNNN or sv-watch)".replace("  ", " ")
+    if sub == "send" and _has_flag(args, ("--force",)):
+        return "send --force (never answer a blocked dialog for the user)"
+    return None
+
+
+GUARD_CHECKS = {"git": _git_violation, "jj": _jj_violation, "gh": _gh_violation, "hc": _hc_violation}
 
 
 def _split_subcommand(tool, args):
@@ -405,7 +440,7 @@ def _shell_c_violations(words):
 
 
 def bash_violations(command):
-    """Deny-list matches of git / jj / gh in a Bash command. A guardrail, not a security boundary."""
+    """Deny-list matches of git / jj / gh / hc in a Bash command. A guardrail, not a security boundary."""
     command = command.replace("\\\n", "")
     try:
         tokens = _shell_tokens(command)
@@ -414,13 +449,17 @@ def bash_violations(command):
             return ["unparsable command (could not parse; quote the command correctly or split it)"]
         return []
     violations = []
+    hidden = {m.group(1) for m in HC_DENY_RE.finditer(command)}
     for segment in _segments(tokens):
         text = " ".join(segment)
         if ("`" in text or "$(" in text) and GUARD_WORD_RE.search(text):
-            violations.append("command substitution (split the command; command substitution around git/jj/gh is not inspected)")
+            violations.append("command substitution (split the command; command substitution around git/jj/gh/hc is not inspected)")
             continue
         words = _strip_redirections(segment)
         violations += _shell_c_violations(words) + _tool_violations(words)
+    named = " ".join(violations)
+    violations += [f"hc {sub} (the supervisor never types into, attaches to or manages terminals directly)"
+                   for sub in sorted(hidden) if f"hc {sub} " not in named]
     return violations
 
 
@@ -700,8 +739,29 @@ def _review_shape_errors(prefix, review):
     return errors
 
 
-def _manager_shape_errors(prefix, m):
+def manager_handle(project_id):
+    # hc terminal names are lowercase: m-p-0006 for P-0006.
+    return f"m-{str(project_id).lower()}"
+
+
+def _runtime_errors(prefix, obj, handle):
+    """A herdr session is the hc terminal named `handle` running claude with the uuid `session_id`."""
+    runtime = obj.get("runtime")
+    if runtime is None:
+        return []
+    if runtime not in RUNTIMES:
+        return [f"{prefix}: runtime must be one of {list(RUNTIMES)}, got {runtime!r}"]
     errors = []
+    sid = obj.get("session_id")
+    if sid is not None and not (isinstance(sid, str) and UUID_RE.match(sid)):
+        errors.append(f"{prefix}: a herdr session_id must be a lowercase uuid or null, got {sid!r}")
+    if obj.get("handle") != handle:
+        errors.append(f"{prefix}: a herdr handle must be {handle!r}, got {obj.get('handle')!r}")
+    return errors
+
+
+def _manager_shape_errors(prefix, m, project_id=None):
+    errors = _runtime_errors(f"{prefix}: manager", m, manager_handle(project_id))
     for key in ("session_id", "started_by", "handle", "observed_at"):
         if m.get(key) is not None and not isinstance(m[key], str):
             errors.append(f"{prefix}: manager.{key} must be a string or null")
@@ -772,7 +832,7 @@ def _project_shape_errors(state):
         if not isinstance(p.get("manager"), dict):
             errors.append(f"{prefix}: manager must be an object")
         else:
-            errors += _manager_shape_errors(prefix, p["manager"])
+            errors += _manager_shape_errors(prefix, p["manager"], p.get("id"))
     owners = [(f"task {t['id']}", t) for t in state["tasks"]] + [(f"archived {s['id']}", s) for s in state["archived"]]
     for prefix, owner in owners:
         if owner.get("project_id") is not None and not isinstance(owner["project_id"], str):
@@ -917,6 +977,7 @@ def validate(state, relief=None):
         task = tasks_by_id.get(w.get("task_id"))
         if task is None or wid not in task.get("worker_ids", []):
             errors.append(f"{prefix}: task {w.get('task_id')} does not list it")
+        errors += _runtime_errors(prefix, w, wid)
         for key, allowed in (
             ("kind", KINDS),
             ("delivery", DELIVERIES),
@@ -1541,7 +1602,8 @@ def parse_locations(text):
 
 def default_locations(supervisor_dir):
     sup = os.path.normpath(supervisor_dir)
-    return {"clone_root": "~/src", "work_root": os.path.join(os.path.dirname(sup), os.path.basename(sup) + "-work")}
+    return {"clone_root": "~/src", "work_root": os.path.join(os.path.dirname(sup), os.path.basename(sup) + "-work"),
+            "worktree_root": "~/.claude-worktrees"}
 
 
 def add_missing_locations(text, supervisor_dir):
@@ -1551,11 +1613,60 @@ def add_missing_locations(text, supervisor_dir):
         raise StateError(errors)
     defaults = default_locations(supervisor_dir)
     missing = [f"- {key}: {defaults[key]}\n" for key in LOCATION_KEYS if key not in values]
+    return _add_section_lines(text, LOCATIONS_HEADING, LOCATIONS_NOTE, missing)
+
+
+def parse_herdr(text):
+    """Parse the `## Herdr` section of CLAUDE.md. Returns (values, errors); max_workers is an int, worker_path a string."""
+    lines = _strip_ignored(text.splitlines())
+    heads = _section_heads(lines, HERDR_HEADING)
+    if not heads:
+        return {}, []
+    if len(heads) > 1:
+        return {}, [f"CLAUDE.md:{i + 1}: duplicate '{HERDR_HEADING}' heading" for i in heads[1:]]
+    values, errors = {}, []
+    for i in range(heads[0] + 1, _section_end(lines, heads[0])):
+        m = re.match(r"^- ([A-Za-z_]+):(.*)$", lines[i].rstrip())
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2).strip()
+        if key not in HERDR_KEYS:
+            errors.append(f"CLAUDE.md:{i + 1}: unknown key {key!r} (use {list(HERDR_KEYS)})")
+        elif key in values:
+            errors.append(f"CLAUDE.md:{i + 1}: duplicate key {key!r}")
+        elif key == "max_workers" and not re.match(r"^[1-9]\d*$", value):
+            errors.append(f"CLAUDE.md:{i + 1}: max_workers must be a positive integer, got {value!r}")
+        elif key == "worker_path" and not value:
+            errors.append(f"CLAUDE.md:{i + 1}: worker_path must not be empty")
+        else:
+            values[key] = int(value) if key == "max_workers" else value
+    return ({}, errors) if errors else (values, [])
+
+
+def default_herdr(env_path, shims_dir):
+    """Defaults for `## Herdr`. worker_path is set only when mise shims exist and are missing from the given PATH."""
+    defaults = {"max_workers": DEFAULT_MAX_WORKERS}
+    if shims_dir and shims_dir not in (env_path or "").split(os.pathsep):
+        defaults["worker_path"] = os.pathsep.join(p for p in (shims_dir, env_path) if p)
+    return defaults
+
+
+def add_missing_herdr(text, env_path, shims_dir):
+    """Return CLAUDE.md text with each missing `## Herdr` key added at its default. Existing values are kept."""
+    values, errors = parse_herdr(text)
+    if errors:
+        raise StateError(errors)
+    defaults = default_herdr(env_path, shims_dir)
+    missing = [f"- {key}: {defaults[key]}\n" for key in HERDR_KEYS if key in defaults and key not in values]
+    return _add_section_lines(text, HERDR_HEADING, HERDR_NOTE, missing)
+
+
+def _add_section_lines(text, heading, note, missing):
     if not missing:
         return text
-    heads = _section_heads(_strip_ignored(text.splitlines()), LOCATIONS_HEADING)
+    heads = _section_heads(_strip_ignored(text.splitlines()), heading)
     if not heads:
-        section = f"{LOCATIONS_HEADING}\n\n{LOCATIONS_NOTE}\n\n" + "".join(missing)
+        section = f"{heading}\n\n{note}\n\n" + "".join(missing)
         return text.rstrip("\n") + "\n\n" + section if text.strip() else section
     lines = text.splitlines(keepends=True)
     end = _section_end(_strip_ignored(text.splitlines()), heads[0])
@@ -3515,7 +3626,9 @@ def cmd_setup(args):
         raise StateError(f"{target} is inside a git repository; choose a directory outside any repository")
     claude_md = target / "CLAUDE.md"
     old_md = claude_md.read_text(encoding="utf-8") if claude_md.exists() else None
-    new_md = add_missing_locations(CLAUDE_MD if old_md is None else old_md, str(target))
+    shims = os.path.expanduser(MISE_SHIMS)
+    new_md = add_missing_herdr(add_missing_locations(CLAUDE_MD if old_md is None else old_md, str(target)),
+                               os.environ.get("PATH", ""), shims if os.path.isdir(shims) else None)
     settings_path = target / ".claude" / "settings.json"
     settings = _read_settings(settings_path, ("SessionStart", "PreToolUse"), "setup")
 
@@ -3799,8 +3912,9 @@ def _locations_for(claude_md):
             errors.append(f"{key} {root} is inside the supervisor directory; workers would inherit its CLAUDE.md")
     if _inside_git(roots["work_root"][0]):
         errors.append(f"work_root {roots['work_root'][0]} is inside a git repository")
-    if _cwds_overlap(roots["clone_root"][0], roots["work_root"][0]):
-        errors.append(f"clone_root {roots['clone_root'][0]} and work_root {roots['work_root'][0]} are nested")
+    for x, y in (("clone_root", "work_root"), ("clone_root", "worktree_root"), ("work_root", "worktree_root")):
+        if _cwds_overlap(roots[x][0], roots[y][0]):
+            errors.append(f"{x} {roots[x][0]} and {y} {roots[y][0]} are nested")
     if errors:
         raise StateError(errors)
     return roots, sup
@@ -3866,6 +3980,177 @@ def cmd_prepare_dir(args):
     existed = os.path.isdir(dest)
     os.makedirs(dest, exist_ok=True)
     print(f"{'exists' if existed else 'created'}: {dest}")
+    return 0
+
+
+REPORT_TOOL = "--allowedTools=Bash(hc send sv:*)"
+
+
+def _herdr_target(state, ident):
+    """(kind, session, cwd, label) for a worker id or a manager handle m-p-NNNN."""
+    for w in state.get("workers", []):
+        if w.get("id") == ident:
+            return "worker", w, w.get("cwd"), f"task={w.get('task_id')}"
+    for p in _projects(state):
+        if manager_handle(p.get("id")) == ident:
+            return "manager", p.get("manager") or {}, p.get("dir"), f"project={p.get('id')}"
+    raise StateError(f"{ident} is neither a worker id nor a manager handle (m-p-NNNN)")
+
+
+def launch_argv(state, ident, prompt, herdr):
+    """The `hc run` argv that starts the herdr worker or manager `ident`. herdr: parsed `## Herdr` values."""
+    kind, session, cwd, label = _herdr_target(state, ident)
+    if session.get("runtime") != "herdr" or session.get("handle") != ident:
+        raise StateError(f"{ident} must have runtime 'herdr' and handle {ident!r} in the state before launch")
+    sid = session.get("session_id")
+    if not (isinstance(sid, str) and UUID_RE.match(sid)):
+        raise StateError(f"{ident} has no uuid session_id: set a uuid4 in the candidate and commit it before launch")
+    if not cwd or not os.path.isabs(cwd):
+        raise StateError(f"{ident} has no absolute cwd")
+    if not prompt.strip():
+        raise StateError("the prompt is empty")
+    if kind == "worker":
+        limit = herdr.get("max_workers", DEFAULT_MAX_WORKERS)
+        running = [w["id"] for w in state.get("workers", [])
+                   if w.get("runtime") == "herdr" and w.get("id") != ident and w.get("intended_state") == "running"
+                   and w.get("observed_state") not in ("archived", "missing")]
+        if len(running) >= limit:
+            raise StateError(f"max_workers {limit} reached ({', '.join(running)}); start {ident} after one finishes")
+    argv = ["hc", "run", "--bg", "--json", "--name", ident, "--cwd", cwd, "--label", f"sv={kind}", "--label", label,
+            "--outlive-parent"]
+    if herdr.get("worker_path"):
+        argv += ["env", f"PATH={herdr['worker_path']}"]
+    argv += ["claude", "--session-id", sid]
+    if session.get("model"):
+        argv += ["--model", session["model"]]
+    # The prompt goes last: a variadic option right before it would take it as a value.
+    argv += ["--permission-mode", "auto", "-n", session.get("title") or ident, REPORT_TOOL, prompt]
+    return argv
+
+
+def cmd_launch_plan(args):
+    state = _read_json(args.state)
+    text = Path(args.claude_md).read_text(encoding="utf-8") if os.path.exists(args.claude_md) else ""
+    herdr, errors = parse_herdr(text)
+    if errors:
+        raise StateError(errors)
+    prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+    print(json.dumps({"argv": launch_argv(state, args.worker, prompt, herdr)}, ensure_ascii=False))
+    return 0
+
+
+def _herdr_sessions(state):
+    """(handle, session) of every herdr worker and manager in the state."""
+    out = [(w.get("handle"), w) for w in state.get("workers", []) if w.get("runtime") == "herdr"]
+    out += [(manager_handle(p.get("id")), p.get("manager") or {}) for p in _projects(state)
+            if (p.get("manager") or {}).get("runtime") == "herdr"]
+    return out
+
+
+def observe_hc(state, terminals):
+    """Observed facts of each herdr worker and manager from `hc ls --all --json` terminals, matched by name."""
+    by_name = {t.get("name"): t for t in terminals if t.get("name")}
+    out = []
+    for handle, session in _herdr_sessions(state):
+        t = by_name.get(handle)
+        # `hc ls` gives status as a word; `hc get` gives {app, state, msg}.
+        status = (t or {}).get("status")
+        state_word = status.get("state") if isinstance(status, dict) else status
+        status = status if isinstance(status, dict) else {}
+        if t is None:
+            observed = "missing"
+        elif t.get("state") == "finished":
+            observed = "archived" if session.get("intended_state") == "archived" else "missing"
+        elif state_word == "working":
+            observed = "running"
+        elif state_word == "blocked":
+            observed = "needs_input"
+        else:
+            observed = "idle"
+        out.append({"id": handle, "address": (t or {}).get("address"), "observed_state": observed,
+                    "status_state": state_word, "turn": (t or {}).get("turn"),
+                    "blocked_msg": status.get("msg") if state_word == "blocked" else None,
+                    "exit_code": (t or {}).get("exit_code"), "reason": (t or {}).get("reason"),
+                    "parent": (t or {}).get("parent")})
+    return out
+
+
+def _hc_json(runner, argv):
+    proc = runner(argv)
+    if proc.returncode != 0:
+        raise StateError(f"{' '.join(argv)} exited with {proc.returncode}: {(proc.stderr or proc.stdout).strip()}")
+    return json.loads(proc.stdout)
+
+
+def _run_hc(argv):
+    return subprocess.run(argv, capture_output=True, text=True)
+
+
+def cmd_observe_hc(args):
+    state = _read_json(args.state)
+    if args.from_file:
+        data = _read_json(args.from_file)
+    else:
+        data = _hc_json(_run_hc, ["hc", "ls", "--all", "--json"])
+    print(json.dumps(observe_hc(state, data.get("terminals", [])), ensure_ascii=False))
+    return 0
+
+
+WORKTREE_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,59}$")
+
+
+def _git_run(argv):
+    proc = subprocess.run(argv, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise StateError(f"{' '.join(argv)} exited with {proc.returncode}: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def cmd_prepare_worktree(args):
+    # Besides prepare-dir, the only write outside the supervisor directory: a worktree under worktree_root.
+    roots, sup = _locations_for(args.claude_md)
+    root = roots["worktree_root"][0]
+    repo = _git_output(["git", "-C", _real(args.repo), "rev-parse", "--show-toplevel"])
+    if repo is None:
+        raise StateError(f"--repo {args.repo} is not a git repository")
+    if _git_output(["git", "check-ref-format", "--branch", args.branch]) is None:
+        raise StateError(f"--branch {args.branch!r} is not a valid branch name")
+    slug = args.slug or args.branch.rsplit("/", 1)[-1]
+    if not WORKTREE_SLUG_RE.match(slug):
+        raise StateError(f"slug {slug!r} must be letters, digits, '.', '_' or '-', up to 60 characters")
+    dest = os.path.join(root, os.path.basename(repo), slug)
+    _check_dest(dest, root, sup)
+    common = _real(_git_run(["git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"]))
+    if os.path.exists(dest):
+        dest_common = _git_output(["git", "-C", dest, "rev-parse", "--path-format=absolute", "--git-common-dir"])
+        branch = _git_output(["git", "-C", dest, "symbolic-ref", "--short", "HEAD"])
+        if dest_common is None or _real(dest_common) != common or branch != args.branch:
+            raise StateError(f"{dest} exists and is not a worktree of {repo} on {args.branch}")
+        status = "exists"
+    else:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        _git_run(["git", "-C", repo, "worktree", "add", "-b", args.branch, dest, args.base])
+        status = "created"
+    head = _git_run(["git", "-C", dest, "rev-parse", "HEAD"])
+    print(json.dumps({"status": status, "path": dest, "repo": repo, "branch": args.branch, "base": args.base, "head": head}))
+    return 0
+
+
+def cmd_remove_worktree(args):
+    roots, _ = _locations_for(args.claude_md)
+    root = roots["worktree_root"][0]
+    path = _real(args.path)
+    if not _under(path, root) or path == root:
+        raise StateError(f"{path} is not under worktree_root {root}")
+    top = _git_output(["git", "-C", path, "rev-parse", "--show-toplevel"])
+    if top is None or _real(top) != path:
+        raise StateError(f"{path} is not the top of a git worktree")
+    if _git_run(["git", "-C", path, "status", "--porcelain"]):
+        raise StateError(f"{path} has uncommitted changes; leave it for the user")
+    branch = _git_output(["git", "-C", path, "symbolic-ref", "--short", "HEAD"])
+    common = _git_run(["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"])
+    _git_run(["git", "-C", os.path.dirname(common), "worktree", "remove", path])
+    print(json.dumps({"status": "removed", "path": path, "branch": branch}))
     return 0
 
 
@@ -4067,6 +4352,70 @@ def cmd_notes_scan(args):
     return 0
 
 
+def _notes_signature(scan):
+    return sorted(json.dumps([e.get("uid"), e.get("event"), e.get("ack")], sort_keys=True) for e in scan.get("events", []))
+
+
+def watch_messages(scan, terminals, notify_address, memo):
+    """Messages for the supervisor from one watch tick. memo carries what was already sent between ticks.
+
+    Notes: one message when the scan's events changed and are not empty. Sessions: one message per newly blocked or
+    finished herdr terminal whose parent is not the current supervisor terminal (hc tells its own children's parent).
+    """
+    messages = []
+    sig = _notes_signature(scan)
+    if sig and sig != memo.get("notes"):
+        uids = sorted({e.get("uid") for e in scan.get("events", []) if e.get("uid")})
+        messages.append("notes: " + " ".join(uids))
+    memo["notes"] = sig
+    forwarded = memo.setdefault("sessions", {})
+    for t in terminals:
+        name = t.get("name") or ""
+        if not re.match(r"^(w-\d+|m-p-\d+)$", name):
+            continue
+        status = t.get("status")
+        word = status.get("state") if isinstance(status, dict) else status
+        change = "finished" if t.get("state") == "finished" else ("blocked" if word == "blocked" else None)
+        key = f"{t.get('address')}:{change}"
+        if change is None:
+            forwarded.pop(name, None)
+            continue
+        if forwarded.get(name) == key:
+            continue
+        forwarded[name] = key
+        if t.get("parent") != notify_address:
+            messages.append(f"worker: {name} {change} (hc read {t.get('address')})")
+    return messages
+
+
+def watch_tick(state_path, notify, runner, memo):
+    """One tick of watch-vault: scan notes, read hc, send the messages. Writes nothing. Returns the messages sent."""
+    state = _read_json(state_path)
+    _require_v2(state, state_path)
+    vault = _vault_path(state_path)
+    texts, uids = _index_vault(vault)
+    scan = notes_scan(state, texts, uids, vault)
+    terminals = _hc_json(runner, ["hc", "ls", "--all", "--json"]).get("terminals", [])
+    target = _hc_json(runner, ["hc", "get", notify, "--json"]).get("address")
+    messages = watch_messages(scan, terminals, target, memo)
+    for text in messages:
+        _hc_json(runner, ["hc", "send", notify, text])
+    return messages
+
+
+def cmd_watch_vault(args, runner=None, sleep=time.sleep):
+    runner = runner or _run_hc
+    memo = {}
+    while True:
+        try:
+            watch_tick(args.state, args.notify, runner, memo)
+        except (StateError, OSError, ValueError) as e:
+            print(f"warning: {e}", file=sys.stderr)
+        if args.once:
+            return 0
+        sleep(args.interval)
+
+
 def cmd_note_show(args):
     vault = _vault_path(args.state)
     texts, uids = _index_vault(vault)
@@ -4242,11 +4591,43 @@ def build_parser():
     p = sub.add_parser("prepare-dir", help="show the ## Locations roots, or clone a repository / create a work directory under them")
     p.add_argument("--claude-md", required=True)
     mode = p.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--show", action="store_true", help="print clone_root and work_root as absolute paths (read-only)")
+    mode.add_argument("--show", action="store_true", help="print clone_root, work_root and worktree_root as absolute paths (read-only)")
     mode.add_argument("--work", metavar="NAME", help="create work_root/NAME (NAME is T-NNNN-<slug>)")
     mode.add_argument("--clone", metavar="URL", help="clone URL into clone_root/<host>/<owner>/<repo>")
     mode.add_argument("--project", metavar="NAME", help="create work_root/NAME with the manager guard hook (NAME is P-NNNN-<slug>)")
     p.set_defaults(func=cmd_prepare_dir)
+
+    p = sub.add_parser("prepare-worktree", help="add a worker worktree under worktree_root/<repo>/<slug> on a new branch")
+    p.add_argument("--claude-md", required=True)
+    p.add_argument("--repo", required=True, help="the repository (its main checkout or any worktree)")
+    p.add_argument("--branch", required=True, help="the new branch, e.g. claude/t0123-readme-fix")
+    p.add_argument("--base", required=True, help="the ref the branch starts from")
+    p.add_argument("--slug", help="the directory name (default: the branch's last path segment)")
+    p.set_defaults(func=cmd_prepare_worktree)
+
+    p = sub.add_parser("remove-worktree", help="remove a clean worker worktree under worktree_root (the branch stays)")
+    p.add_argument("--claude-md", required=True)
+    p.add_argument("--path", required=True)
+    p.set_defaults(func=cmd_remove_worktree)
+
+    p = sub.add_parser("launch-plan", help="print the hc run argv that starts a herdr worker or manager (reads only)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--claude-md", required=True)
+    p.add_argument("--worker", required=True, help="a worker id (w-0123) or a manager handle (m-p-0006)")
+    p.add_argument("--prompt-file", required=True)
+    p.set_defaults(func=cmd_launch_plan)
+
+    p = sub.add_parser("observe-hc", help="map hc terminals to observed states of herdr workers and managers (reads only)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--from", dest="from_file", help="read `hc ls --all --json` output from this file instead of running hc")
+    p.set_defaults(func=cmd_observe_hc)
+
+    p = sub.add_parser("watch-vault", help="loop: tell the supervisor terminal about note changes and blocked / finished sessions")
+    p.add_argument("--state", required=True)
+    p.add_argument("--notify", default="sv", help="the supervisor terminal (default: sv)")
+    p.add_argument("--interval", type=float, default=10, help="seconds between ticks (default: 10)")
+    p.add_argument("--once", action="store_true", help="run one tick and exit")
+    p.set_defaults(func=cmd_watch_vault)
 
     p = sub.add_parser("check-cwd", help="print busy or free for a non-git cwd")
     p.add_argument("--state", required=True)

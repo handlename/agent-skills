@@ -1538,7 +1538,8 @@ class SetupTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def setup_dir(self, target):
-        return subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
+        env = dict(os.environ, HOME=str(self.root / "home"))
+        return subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True, env=env)
 
     def files(self, target):
         return sorted(str(p.relative_to(target)) for p in target.rglob("*") if p.is_file())
@@ -1698,8 +1699,9 @@ class SetupTest(unittest.TestCase):
         target = self.root / "sup"
         self.assertEqual(self.setup_dir(target).returncode, 0)
         text = (target / "CLAUDE.md").read_text(encoding="utf-8")
-        self.assertEqual(st.parse_locations(text), ({"clone_root": "~/src", "work_root": str(self.root / "sup-work")}, []))
-        self.assertIn("prepare-dir` is the only command that writes outside this directory", text)
+        self.assertEqual(st.parse_locations(text), ({"clone_root": "~/src", "work_root": str(self.root / "sup-work"), "worktree_root": "~/.claude-worktrees"}, []))
+        self.assertIn("prepare-dir` and `prepare-worktree` are the only commands that write outside", text)
+        self.assertEqual(st.parse_herdr(text), ({"max_workers": 8}, []))
         self.assertIn("The one allowed exception is `state_tool.py prepare-dir`", text)
 
     def test_appends_locations_to_existing_claude_md(self):
@@ -1711,7 +1713,7 @@ class SetupTest(unittest.TestCase):
         self.assertIn(f"updated: {target / 'CLAUDE.md'}", proc.stdout)
         text = (target / "CLAUDE.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith(body + "\n## Locations\n"), text)
-        self.assertEqual(st.parse_locations(text)[0], {"clone_root": "~/src", "work_root": str(self.root / "sup-work")})
+        self.assertEqual(st.parse_locations(text)[0], {"clone_root": "~/src", "work_root": str(self.root / "sup-work"), "worktree_root": "~/.claude-worktrees"})
 
     def test_keeps_custom_values_and_adds_only_missing_keys(self):
         target = self.root / "sup"
@@ -1720,11 +1722,13 @@ class SetupTest(unittest.TestCase):
         (target / "CLAUDE.md").write_text(body, encoding="utf-8")
         self.assertEqual(self.setup_dir(target).returncode, 0)
         text = (target / "CLAUDE.md").read_text(encoding="utf-8")
-        self.assertEqual(text, f"# Mine\n\n## Locations\n\n- clone_root: /code\n- work_root: {self.root / 'sup-work'}\n\n## Follow-ups\n")
-        (target / "CLAUDE.md").write_text("## Locations\n- work_root: ~/work\n- clone_root: ~/code\n", encoding="utf-8")
+        self.assertTrue(text.startswith(f"# Mine\n\n## Locations\n\n- clone_root: /code\n- work_root: {self.root / 'sup-work'}\n"
+                                        "- worktree_root: ~/.claude-worktrees\n\n## Follow-ups\n"), text)
+        mine = "## Locations\n- work_root: ~/work\n- clone_root: ~/code\n- worktree_root: ~/trees\n\n## Herdr\n- max_workers: 3\n"
+        (target / "CLAUDE.md").write_text(mine, encoding="utf-8")
         proc = self.setup_dir(target)
         self.assertIn(f"exists: {target / 'CLAUDE.md'}", proc.stdout)
-        self.assertEqual((target / "CLAUDE.md").read_text(encoding="utf-8"), "## Locations\n- work_root: ~/work\n- clone_root: ~/code\n")
+        self.assertEqual((target / "CLAUDE.md").read_text(encoding="utf-8"), mine)
 
     def test_second_run_keeps_claude_md_bytes(self):
         target = self.root / "sup"
@@ -1777,7 +1781,7 @@ class LocationsTest(unittest.TestCase):
 
     def test_defaults(self):
         self.assertEqual(st.default_locations("/Users/me/supervisor/"),
-                         {"clone_root": "~/src", "work_root": "/Users/me/supervisor-work"})
+                         {"clone_root": "~/src", "work_root": "/Users/me/supervisor-work", "worktree_root": "~/.claude-worktrees"})
 
     def test_add_missing_locations_is_idempotent(self):
         once = st.add_missing_locations(st.CLAUDE_MD, "/x/sup")
@@ -1841,13 +1845,18 @@ class PrepareDirTest(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
     def test_show_expands_and_marks_defaults(self):
-        self.assertEqual(self.run_cli("--show"), (0, f"clone_root: {self.clones}\nwork_root: {self.work}\n", ""))
+        trees = st._real("~/.claude-worktrees")
+        self.assertEqual(self.run_cli("--show"),
+                         (0, f"clone_root: {self.clones}\nwork_root: {self.work}\nworktree_root: {trees} (default)\n", ""))
         home = self.root / "home"
         with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            trees = home / ".claude-worktrees"
             self.write_locations("- clone_root: ~/code\n")
-            self.assertEqual(self.run_cli("--show")[1], f"clone_root: {home / 'code'}\nwork_root: {self.root / 'sup-work'} (default)\n")
+            self.assertEqual(self.run_cli("--show")[1], f"clone_root: {home / 'code'}\nwork_root: {self.root / 'sup-work'} (default)\n"
+                             f"worktree_root: {trees} (default)\n")
             self.md.write_text("# Supervisor\n", encoding="utf-8")
-            self.assertEqual(self.run_cli("--show")[1], f"clone_root: {home / 'src'} (default)\nwork_root: {self.root / 'sup-work'} (default)\n")
+            self.assertEqual(self.run_cli("--show")[1], f"clone_root: {home / 'src'} (default)\nwork_root: {self.root / 'sup-work'} (default)\n"
+                             f"worktree_root: {trees} (default)\n")
             self.md.unlink()
             self.assertEqual(self.run_cli("--show")[0], 0)
 
@@ -5049,6 +5058,329 @@ class VerifyFixesTest(unittest.TestCase):
         self.assertEqual(self.env.commit()[0], 0)
         log = note_section(self.env.text(U1), "ログ")
         self.assertEqual((log.count("最初の記録"), log.count("二回目の記録")), (1, 1))
+
+
+SID = "0f8fad5b-d9cb-469f-a165-70867728950e"
+
+
+def herdr_worker(state, task_id="T-0030", worker_id="w-0030", **kw):
+    git_task(state, task_id, worker_id)
+    w = find(state["workers"], worker_id)
+    w.update(runtime="herdr", session_id=SID, handle=worker_id, title=f"{task_id}|{worker_id} fix it",
+             cwd="/trees/a/fix", model="sonnet", **kw)
+    return w
+
+
+class FakeHc:
+    """Records hc argv and answers ls / get / send from canned data."""
+
+    def __init__(self, terminals=(), sv_address="t1"):
+        self.terminals, self.sv_address, self.calls = list(terminals), sv_address, []
+
+    def __call__(self, argv):
+        self.calls.append(argv)
+        out = {"ls": {"terminals": self.terminals}, "get": {"address": self.sv_address}}.get(argv[1], {"started": True})
+        return subprocess.CompletedProcess(argv, 0, json.dumps(out), "")
+
+    def sent(self):
+        return [c[-1] for c in self.calls if c[1] == "send"]
+
+
+class HerdrSettingsTest(unittest.TestCase):
+    def test_parse_and_defaults(self):
+        self.assertEqual(st.parse_herdr("## Herdr\n- max_workers: 3\n- worker_path: /a:/b\n"),
+                         ({"max_workers": 3, "worker_path": "/a:/b"}, []))
+        self.assertEqual(st.parse_herdr("# T\n"), ({}, []))
+        for bad in ("- max_workers: 0\n", "- max_workers: x\n", "- worker_path:\n", "- color: red\n"):
+            with self.subTest(bad=bad):
+                self.assertTrue(st.parse_herdr("## Herdr\n" + bad)[1])
+        self.assertEqual(st.default_herdr("/usr/bin", None), {"max_workers": 8})
+        self.assertEqual(st.default_herdr("/usr/bin", "/s"), {"max_workers": 8, "worker_path": "/s:/usr/bin"})
+        self.assertEqual(st.default_herdr("/s:/usr/bin", "/s"), {"max_workers": 8})
+
+    def test_add_missing_herdr_keeps_values_and_is_idempotent(self):
+        once = st.add_missing_herdr("# T\n", "/usr/bin", "/s")
+        self.assertEqual(st.parse_herdr(once), ({"max_workers": 8, "worker_path": "/s:/usr/bin"}, []))
+        self.assertEqual(st.add_missing_herdr(once, "/usr/bin", "/s"), once)
+        mine = "## Herdr\n- max_workers: 2\n"
+        self.assertEqual(st.parse_herdr(st.add_missing_herdr(mine, "/usr/bin", None))[0], {"max_workers": 2})
+
+
+class HerdrSchemaTest(unittest.TestCase):
+    def test_herdr_worker_is_valid(self):
+        state = fixture_state()
+        herdr_worker(state)
+        self.assertEqual(st.validate(state), [])
+        find(state["workers"], "w-0030")["session_id"] = None
+        self.assertEqual(st.validate(state), [])
+
+    def test_herdr_worker_needs_uuid_and_matching_handle(self):
+        for change, needle in (({"session_id": "local_abc"}, "uuid"), ({"handle": "x"}, "handle"),
+                               ({"runtime": "tmux"}, "runtime")):
+            with self.subTest(change=change):
+                state = fixture_state()
+                herdr_worker(state).update(change)
+                self.assertTrue(any(needle in e for e in st.validate(state)), st.validate(state))
+
+    def test_herdr_manager_handle(self):
+        state = fixture_state()
+        add_project(state)
+        state["projects"][0]["manager"].update(runtime="herdr", session_id=SID, handle="m-p-0001")
+        self.assertEqual(st.validate(state), [])
+        state["projects"][0]["manager"]["handle"] = "m-P-0001"
+        self.assertTrue(any("handle" in e for e in st.validate(state)))
+
+
+class LaunchPlanTest(unittest.TestCase):
+    def test_worker_argv(self):
+        state = fixture_state()
+        herdr_worker(state)
+        argv = st.launch_argv(state, "w-0030", "Fix it.", {"worker_path": "/s:/usr/bin"})
+        self.assertEqual(argv, [
+            "hc", "run", "--bg", "--json", "--name", "w-0030", "--cwd", "/trees/a/fix", "--label", "sv=worker",
+            "--label", "task=T-0030", "--outlive-parent", "env", "PATH=/s:/usr/bin", "claude", "--session-id", SID,
+            "--model", "sonnet", "--permission-mode", "auto", "-n", "T-0030|w-0030 fix it",
+            "--allowedTools=Bash(hc send sv:*)", "Fix it."])
+        self.assertEqual(argv[-1], "Fix it.")
+
+    def test_manager_argv(self):
+        state = fixture_state()
+        add_project(state)
+        state["projects"][0]["manager"].update(runtime="herdr", session_id=SID, handle="m-p-0001")
+        argv = st.launch_argv(state, "m-p-0001", "Review.", {})
+        self.assertIn("sv=manager", argv)
+        self.assertIn("project=P-0001", argv)
+        self.assertEqual(argv[argv.index("--cwd") + 1], PROJECT_DIR)
+        self.assertNotIn("env", argv)
+
+    def test_refusals(self):
+        state = fixture_state()
+        w = herdr_worker(state)
+        w["session_id"] = None
+        with self.assertRaisesRegex(st.StateError, "uuid4"):
+            st.launch_argv(state, "w-0030", "x", {})
+        w["session_id"] = SID
+        with self.assertRaisesRegex(st.StateError, "empty"):
+            st.launch_argv(state, "w-0030", "  ", {})
+        with self.assertRaisesRegex(st.StateError, "neither"):
+            st.launch_argv(state, "w-9999", "x", {})
+        herdr_worker(state, "T-0031", "w-0031", intended_state="running", observed_state="running")
+        herdr_worker(state, "T-0032", "w-0032", intended_state="running", observed_state="missing")
+        with self.assertRaisesRegex(st.StateError, "max_workers 1 reached \\(w-0031\\)"):
+            st.launch_argv(state, "w-0030", "x", {"max_workers": 1})
+        self.assertTrue(st.launch_argv(state, "w-0030", "x", {"max_workers": 2}))
+
+    def test_cli(self):
+        env = VaultEnv(self)
+        state = fixture_state()
+        herdr_worker(state)
+        env.state_path.write_text(st.serialize(state), encoding="utf-8")
+        (env.dir / "CLAUDE.md").write_text("## Herdr\n- max_workers: 4\n", encoding="utf-8")
+        (env.dir / "prompt.md").write_text("Fix it.\nThen report.", encoding="utf-8")
+        code, out, err = env.run("launch-plan", "--state", str(env.state_path), "--claude-md", str(env.dir / "CLAUDE.md"),
+                                 "--worker", "w-0030", "--prompt-file", str(env.dir / "prompt.md"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["argv"][-1], "Fix it.\nThen report.")
+
+
+class ObserveHcTest(unittest.TestCase):
+    def test_mapping(self):
+        state = fixture_state()
+        for i, intended in enumerate(("running",) * 5 + ("archived",)):
+            herdr_worker(state, f"T-004{i}", f"w-004{i}", intended_state=intended, observed_state="idle")
+        terminals = [
+            {"address": "t1", "name": "w-0040", "state": "live", "status": "working", "turn": 2},
+            {"address": "t2", "name": "w-0041", "state": "live", "status": {"app": "claude-code", "state": "blocked",
+                                                                           "kind": "permission", "msg": "approve Bash: ls"}},
+            {"address": "t3", "name": "w-0042", "state": "live", "status": None},
+            {"address": "t4", "name": "w-0043", "state": "finished", "exit_code": 129, "reason": "killed"},
+            {"address": "t6", "name": "w-0045", "state": "finished", "exit_code": 129, "reason": "killed"},
+            {"address": "t9", "name": None, "state": "live", "status": "done"},
+        ]
+        got = {o["id"]: o for o in st.observe_hc(state, terminals)}
+        self.assertEqual({k: v["observed_state"] for k, v in got.items()},
+                         {"w-0040": "running", "w-0041": "needs_input", "w-0042": "idle", "w-0043": "missing",
+                          "w-0044": "missing", "w-0045": "archived"})
+        self.assertEqual(got["w-0041"]["blocked_msg"], "approve Bash: ls")
+        self.assertEqual((got["w-0043"]["exit_code"], got["w-0043"]["reason"]), (129, "killed"))
+        self.assertNotIn("w-0030", got)
+
+    def test_app_workers_are_ignored_and_cli_reads_a_file(self):
+        env = VaultEnv(self)
+        state = fixture_state()
+        herdr_worker(state)
+        env.state_path.write_text(st.serialize(state), encoding="utf-8")
+        (env.dir / "ls.json").write_text(json.dumps({"terminals": [{"address": "t5", "name": "w-0030", "state": "live",
+                                                                    "status": "done"}]}), encoding="utf-8")
+        code, out, err = env.run("observe-hc", "--state", str(env.state_path), "--from", str(env.dir / "ls.json"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual([(o["id"], o["observed_state"]) for o in json.loads(out)], [("w-0030", "idle")])
+
+
+class WatchVaultTest(unittest.TestCase):
+    def test_messages_dedupe_and_parent_rule(self):
+        scan = {"events": [{"uid": "u1", "event": "pickup", "ack": None}]}
+        memo = {}
+        terminals = [
+            {"address": "t5", "name": "w-0001", "state": "live", "status": "blocked", "parent": "t9"},
+            {"address": "t6", "name": "w-0002", "state": "finished", "parent": "t1"},
+            {"address": "t7", "name": "build", "state": "finished", "parent": "t9"},
+        ]
+        self.assertEqual(st.watch_messages(scan, terminals, "t1", memo),
+                         ["notes: u1", "worker: w-0001 blocked (hc read t5)"])
+        self.assertEqual(st.watch_messages(scan, terminals, "t1", memo), [])
+        terminals[0]["status"] = "working"
+        self.assertEqual(st.watch_messages({"events": []}, terminals, "t1", memo), [])
+        terminals[0]["status"] = "blocked"
+        self.assertEqual(st.watch_messages(scan, terminals, "t1", memo), ["notes: u1", "worker: w-0001 blocked (hc read t5)"])
+
+    def test_tick_scans_notes_and_sends(self):
+        env = VaultEnv(self)
+        env.save()
+        env.put("20261111_090000", st.new_note_text("20261111_090000", "Fix README", "task", "backlog", "agent", NOTE_NOW,
+                                                    request="Fix the README typo."))
+        hc = FakeHc([{"address": "t4", "name": "w-0009", "state": "finished", "parent": "t2"}])
+        memo = {}
+        sent = st.watch_tick(str(env.state_path), "sv", hc, memo)
+        self.assertEqual(sent, ["notes: 20261111_090000", "worker: w-0009 finished (hc read t4)"])
+        self.assertEqual(hc.sent(), sent)
+        self.assertEqual([c[:3] for c in hc.calls if c[1] == "send"], [["hc", "send", "sv"]] * 2)
+        self.assertEqual(st.watch_tick(str(env.state_path), "sv", hc, memo), [])
+
+    def test_cli_once_writes_nothing(self):
+        env = VaultEnv(self)
+        env.save()
+        before = env.state_path.read_bytes()
+        hc = FakeHc()
+        args = st.build_parser().parse_args(["watch-vault", "--state", str(env.state_path), "--once"])
+        self.assertEqual(st.cmd_watch_vault(args, runner=hc), 0)
+        self.assertEqual(env.state_path.read_bytes(), before)
+        self.assertEqual(hc.sent(), [])
+
+
+class HcGuardTest(unittest.TestCase):
+    BLOCK = [
+        "hc keys w-0001 enter",
+        "hc exec 'ls'",
+        "hc attach sv",
+        "hc server stop",
+        "hc update",
+        "hc machine add vps",
+        "hc file read /etc/hosts",
+        "hc put w-0001 x.txt",
+        "hc connect",
+        "sh -c 'hc keys w-0001 down enter'",
+        "python3 -c \"import subprocess; subprocess.run(['hc', 'keys', 'w-0001', 'enter'])\"",
+        "hc run --bg --name w-0001 claude 'x'",
+        "hc kill t1",
+        "hc rm build",
+        "hc send --force w-0001 yes",
+    ]
+    ALLOW = [
+        "hc run --bg --json --name w-0001 --cwd /t --label sv=worker --label task=T-0001 --outlive-parent claude 'x'",
+        "hc run --bg --name sv-watch --label=sv=watch python3 state_tool.py watch-vault --state s.json",
+        "hc kill w-0001",
+        "hc rm m-p-0006",
+        "hc kill sv-watch",
+        "hc send w-0001 'continue'",
+        "hc ls --all --json",
+        "hc get w-0001 --json",
+        "hc read --lines 50 w-0001",
+        "hc events --label sv=worker",
+    ]
+
+    def test_block(self):
+        for command in self.BLOCK:
+            with self.subTest(command=command):
+                self.assertTrue(st.bash_violations(command))
+
+    def test_allow(self):
+        for command in self.ALLOW:
+            with self.subTest(command=command):
+                self.assertEqual(st.bash_violations(command), [])
+
+
+def git(*argv, cwd):
+    subprocess.run(["git", *argv], cwd=cwd, check=True, capture_output=True,
+                   env=dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1"))
+
+
+class WorktreeTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.sup = self.root / "sup"
+        self.sup.mkdir()
+        self.trees = self.root / "trees"
+        self.md = self.sup / "CLAUDE.md"
+        self.md.write_text(f"## Locations\n- clone_root: {self.root / 'src'}\n- work_root: {self.root / 'work'}\n"
+                           f"- worktree_root: {self.trees}\n", encoding="utf-8")
+        self.repo = self.root / "src" / "repo-a"
+        self.repo.mkdir(parents=True)
+        git("init", "-q", "-b", "main", cwd=self.repo)
+        (self.repo / "a.txt").write_text("hello\n", encoding="utf-8")
+        git("add", "a.txt", cwd=self.repo)
+        git("-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init",
+            cwd=self.repo)
+        patcher = mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = st.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def prepare(self, branch="claude/t0001-fix", *extra):
+        return self.run_cli("prepare-worktree", "--claude-md", str(self.md), "--repo", str(self.repo), "--branch", branch,
+                            "--base", "main", *extra)
+
+    def test_prepare_then_exists_then_remove(self):
+        code, out, err = self.prepare()
+        self.assertEqual(code, 0, err)
+        got = json.loads(out)
+        dest = self.trees / "repo-a" / "t0001-fix"
+        self.assertEqual((got["status"], got["path"], got["branch"]), ("created", str(dest), "claude/t0001-fix"))
+        self.assertTrue((dest / "a.txt").exists())
+        self.assertEqual(json.loads(self.prepare()[1])["status"], "exists")
+        (dest / "b.txt").write_text("x", encoding="utf-8")
+        code, _, err = self.run_cli("remove-worktree", "--claude-md", str(self.md), "--path", str(dest))
+        self.assertEqual(code, 1)
+        self.assertIn("uncommitted", err)
+        (dest / "b.txt").unlink()
+        code, out, err = self.run_cli("remove-worktree", "--claude-md", str(self.md), "--path", str(dest))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["branch"], "claude/t0001-fix")
+        self.assertFalse(dest.exists())
+        branches = subprocess.run(["git", "-C", str(self.repo), "branch", "--list", "claude/t0001-fix"],
+                                  capture_output=True, text=True).stdout
+        self.assertIn("claude/t0001-fix", branches)
+
+    def test_prepare_refusals(self):
+        self.assertEqual(self.prepare("bad..branch")[0], 1)
+        self.assertEqual(self.prepare("claude/x", "--slug", "../escape")[0], 1)
+        (self.trees / "repo-a" / "taken").mkdir(parents=True)
+        code, _, err = self.prepare("claude/taken")
+        self.assertEqual(code, 1)
+        self.assertIn("is not a worktree", err)
+        code, _, err = self.run_cli("prepare-worktree", "--claude-md", str(self.md), "--repo", str(self.root),
+                                    "--branch", "claude/y", "--base", "main")
+        self.assertEqual(code, 1)
+        self.assertIn("not a git repository", err)
+
+    def test_remove_only_under_worktree_root(self):
+        code, _, err = self.run_cli("remove-worktree", "--claude-md", str(self.md), "--path", str(self.repo))
+        self.assertEqual(code, 1)
+        self.assertIn("not under worktree_root", err)
+
+    def test_worktree_root_must_not_nest(self):
+        self.md.write_text(f"## Locations\n- clone_root: {self.root / 'src'}\n- worktree_root: {self.root / 'src' / 't'}\n",
+                           encoding="utf-8")
+        code, _, err = self.prepare()
+        self.assertEqual(code, 1)
+        self.assertIn("nested", err)
 
 
 if __name__ == "__main__":
