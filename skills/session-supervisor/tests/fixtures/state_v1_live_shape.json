@@ -1,0 +1,554 @@
+{
+  "archived": [
+    {
+      "archived_at": "2026-11-02T18:00:00+09:00",
+      "artifacts": [],
+      "id": "T-0106",
+      "request": "もう一度確認して",
+      "title": "作業 T-0106"
+    },
+    {
+      "archived_at": "2026-11-01T18:00:00+09:00",
+      "artifacts": [
+        {
+          "kind": "branch",
+          "ref": "/Users/example/src/github.com/org/repo-a#claude/t0103-first"
+        },
+        {
+          "kind": "commit",
+          "label": "repo-a 5555555555",
+          "ref": "5555555555555555555555555555555555555555"
+        },
+        {
+          "kind": "pr",
+          "label": "repo-a#9",
+          "url": "https://github.com/org/repo-a/pull/9"
+        }
+      ],
+      "followups": [
+        {
+          "at": "2026-11-01T12:00:00+09:00",
+          "text": "PR を直して"
+        }
+      ],
+      "id": "T-0103",
+      "request": "続きをやって",
+      "title": "作業 T-0103"
+    },
+    {
+      "archived_at": "2026-10-29T18:00:00+09:00",
+      "artifacts": [
+        {
+          "kind": "file",
+          "path": "/Users/example/conf/app.toml"
+        },
+        {
+          "kind": "branch",
+          "ref": "/Users/example/src/github.com/org/repo-a#claude/t0096",
+          "url": "https://github.com/org/repo-a/tree/claude/t0096"
+        },
+        {
+          "kind": "commit",
+          "ref": "6666666666666666666666666666666666666666",
+          "url": "https://github.com/org/repo-a/commit/6666666666666666666666666666666666666666"
+        },
+        {
+          "kind": "pr",
+          "label": "repo-a#8",
+          "url": "https://github.com/org/repo-a/pull/8"
+        }
+      ],
+      "id": "T-0096",
+      "request": "設定と実装の両方",
+      "title": "作業 T-0096"
+    },
+    {
+      "archived_at": "2026-10-27T18:00:00+09:00",
+      "artifacts": [
+        {
+          "kind": "file",
+          "path": "/Users/example/memo/one.md"
+        },
+        {
+          "kind": "file",
+          "path": "/Users/example/memo/two.md"
+        }
+      ],
+      "id": "T-0088",
+      "no_result": [
+        {
+          "at": "2026-10-23T18:25:00+09:00",
+          "summary": "調べただけ",
+          "worker_id": "w-0087"
+        }
+      ],
+      "request": "メモを二つ作って",
+      "title": "作業 T-0088"
+    },
+    {
+      "archived_at": "2026-10-25T18:00:00+09:00",
+      "artifacts": [],
+      "cancelled": true,
+      "id": "T-0050",
+      "project": {
+        "id": "P-0002",
+        "name": "整理"
+      },
+      "reason": "不要になった",
+      "request": "やっぱり不要",
+      "title": "作業 T-0050"
+    }
+  ],
+  "projects": [
+    {
+      "context_doc_url": "https://github.com/org/repo-a/issues/1",
+      "created_at": "2026-10-20T09:00:00+09:00",
+      "dir": "/Users/example/supervisor-work/P-0001-sample",
+      "id": "P-0001",
+      "last_review_number": 0,
+      "manager": {
+        "handle": "p0001-manager",
+        "intended_state": "running",
+        "last_report": null,
+        "observed_at": "2026-10-23T18:25:00+09:00",
+        "observed_state": "idle",
+        "previous_session_ids": [],
+        "replacements": 0,
+        "session_id": "sess_mgr_P-0001",
+        "started_by": "sess_sup_01",
+        "title": "P-0001 project"
+      },
+      "name": "サンプル基盤",
+      "user_actions": [
+        {
+          "description": "Approve new task proposal of P-0001 (`サンプル基盤`): ドキュメントを足す",
+          "id": "UA-0147",
+          "proposal": {
+            "message_ref": "msg_p1",
+            "text": "README に使い方を書く",
+            "title": "ドキュメントを足す"
+          },
+          "since": "2026-11-01T10:00:00+09:00"
+        },
+        {
+          "description": "Answer the P-0001 project manager in its session: どちらの方式にしますか",
+          "id": "UA-0148",
+          "since": "2026-10-23T18:25:00+09:00"
+        }
+      ]
+    },
+    {
+      "context_doc_url": "https://example.com/doc/2",
+      "created_at": "2026-10-21T09:00:00+09:00",
+      "dir": "/Users/example/supervisor-work/P-0002-tidy",
+      "id": "P-0002",
+      "last_review_number": 0,
+      "manager": {
+        "handle": "p0002-manager",
+        "intended_state": "running",
+        "last_report": null,
+        "observed_at": "2026-10-23T18:25:00+09:00",
+        "observed_state": "idle",
+        "previous_session_ids": [],
+        "replacements": 0,
+        "session_id": "sess_mgr_P-0002",
+        "started_by": "sess_sup_01",
+        "title": "P-0002 project"
+      },
+      "name": "整理",
+      "user_actions": []
+    }
+  ],
+  "rev": 42,
+  "schema_version": 1,
+  "supervisor": {
+    "archive_consent": {
+      "at": "2026-10-23T18:25:00+09:00",
+      "text": "確認済みの worker はアーカイブしてよい"
+    },
+    "dashboard": {
+      "path": "/Users/example/supervisor/dashboard.html",
+      "url": null
+    },
+    "dir": "/Users/example/supervisor",
+    "last_project_number": 2,
+    "session_ids": [
+      "sess_sup_01"
+    ]
+  },
+  "tasks": [
+    {
+      "artifacts": [
+        {
+          "kind": "branch",
+          "ref": "/Users/example/src/github.com/org/repo-a#claude/fix-a",
+          "url": "https://github.com/org/repo-a/tree/claude/fix-a"
+        },
+        {
+          "kind": "commit",
+          "ref": "1111111111111111111111111111111111111111",
+          "url": "https://github.com/org/repo-a/commit/1111111111111111111111111111111111111111"
+        },
+        {
+          "kind": "pr",
+          "label": "repo-a#11",
+          "url": "https://github.com/org/repo-a/pull/11"
+        },
+        {
+          "kind": "branch",
+          "label": "repo-a claude/fix-b",
+          "ref": "/Users/example/src/github.com/org/repo-a#claude/fix-b",
+          "url": "https://github.com/org/repo-a/tree/claude/fix-b"
+        },
+        {
+          "kind": "commit",
+          "label": "repo-a 2222222222",
+          "ref": "2222222222222222222222222222222222222222",
+          "url": "https://github.com/org/repo-a/commit/2222222222222222222222222222222222222222"
+        },
+        {
+          "kind": "pr",
+          "label": "repo-a#12",
+          "url": "https://github.com/org/repo-a/pull/12"
+        }
+      ],
+      "created_at": "2026-10-28T11:00:00+09:00",
+      "id": "T-0102",
+      "next_action": "待機",
+      "push_consent": {
+        "at": "2026-10-23T18:25:00+09:00",
+        "text": "push して PR を作ってよい"
+      },
+      "request": "repo-a の不具合を直して。push して PR を作ってよい",
+      "status": "needs_user",
+      "title": "作業 T-0102",
+      "user_actions": [
+        {
+          "description": "PR のマージ: repo-a#11",
+          "follow_up": {
+            "done": "pr_closed",
+            "rule": "merge-pr",
+            "url": "https://github.com/org/repo-a/pull/11"
+          },
+          "id": "UA-0121",
+          "since": "2026-10-23T18:25:00+09:00"
+        },
+        {
+          "description": "Review repo-a#12",
+          "follow_up": {
+            "done": "manual",
+            "rule": "review-pr",
+            "url": "https://github.com/org/repo-a/pull/12"
+          },
+          "id": "UA-0122",
+          "since": "2026-10-23T18:25:00+09:00"
+        },
+        {
+          "description": "Answer w-0114 (T-0102 work w-0114) in the app: どちらを使いますか",
+          "id": "UA-0153",
+          "since": "2026-10-23T18:25:00+09:00"
+        }
+      ],
+      "worker_ids": [
+        "w-0113",
+        "w-0114"
+      ]
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "branch",
+          "label": "repo-a claude/t0101-readme",
+          "ref": "/Users/example/src/github.com/org/repo-a#claude/t0101-readme"
+        },
+        {
+          "kind": "commit",
+          "label": "repo-a 3333333333",
+          "ref": "3333333333333333333333333333333333333333"
+        }
+      ],
+      "created_at": "2026-10-28T11:00:00+09:00",
+      "id": "T-0101",
+      "next_action": "待機",
+      "push_consent": null,
+      "request": "repo-a の README を直して",
+      "status": "needs_user",
+      "title": "作業 T-0101",
+      "user_actions": [
+        {
+          "description": "Decide whether to push claude/t0101-readme (repo-a) and open a PR",
+          "id": "UA-0156",
+          "since": "2026-10-23T18:25:00+09:00"
+        }
+      ],
+      "worker_ids": [
+        "w-0101"
+      ]
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "branch",
+          "ref": "/Users/example/src/github.com/org/repo-a#claude/t0103-next"
+        },
+        {
+          "kind": "commit",
+          "ref": "4444444444444444444444444444444444444444"
+        }
+      ],
+      "created_at": "2026-11-02T09:00:00+09:00",
+      "id": "T-0103",
+      "next_action": "待機",
+      "push_consent": null,
+      "request": "続きをやって",
+      "status": "running",
+      "title": "作業 T-0103",
+      "user_actions": [],
+      "worker_ids": [
+        "w-0130"
+      ]
+    },
+    {
+      "artifacts": [],
+      "created_at": "2026-11-03T09:00:00+09:00",
+      "id": "T-0106",
+      "next_action": "待機",
+      "push_consent": null,
+      "request": "もう一度確認して",
+      "status": "waiting",
+      "title": "作業 T-0106",
+      "user_actions": [],
+      "worker_ids": [
+        "w-0160"
+      ]
+    },
+    {
+      "artifacts": [],
+      "created_at": "2026-10-30T09:00:00+09:00",
+      "findings": [
+        {
+          "at": "2026-10-23T18:25:00+09:00",
+          "message_ref": "msg_90",
+          "session_id": "sess_w-0090",
+          "summary": "原因はキャッシュ",
+          "title": "T-0090 調査",
+          "worker_id": "w-0090"
+        }
+      ],
+      "id": "T-0090",
+      "investigation": true,
+      "next_action": "待機",
+      "push_consent": null,
+      "request": "原因を調べて",
+      "status": "needs_user",
+      "title": "作業 T-0090",
+      "user_actions": [
+        {
+          "description": "Read the result of w-0090 (T-0090 work w-0090) in its session, then tell me or the worker that you have read it",
+          "id": "UA-0160",
+          "since": "2026-10-23T18:25:00+09:00"
+        }
+      ],
+      "worker_ids": [
+        "w-0090"
+      ]
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "file",
+          "path": "/Users/example/notes/a.md"
+        },
+        {
+          "kind": "file",
+          "path": "/Users/example/notes/b.md"
+        }
+      ],
+      "created_at": "2026-10-31T09:00:00+09:00",
+      "followups": [
+        {
+          "at": "2026-11-01T09:00:00+09:00",
+          "text": "b.md も\n見直して"
+        }
+      ],
+      "id": "T-0095",
+      "next_action": "待機",
+      "push_consent": null,
+      "request": "~/notes を整理して",
+      "status": "done",
+      "title": "作業 T-0095",
+      "user_actions": [],
+      "worker_ids": [
+        "w-0095"
+      ]
+    },
+    {
+      "artifacts": [],
+      "created_at": "2026-11-04T09:00:00+09:00",
+      "id": "T-0120",
+      "next_action": "待機",
+      "project_id": "P-0001",
+      "proposal": {
+        "from": "P-0001",
+        "message_ref": "msg_p0",
+        "text": "単体テストを追加する",
+        "title": "テストを足す"
+      },
+      "push_consent": null,
+      "request": "承認します",
+      "status": "waiting",
+      "title": "作業 T-0120",
+      "user_actions": [],
+      "worker_ids": [
+        "w-0120"
+      ]
+    }
+  ],
+  "updated_at": "2026-11-09T22:00:00+09:00",
+  "workers": [
+    {
+      "base_branch": "main",
+      "branch": "claude/fix-b",
+      "cwd": "/Users/example/src/github.com/org/repo-a",
+      "delivery": "push_pr",
+      "handle": "t0102-w0113",
+      "id": "w-0113",
+      "intended_state": "archived",
+      "kind": "git",
+      "last_report": null,
+      "observed_at": "2026-10-23T18:25:00+09:00",
+      "observed_state": "archived",
+      "session_id": "sess_w-0113",
+      "started_by": "sess_sup_01",
+      "task_id": "T-0102",
+      "title": "work w-0113",
+      "worktree_path": "/Users/example/src/github.com/org/repo-a/.claude/worktrees/w-0113"
+    },
+    {
+      "base_branch": "main",
+      "branch": "claude/fix-c",
+      "cwd": "/Users/example/src/github.com/org/repo-a",
+      "delivery": "commit",
+      "handle": "t0102-w0114",
+      "id": "w-0114",
+      "intended_state": "running",
+      "kind": "git",
+      "last_report": null,
+      "observed_at": "2026-10-23T18:25:00+09:00",
+      "observed_state": "idle",
+      "session_id": "sess_w-0114",
+      "started_by": "sess_sup_01",
+      "task_id": "T-0102",
+      "title": "work w-0114",
+      "worktree_path": "/Users/example/src/github.com/org/repo-a/.claude/worktrees/w-0114"
+    },
+    {
+      "base_branch": "main",
+      "branch": "claude/t0101-readme",
+      "cwd": "/Users/example/src/github.com/org/repo-a",
+      "delivery": "commit",
+      "handle": "t0101-w0101",
+      "id": "w-0101",
+      "intended_state": "archived",
+      "kind": "git",
+      "last_report": null,
+      "observed_at": "2026-10-23T18:25:00+09:00",
+      "observed_state": "archived",
+      "session_id": "sess_w-0101",
+      "started_by": "sess_sup_01",
+      "task_id": "T-0101",
+      "title": "work w-0101",
+      "worktree_path": "/Users/example/src/github.com/org/repo-a/.claude/worktrees/w-0101"
+    },
+    {
+      "base_branch": "main",
+      "branch": "claude/t0103-next",
+      "cwd": "/Users/example/src/github.com/org/repo-a",
+      "delivery": "commit",
+      "handle": "t0103-w0130",
+      "id": "w-0130",
+      "intended_state": "running",
+      "kind": "git",
+      "last_report": null,
+      "observed_at": "2026-10-23T18:25:00+09:00",
+      "observed_state": "idle",
+      "session_id": "sess_w-0130",
+      "started_by": "sess_sup_01",
+      "task_id": "T-0103",
+      "title": "work w-0130",
+      "worktree_path": "/Users/example/src/github.com/org/repo-a/.claude/worktrees/w-0130"
+    },
+    {
+      "base_branch": "main",
+      "branch": null,
+      "cwd": "/Users/example/src/github.com/org/repo-a",
+      "delivery": "commit",
+      "handle": "t0106-w0160",
+      "id": "w-0160",
+      "intended_state": "pending",
+      "kind": "git",
+      "last_report": null,
+      "observed_at": "2026-10-23T18:25:00+09:00",
+      "observed_state": "none",
+      "session_id": null,
+      "started_by": null,
+      "task_id": "T-0106",
+      "title": "work w-0160",
+      "worktree_path": "/Users/example/src/github.com/org/repo-a/.claude/worktrees/w-0160"
+    },
+    {
+      "base_branch": "main",
+      "branch": "claude/t0090-investigate",
+      "cwd": "/Users/example/src/github.com/org/repo-a",
+      "delivery": "commit",
+      "handle": "t0090-w0090",
+      "id": "w-0090",
+      "intended_state": "running",
+      "kind": "git",
+      "last_report": null,
+      "observed_at": "2026-10-23T18:25:00+09:00",
+      "observed_state": "idle",
+      "session_id": "sess_w-0090",
+      "started_by": "sess_sup_01",
+      "task_id": "T-0090",
+      "title": "work w-0090",
+      "worktree_path": "/Users/example/src/github.com/org/repo-a/.claude/worktrees/w-0090"
+    },
+    {
+      "base_branch": null,
+      "branch": null,
+      "cwd": "/Users/example/notes",
+      "delivery": "files",
+      "handle": "t0095-w0095",
+      "id": "w-0095",
+      "intended_state": "archived",
+      "kind": "non-git",
+      "last_report": null,
+      "observed_at": "2026-10-23T18:25:00+09:00",
+      "observed_state": "archived",
+      "session_id": "sess_w-0095",
+      "started_by": "sess_sup_01",
+      "task_id": "T-0095",
+      "title": "work w-0095",
+      "worktree_path": null
+    },
+    {
+      "base_branch": "main",
+      "branch": null,
+      "cwd": "/Users/example/src/github.com/org/repo-a",
+      "delivery": "commit",
+      "handle": "t0120-w0120",
+      "id": "w-0120",
+      "intended_state": "pending",
+      "kind": "git",
+      "last_report": null,
+      "observed_at": "2026-10-23T18:25:00+09:00",
+      "observed_state": "none",
+      "session_id": null,
+      "started_by": null,
+      "task_id": "T-0120",
+      "title": "work w-0120",
+      "worktree_path": "/Users/example/src/github.com/org/repo-a/.claude/worktrees/w-0120"
+    }
+  ]
+}

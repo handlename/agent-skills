@@ -1,0 +1,28 @@
+[assistant] Starting work on the uploader.
+
+```supervisor-report
+{"task_id": "T-0003", "worker_id": "w-0004", "status": "in_progress", "summary": "first pass", "artifacts": {}, "blockers": [], "next_action": "add tests"}
+```
+
+[user] <cross-session-message>continue</cross-session-message>
+[assistant] Tests added and committed.
+
+```supervisor-report
+{
+  "task_id": "T-0003",
+  "worker_id": "w-0004",
+  "status": "done",
+  "summary": "Exponential backoff retry added; tests pass.",
+  "artifacts": {
+    "branch": "hn/uploader-retry-x1",
+    "commit": "3f2a9c1e0d",
+    "pr": "https://github.com/org/repo-a/pull/42",
+    "ci": "https://github.com/org/repo-a/actions/runs/123",
+    "files": []
+  },
+  "blockers": [],
+  "next_action": "Review PR #42"
+}
+```
+[result] success
+[tool] wrap_up recap="Retry added"
