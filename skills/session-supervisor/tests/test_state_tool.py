@@ -1702,7 +1702,7 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(st.parse_locations(text), ({"clone_root": "~/src", "work_root": str(self.root / "sup-work"), "worktree_root": "~/.claude-worktrees"}, []))
         self.assertIn("prepare-dir` and `prepare-worktree` are the only commands that write outside", text)
         self.assertEqual(st.parse_herdr(text), ({"max_workers": 8}, []))
-        self.assertIn("The one allowed exception is `state_tool.py prepare-dir`", text)
+        self.assertIn("The allowed exceptions are `state_tool.py prepare-dir`, `prepare-worktree`, and `remove-worktree`", text)
 
     def test_appends_locations_to_existing_claude_md(self):
         target = self.root / "sup"

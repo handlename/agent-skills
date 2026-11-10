@@ -3602,10 +3602,10 @@ This directory belongs to the session-supervisor skill. It is not a project.
 
 - Use the session-supervisor skill first, and read the state with `python3 .supervisor/state_tool.py digest --state state.json`.
 - Write `state.json` only through `python3 .supervisor/state_tool.py commit`.
-- `supervisor.archive_consent` in `state.json` is the user's explicit consent that archiving requires. It covers only worker sessions whose `startedBy` is in `supervisor.session_ids`.
-- Never delete sessions.
+- `supervisor.archive_consent` in `state.json` is the user's explicit consent that archiving requires. It covers only workers and managers with `runtime: "herdr"` in `state.json`.
+- The supervisor runs in the Herdr terminal `sv`, with `sv-watch` (`state_tool.py watch-vault`) beside it. It starts sessions only by running the argv of `state_tool.py launch-plan`, and never deletes branches.
 - The supervisor only operates sessions, changes state through commit, and talks to the user. Workers edit, commit, push, and open PRs; observer subagents run read-only checks and investigations, write results under .supervisor/observations/, and return the path.
-- A PreToolUse hook (state_tool.py guard) blocks edits outside this directory and mutating git / jj / gh commands. The one allowed exception is `state_tool.py prepare-dir`, which writes only under the `## Locations` roots. To disable it, remove its entry from .claude/settings.json by hand; the supervisor asks before restoring a missing entry.
+- A PreToolUse hook (state_tool.py guard) blocks edits outside this directory and mutating git / jj / gh commands. The allowed exceptions are `state_tool.py prepare-dir`, `prepare-worktree`, and `remove-worktree`, which write only under the `## Locations` roots. To disable it, remove its entry from .claude/settings.json by hand; the supervisor asks before restoring a missing entry.
 - `vault/` is an Obsidian vault with one note per task and project: the note holds the meaning (title, `## 概要`, status, assignee, `## ユーザーアクション`, `## 成果物`). Only `python3 .supervisor/state_tool.py commit --notes <ops.json>` writes it (the guard blocks edits); read changes with `notes-scan` and a note with `note-show`. `vault/Supervisor.md` is the kanban dashboard: moving a card changes the note's status. Delegate a task by setting a note to `backlog` / `agent`.
 - `## Follow-ups` (optional) turns each newly verified PR into a user action such as "Review org/repo#42". Format: references/follow-ups-format.md in the session-supervisor skill. Check it with `python3 .supervisor/state_tool.py validate-follow-ups --claude-md CLAUDE.md`.
 
