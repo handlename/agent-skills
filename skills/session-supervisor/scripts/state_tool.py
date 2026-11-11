@@ -74,8 +74,9 @@ PR_URL_RE = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)/?$", re.I)
 NOTE_STATUSES = ("backlog", "in progress", "pending", "done", "archived")
 ASSIGNEES = ("user", "agent")
 NOTE_KEYS = ("uid", "title", "para", "aliases", "created_at", "archived_at", "tags", "start_date", "due_date",
-             "pending_until", "completed_at", "status", "assignee", "task_id", "project_id", "parent", "follows")
+             "pending_until", "completed_at", "status", "assignee", "summary", "task_id", "project_id", "parent", "follows")
 NOTE_RAW_KEYS = ("created_at", "archived_at")
+NOTE_SUMMARY_MAX = 80
 NOTE_SECTIONS = ("概要", "アクション", "サブタスク", "関連ノート", "関連資料", "成果物", "ログ")
 UA_SECTION = "アクション"
 ART_SECTION = "成果物"
@@ -1889,7 +1890,7 @@ def new_note_text(uid, title, kind, status, assignee, now, request="", parent=No
     values = {
         "uid": uid, "title": title, "para": "Project", "aliases": [], "created_at": f"{now[:10]} {now[11:19]}",
         "archived_at": None, "tags": list(NOTE_TAGS[kind]), "start_date": None, "due_date": None, "pending_until": None,
-        "completed_at": None, "status": status, "assignee": assignee,
+        "completed_at": None, "status": status, "assignee": assignee, "summary": None,
         "parent": f"[[{parent}]]" if parent else None, "follows": f"[[{follows}]]" if follows else None,
     }
     head = "".join(_prop_line(k, values[k]) + "\n" for k in NOTE_KEYS if k in values and (values[k] is not None or k not in ("parent", "follows")))
@@ -2460,11 +2461,20 @@ _NOTE_BODY_OPS = {
 }
 
 
+def note_summary(text):
+    """The summary prop the kanban shows: one line of at most NOTE_SUMMARY_MAX characters."""
+    if not isinstance(text, str) or not text.strip():
+        raise StateError("summary needs text")
+    line = " ".join(text.split())
+    return line if len(line) <= NOTE_SUMMARY_MAX else line[:NOTE_SUMMARY_MAX - 1] + "…"
+
+
 def apply_note_ops(text, ops, now, rev):
     """Apply note ops to a note's text. Returns (text, new_ids, problems).
     Re-applying the same ops with the same rev is a no-op: lines are added once per block id, and edits of existing
     lines leave a rev mark (done=<at> r<rev>, "r": <rev>). new_ids are the block ids this call added.
-    create writes a note only into empty text; assign_uid sets uid only when the note has none."""
+    create writes a note only into empty text; assign_uid sets uid only when the note has none; summary sets the
+    summary prop."""
     new_ids, problems = [], []
     for index, op in enumerate(ops):
         name = op.get("op")
@@ -2479,6 +2489,9 @@ def apply_note_ops(text, ops, now, rev):
                 problems.append(f"assign_uid: {errors}")
             elif not props.get("uid"):
                 text = set_props(text, {"uid": op["uid"]})
+            continue
+        if name == "summary":
+            text = set_props(text, {"summary": note_summary(op.get("text"))})
             continue
         if name not in _NOTE_BODY_OPS:
             raise StateError(f"unknown note op {name!r}")
@@ -4016,7 +4029,7 @@ views:
     groupBy:
       property: status
       direction: ASC
-    order: [formula.title, task_id, project_id, created_at]
+    order: [formula.title, summary, task_id, project_id, created_at]
     groupOrder: [backlog, in progress, pending, done, archived]
     hideEmptyGroups: false
 ```

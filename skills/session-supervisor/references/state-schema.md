@@ -375,6 +375,8 @@ Props are written only when the note's current values equal the candidate's `not
 
 Every commit also writes `task_id` and `project_id` (`id_props`) to each note of a task, stub, or project whose values differ, so the kanban shows them: a task note gets its `T-` id and its project's `P-` id (none outside a project), a project note only its `P-` id. A live task wins over its stub. These are not user values: `notes-scan` ignores them, and `migrate-v2` writes them too.
 
+The `summary` prop is written only by the `summary` note op (SKILL.md section 4), never derived: one line of at most 80 characters (`note_summary` joins the lines with spaces and cuts a longer text to 79 characters plus `…`), shown on the kanban card. New notes start with `summary: null` (templates from the Vault interview have it empty; a note without it gets it at the first `summary` op). It is not a user value either: `notes-scan` ignores it, and a user's edit stays until the next `summary` op.
+
 ### User changes (`user_transition`)
 
 `notes-scan` compares each note with `note_seen` (or with the `before` values of an unconfirmed journal entry) and classifies the change. Any combination not listed is `invalid`: the user is told, `user_hold` (`reason: invalid`) stops props and starts, and nothing is acked until the user sets listed values. A change of `## アクション` alone needs no handling.

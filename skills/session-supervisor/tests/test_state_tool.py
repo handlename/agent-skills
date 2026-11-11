@@ -3445,7 +3445,7 @@ class FrontmatterTest(unittest.TestCase):
     def test_reads_json_shapes(self):
         props, _, errors = st.parse_frontmatter(note("task_managed"))
         self.assertEqual(errors, [])
-        self.assertEqual(list(props), [k for k in st.NOTE_KEYS if k not in ("task_id", "project_id", "follows")])
+        self.assertEqual(list(props), [k for k in st.NOTE_KEYS if k not in ("summary", "task_id", "project_id", "follows")])
         self.assertEqual((props["uid"], props["aliases"], props["tags"]), ("20261109_221500", [], ["task", "oss"]))
         self.assertEqual((props["status"], props["assignee"], props["parent"]), ("in progress", "user", "[[20261101_090000]]"))
         self.assertEqual(props["created_at"], "2026-11-09 22:15:00")
@@ -3545,6 +3545,19 @@ class NoteTemplateTest(unittest.TestCase):
         _, _, problems = st.apply_note_ops(note("note_unsupported").replace('uid: "20261109_230000"\n', ""),
                                            [{"op": "assign_uid", "uid": "x"}], NOTE_NOW, 13)
         self.assertEqual(len(problems), 1)
+
+    def test_summary_op_sets_one_short_line(self):
+        text = note("task_managed")
+        out, ids, problems = apply_twice(self, text, [{"op": "summary", "text": "w-0120 が実装中。\n push 判断待ち"}])
+        self.assertEqual((ids, problems), ([], []))
+        self.assertEqual(out, text.replace('assignee: "user"\n', 'assignee: "user"\nsummary: "w-0120 が実装中。 push 判断待ち"\n', 1))
+        long = st.apply_note_ops(text, [{"op": "summary", "text": "あ" * 100}], NOTE_NOW, 13)[0]
+        self.assertEqual(st.parse_frontmatter(long)[0]["summary"], "あ" * 79 + "…")
+        replaced = st.apply_note_ops(out, [{"op": "summary", "text": "完了"}], NOTE_NOW, 14)[0]
+        self.assertEqual(st.parse_frontmatter(replaced)[0]["summary"], "完了")
+        for bad in ("", " \n", None):
+            with self.assertRaises(st.StateError):
+                st.apply_note_ops(text, [{"op": "summary", "text": bad}], NOTE_NOW, 13)
 
     def test_log_entries_append_once_and_keep_the_rest(self):
         text = note("task_obsidian")
@@ -4822,6 +4835,11 @@ class NoteCommitTest(unittest.TestCase):
         self.assertIn("(edited)", self.env.text(U1))
         self.assertIn("済 ^sv-log-r1-0", self.env.text(U1))
 
+    def test_summary_op_is_written_by_commit(self):
+        code, out, err = self.env.commit(None, {U1: [{"op": "summary", "text": "w-0001 が実装中"}]})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(st.parse_frontmatter(self.env.text(U1))[0]["summary"], "w-0001 が実装中")
+
     def test_v1_state_rejects_notes(self):
         self.env.state_path.write_text(st.serialize(fixture_state()), encoding="utf-8")
         code, _, err = self.env.commit(fixture_state(), {})
@@ -5110,6 +5128,7 @@ class SetupVaultTest(unittest.TestCase):
             self.assertIn("""'assignee == "user"'""", dashboard)
             self.assertIn("""'assignee == "agent"'""", dashboard)
             self.assertIn("groupOrder: [backlog, in progress, pending, done, archived]", (vault / "Supervisor.md").read_text(encoding="utf-8"))
+            self.assertEqual(dashboard.count("order: [formula.title, summary, task_id, project_id, created_at]"), 2)
             self.assertIn('file.hasTag("supervised")', dashboard)
             self.assertEqual([p.name for p in (vault / "_templates").iterdir()], ["sv-status.md"])
             self.assertFalse((vault / ".obsidian").exists())
