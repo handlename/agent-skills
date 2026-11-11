@@ -5013,7 +5013,7 @@ def pair_values(value):
 class StatusShortcutTest(unittest.TestCase):
     CTX = {"unmanaged": {"managed": False}, "active": dict(LIVE, active=True), "idle": LIVE, "paused": PAUSED, "stub": STUB,
            "project": dict(PROJ, active=True), "project_idle": PROJ, "project_paused": dict(PROJ, hold="pause"),
-           "held": dict(LIVE, open_ua=True, held_only=True), "project_done": dict(PROJ, active=True, open_ua=True, done_proposed=True)}
+           "held": dict(LIVE, open_ua=True, held_only=True), "unheld": dict(LIVE, open_ua=True, unheld=True), "project_done": dict(PROJ, active=True, open_ua=True, done_proposed=True)}
     CANCEL_FROM = ("backlog/user", "backlog/agent", "in progress/user", "in progress/agent", "pending/user", "pending/agent")
     CASES = [
         # (kind, label, from, ctx, event, row)
@@ -5045,6 +5045,9 @@ class StatusShortcutTest(unittest.TestCase):
         ("task", "完了確認", "in progress/user", "held", "confirm", 13),
         ("task", "完了確認", "done/agent", "idle", "confirm", 13),
         ("task", "完了確認", "done/agent", "stub", "confirm", 13),
+        ("task", "完了にする(残りの作業は取り消し)", "in progress/user", "unheld", "cancel", 15),
+        ("task", "完了にする(残りの作業は取り消し)", "in progress/agent", "active", "cancel", 15),
+        ("task", "完了にする(残りの作業は取り消し)", "pending/user", "paused", "cancel", 15),
         *[("task", "取り消す", f, "active", "cancel", 17) for f in CANCEL_FROM],
         ("task", "取り消す", "backlog/agent", "unmanaged", "none", 2),
         ("project", "agent に渡す", "backlog/user", "unmanaged", "pickup", 1),

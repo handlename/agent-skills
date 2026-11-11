@@ -12,6 +12,8 @@ const MOVES = [
   {"kind": "task", "label": "保留", "from": ["backlog/user", "backlog/agent"], "managed": false, "to": "pending/user"},
   {"kind": "task", "label": "完了確認", "from": ["in progress/user"], "when": "held_only", "to": "done/user"},
   {"kind": "task", "label": "完了確認", "from": ["done/agent"], "to": "done/user"},
+  {"kind": "task", "label": "完了にする(残りの作業は取り消し)", "from": ["in progress/user"], "when": "unheld", "to": "done/user"},
+  {"kind": "task", "label": "完了にする(残りの作業は取り消し)", "from": ["in progress/agent", "pending/user"], "managed": true, "to": "done/user"},
   {"kind": "task", "label": "取り消す", "from": ["backlog/user", "backlog/agent", "in progress/user", "in progress/agent", "pending/user", "pending/agent"], "to": "archived/user"},
   {"kind": "project", "label": "agent に渡す", "from": ["backlog/user", "in progress/user", "pending/user"], "to": "backlog/agent"},
   {"kind": "project", "label": "完了を差し戻す", "from": ["in progress/user"], "when": "done_proposed", "to": "in progress/agent"},
@@ -43,10 +45,12 @@ if (!tags.includes("supervised")) {
   const now = value("status") + "/" + value("assignee");
   // state_tool never writes done/agent: a task held only for investigation results shows in progress/user with no
   // open @user action, and a project the manager proposes as done shows in progress/user with its completion ask.
-  // done/agent comes only from notes written by earlier versions.
+  // done/agent comes only from notes written by earlier versions. done/user with anything else open cancels the rest
+  // of the task and marks it done (notes-scan row 15).
   const body = lines.slice(close + 1);
   const when = {
     held_only: managed && !body.some((line) => /^### \[UA-\d+\] @user /.test(line)),
+    unheld: managed && body.some((line) => /^### \[UA-\d+\] @user /.test(line)),
     done_proposed: managed && body.some((line) => line.startsWith("### [UA-") && line.includes("@user プロジェクトの完了を確認してください")),
   };
   const moves = close < 0 ? [] : MOVES.filter((m) => m.kind === kind && m.from.includes(now)
