@@ -5801,6 +5801,13 @@ class LaunchPlanTest(unittest.TestCase):
                                  "--worker", "w-0030", "--prompt-file", str(env.dir / "prompt.md"))
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)["argv"][-1], "Fix it.\nThen report.")
+        with mock.patch.object(st.subprocess, "run", return_value=subprocess.CompletedProcess([], 3)) as run:
+            code, out, err = env.run("launch-plan", "--state", str(env.state_path), "--claude-md", str(env.dir / "CLAUDE.md"),
+                                     "--worker", "w-0030", "--prompt-file", str(env.dir / "prompt.md"), "--run")
+        self.assertEqual(code, 3, err)
+        self.assertEqual(out, "")
+        self.assertEqual(run.call_args.args[0][:2], ["hc", "run"])
+        self.assertEqual(run.call_args.args[0][-1], "Fix it.\nThen report.")
 
 
 class HerdrTranscriptTest(unittest.TestCase):
@@ -6073,6 +6080,20 @@ class HcGuardTest(unittest.TestCase):
         for command in self.ALLOW:
             with self.subTest(command=command):
                 self.assertEqual(st.bash_violations(command), [])
+
+    def test_single_quoted_send_text_is_data(self):
+        for command in ("hc send w-0001 'Ask the user to run hc server start'",
+                        "hc send w-0001 'Run `git push` when ready'",
+                        "hc send w-0001 'a $(git push) b' && hc get w-0001 --json"):
+            with self.subTest(command=command):
+                self.assertEqual(st.bash_violations(command), [])
+        for command in ('hc send w-0001 "hc server start"',
+                        'hc send w-0001 "$(git push)"',
+                        "hc send w-0001 'continue'; hc server start",
+                        "hc send w-0001 'x' && python3 -c \"import subprocess; subprocess.run(['hc', 'keys', 'w-1'])\"",
+                        "cat <<'EOF' > notes.json\n{\"log\": \"run hc server start\"}\nEOF"):
+            with self.subTest(command=command):
+                self.assertTrue(st.bash_violations(command))
 
 
 def git(*argv, cwd):

@@ -465,6 +465,15 @@ def _shell_c_violations(words, role=None):
     return []
 
 
+def _quoted_send_text(words, command):
+    """The text arguments of an `hc send` written in single quotes: literal data the shell never runs."""
+    if not words or os.path.basename(words[0]) != "hc":
+        return []
+    sub, args = _split_subcommand("hc", words[1:])
+    texts = _positionals(args)[1:] if sub == "send" else []
+    return texts if all(f"'{t}'" in command for t in texts) else []
+
+
 def bash_violations(command, role=None):
     """Deny-list matches of git / jj / gh / hc in a Bash command. A guardrail, not a security boundary."""
     command = command.replace("\\\n", "")
@@ -474,15 +483,18 @@ def bash_violations(command, role=None):
         if GUARD_WORD_RE.search(command):
             return ["unparsable command (could not parse; quote the command correctly or split it)"]
         return []
-    violations = []
-    hidden = {m.group(1) for m in HC_DENY_RE.finditer(command)}
+    violations, scanned = [], command
     for segment in _segments(tokens):
-        text = " ".join(segment)
+        words = _strip_redirections(segment)
+        literal = _quoted_send_text(words, command)
+        for t in literal:
+            scanned = scanned.replace(f"'{t}'", "", 1)
+        text = " ".join(t for t in segment if t not in literal)
         if ("`" in text or "$(" in text) and GUARD_WORD_RE.search(text):
             violations.append("command substitution (split the command; command substitution around git/jj/gh/hc is not inspected)")
             continue
-        words = _strip_redirections(segment)
         violations += _shell_c_violations(words, role) + _tool_violations(words, role)
+    hidden = {m.group(1) for m in HC_DENY_RE.finditer(scanned)}
     named = " ".join(violations)
     violations += [f"hc {sub} (the supervisor never types into, attaches to or manages terminals directly)"
                    for sub in sorted(hidden) if f"hc {sub} " not in named]
@@ -4490,7 +4502,11 @@ def cmd_launch_plan(args):
     if errors:
         raise StateError(errors)
     prompt = Path(args.prompt_file).read_text(encoding="utf-8")
-    print(json.dumps({"argv": launch_argv(state, args.worker, prompt, herdr)}, ensure_ascii=False))
+    argv = launch_argv(state, args.worker, prompt, herdr)
+    if args.run:
+        # Run here so the prompt never becomes Bash text, which the guard would scan for blocked commands.
+        return subprocess.run(argv).returncode
+    print(json.dumps({"argv": argv}, ensure_ascii=False))
     return 0
 
 
@@ -5297,11 +5313,12 @@ def build_parser():
     p.add_argument("--path", required=True)
     p.set_defaults(func=cmd_remove_worktree)
 
-    p = sub.add_parser("launch-plan", help="print the hc run argv that starts a herdr worker or manager (reads only)")
+    p = sub.add_parser("launch-plan", help="print (or with --run, run) the hc run argv that starts a herdr worker or manager")
     p.add_argument("--state", required=True)
     p.add_argument("--claude-md", required=True)
     p.add_argument("--worker", required=True, help="a worker id (w-0123) or a manager handle (m-p-0006)")
     p.add_argument("--prompt-file", required=True)
+    p.add_argument("--run", action="store_true", help="run the argv and exit with its status instead of printing it")
     p.set_defaults(func=cmd_launch_plan)
 
     p = sub.add_parser("last-message", help="write the last assistant message of a herdr worker or manager from its transcript")
