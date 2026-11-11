@@ -74,7 +74,8 @@ PR_URL_RE = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)/?$", re.I)
 NOTE_STATUSES = ("backlog", "in progress", "pending", "done", "archived")
 ASSIGNEES = ("user", "agent")
 NOTE_KEYS = ("uid", "title", "para", "aliases", "created_at", "archived_at", "tags", "start_date", "due_date",
-             "pending_until", "completed_at", "status", "assignee", "summary", "task_id", "project_id", "parent", "follows")
+             "pending_until", "completed_at", "status", "assignee", "summary", "task_id", "project_id", "parent", "proposed_by",
+             "follows")
 NOTE_RAW_KEYS = ("created_at", "archived_at")
 NOTE_SUMMARY_MAX = 80
 NOTE_SECTIONS = ("概要", "アクション", "サブタスク", "関連ノート", "関連資料", "成果物", "ログ")
@@ -1882,9 +1883,11 @@ def note_kind(props):
     return "project" if "project" in tags else "task"
 
 
-def new_note_text(uid, title, kind, status, assignee, now, request="", parent=None, follows=None, original=None):
+def new_note_text(uid, title, kind, status, assignee, now, request="", parent=None, follows=None, original=None,
+                  proposed_by=None):
     """Text of a new task or project note in the create-task format. parent and follows are note uids. original (the
-    chat message the request was written from) follows the request as a folded 依頼の原文 callout."""
+    chat message the request was written from) follows the request as a folded 依頼の原文 callout. proposed_by is the
+    P-id of the project manager whose proposal the note holds."""
     if kind not in ("task", "project"):
         raise StateError(f"note kind must be task or project, got {kind!r}")
     if status not in NOTE_STATUSES or assignee not in ASSIGNEES:
@@ -1894,8 +1897,10 @@ def new_note_text(uid, title, kind, status, assignee, now, request="", parent=No
         "archived_at": None, "tags": list(NOTE_TAGS[kind]), "start_date": None, "due_date": None, "pending_until": None,
         "completed_at": None, "status": status, "assignee": assignee, "summary": None,
         "parent": f"[[{parent}]]" if parent else None, "follows": f"[[{follows}]]" if follows else None,
+        "proposed_by": proposed_by,
     }
-    head = "".join(_prop_line(k, values[k]) + "\n" for k in NOTE_KEYS if k in values and (values[k] is not None or k not in ("parent", "follows")))
+    head = "".join(_prop_line(k, values[k]) + "\n" for k in NOTE_KEYS
+                   if k in values and (values[k] is not None or k not in ("parent", "proposed_by", "follows")))
     content = (request or "").strip("\n")
     if original and original.strip("\n"):
         content = "\n\n".join(c for c in (content, "\n".join([QUOTE_HEAD] + _quote(original.strip("\n")))) if c)
@@ -2483,7 +2488,8 @@ def apply_note_ops(text, ops, now, rev):
         if name == "create":
             if not text.strip():
                 text = new_note_text(op["uid"], op["title"], op["kind"], op["status"], op["assignee"], now,
-                                     op.get("request", ""), op.get("parent"), op.get("follows"), op.get("original"))
+                                     op.get("request", ""), op.get("parent"), op.get("follows"), op.get("original"),
+                                     op.get("proposed_by"))
             continue
         if name == "assign_uid":
             props, _, errors = parse_frontmatter(text)
@@ -3324,6 +3330,22 @@ def _parent_uids(value):
     return set(re.findall(r"\d{8}_\d{6}", json.dumps(value)))
 
 
+def parent_project_id(state, parent):
+    """P-id of the open project whose note the parent property links ([[uid]], [[path|alias]], a path, or a list of
+    those), or None. sv-project.md writes [[<path without .md>|<title>]]."""
+    names = set()
+    for value in parent if isinstance(parent, list) else [parent]:
+        if isinstance(value, str):
+            for target in re.findall(r"\[\[([^\]|#]+)", value) or [value]:
+                name = target.strip().rsplit("/", 1)[-1]
+                names.add(name[:-3] if name.endswith(".md") else name)
+    for p in state.get("projects", []):
+        note = (p.get("note") or "").rsplit("/", 1)[-1]
+        if not p.get("close") and names & {p.get("uid"), note[:-3] if note.endswith(".md") else note} - {None, ""}:
+            return p["id"]
+    return None
+
+
 def proposal_titles(texts, project_uid):
     """Titles of the backlog/user task notes whose parent is the project note: proposals waiting for the user."""
     titles = set()
@@ -4050,7 +4072,8 @@ def supervisor_note(templates):
 
 def _setup_vault(supervisor_dir):
     """Create the dashboard note when it is missing; never overwrite it. Templates are built with the user (section 3),
-    except the status shortcut sv-status.md, which is placed in the template folder (created, exists or updated)."""
+    except the Templater scripts sv-status.md and sv-project.md, which are placed in the template folder (created,
+    exists or updated)."""
     vault, dashboard, templates = vault_locations(supervisor_dir)
     files = ((Path(vault) / dashboard, supervisor_note(templates)),)
     report = []
@@ -4061,16 +4084,17 @@ def _setup_vault(supervisor_dir):
             path.parent.mkdir(parents=True, exist_ok=True)
             _write_atomic(str(path), text)
             report.append(("created", path))
-    # The status shortcut is overwritten like .supervisor/state_tool.py, so its MOVES stay in step with user_transition.
-    src, dest = HERE.parent / "assets" / "sv-status.md", Path(vault) / templates / "sv-status.md"
-    if not src.exists():
-        report.append(("skipped", dest))
-        return report
-    status = "exists" if dest.exists() and dest.read_bytes() == src.read_bytes() else ("updated" if dest.exists() else "created")
-    if status != "exists":
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dest)
-    report.append((status, dest))
+    # The scripts are overwritten like .supervisor/state_tool.py, so sv-status's MOVES stay in step with user_transition.
+    for name in ("sv-status.md", "sv-project.md"):
+        src, dest = HERE.parent / "assets" / name, Path(vault) / templates / name
+        if not src.exists():
+            report.append(("skipped", dest))
+            continue
+        status = "exists" if dest.exists() and dest.read_bytes() == src.read_bytes() else ("updated" if dest.exists() else "created")
+        if status != "exists":
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dest)
+        report.append((status, dest))
     return report
 
 
@@ -4747,7 +4771,8 @@ def notes_scan(state, texts, uids, vault=None):
             event["warning_key"], event["warning_sha"] = uid or rel, sha
         sections = parse_sections(body_text)
         event.update(title=props.get("title"), request=sections.get("概要", "").strip(),
-                     parent=props.get("parent"), follows=props.get("follows"),
+                     parent=props.get("parent"), project_id=parent_project_id(state, props.get("parent")),
+                     proposed_by=props.get("proposed_by"), follows=props.get("follows"),
                      user_actions=[_ua_summary(u) for u in parse_user_actions(sections.get(UA_SECTION, ""))])
         if uid is None and vault:
             event["proposed_uid"] = _proposed_uid(os.path.join(vault, rel), taken)

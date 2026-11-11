@@ -1565,7 +1565,8 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.files(target), [".claude/settings.json", ".supervisor/state_tool.py", "CLAUDE.md",
                                               "chat/.claude/settings.json", "chat/CLAUDE.md", "state.json",
-                                              "vault/Supervisor.md", "vault/_templates/sv-status.md"])
+                                              "vault/Supervisor.md", "vault/_templates/sv-project.md",
+                                              "vault/_templates/sv-status.md"])
         entries = self.hooks(target)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["matcher"], "startup|resume|clear|compact")
@@ -3453,7 +3454,7 @@ class FrontmatterTest(unittest.TestCase):
     def test_reads_json_shapes(self):
         props, _, errors = st.parse_frontmatter(note("task_managed"))
         self.assertEqual(errors, [])
-        self.assertEqual(list(props), [k for k in st.NOTE_KEYS if k not in ("summary", "task_id", "project_id", "follows")])
+        self.assertEqual(list(props), [k for k in st.NOTE_KEYS if k not in ("summary", "task_id", "project_id", "proposed_by", "follows")])
         self.assertEqual((props["uid"], props["aliases"], props["tags"]), ("20261109_221500", [], ["task", "oss"]))
         self.assertEqual((props["status"], props["assignee"], props["parent"]), ("in progress", "user", "[[20261101_090000]]"))
         self.assertEqual(props["created_at"], "2026-11-09 22:15:00")
@@ -3513,7 +3514,7 @@ class NoteTemplateTest(unittest.TestCase):
                                         'tags: ["supervised"]\n'))
         props, body, errors = st.parse_frontmatter(text)
         self.assertEqual(errors, [])
-        self.assertEqual(list(props), [k for k in st.NOTE_KEYS if k not in ("task_id", "project_id", "follows")])
+        self.assertEqual(list(props), [k for k in st.NOTE_KEYS if k not in ("task_id", "project_id", "proposed_by", "follows")])
         self.assertEqual((props["status"], props["assignee"], props["parent"]), ("in progress", "agent", "[[20261101_090000]]"))
         self.assertFalse(re.search(r"^# ", body, re.M))
         sections = st.parse_sections(body)
@@ -4686,6 +4687,22 @@ class NoteCommitTest(unittest.TestCase):
         self.assertIn("受領しました", note_section(self.env.text(U3), "ログ"))
         self.assertEqual(self.env.scan()["events"], [])
 
+    def test_pickup_names_the_project_its_parent_links(self):
+        project = to_v2(add_project(self.env.state), "projects", U2)
+        project["note"] = f"Projects/{U2}.md"
+        self.env.save()
+        texts = {"linked": st.new_note_text(U3, "思いつき", "task", "backlog", "agent", NOTE_NOW, "やって", parent=U2),
+                 "proposal": st.new_note_text(U3, "提案", "task", "backlog", "agent", NOTE_NOW, "やって", parent=U2,
+                                              proposed_by="P-0001"),
+                 "none": st.new_note_text(U3, "思いつき", "task", "backlog", "agent", NOTE_NOW, "やって")}
+        for name, text in texts.items():
+            self.env.put(U3, text)
+            event = self.env.scan()["events"][0]
+            self.assertEqual((event["event"], event["project_id"], event["proposed_by"]),
+                             ("pickup", None if name == "none" else "P-0001", "P-0001" if name == "proposal" else None), name)
+        self.assertIn('proposed_by: "P-0001"', texts["proposal"])
+        self.assertNotIn("proposed_by", texts["linked"])
+
     def test_uidless_note_gets_its_uid_at_pickup(self):
         text = "---\ntitle: 思いつき\ntags:\n  - supervised\nstatus: backlog\nassignee: agent\n---\n## 概要\n\nやって\n"
         self.env.put(None, text, rel="Untitled.md")
@@ -5160,7 +5177,7 @@ class SetupVaultTest(unittest.TestCase):
             self.assertIn("groupOrder: [backlog, in progress, pending, done, archived]", (vault / "Supervisor.md").read_text(encoding="utf-8"))
             self.assertEqual(dashboard.count("order: [formula.title, summary, task_id, project_id, created_at]"), 2)
             self.assertIn('file.hasTag("supervised")', dashboard)
-            self.assertEqual([p.name for p in (vault / "_templates").iterdir()], ["sv-status.md"])
+            self.assertEqual(sorted(p.name for p in (vault / "_templates").iterdir()), ["sv-project.md", "sv-status.md"])
             self.assertFalse((vault / ".obsidian").exists())
             self.assertIn("vault/", (target / "CLAUDE.md").read_text(encoding="utf-8"))
             (vault / "Supervisor.md").write_text("mine\n", encoding="utf-8")
@@ -5214,6 +5231,25 @@ class ProjectContextDocTest(unittest.TestCase):
         notes[U3] = notes[U3].replace("MCP サーバを作る", "MCP サーバを作る https://github.com/org/repo/issues/1")
         self.assertEqual(st.join_view(state, notes)["projects"][0]["context_doc_url"], "https://github.com/org/repo/issues/1")
 
+
+
+class ParentProjectTest(unittest.TestCase):
+    def test_resolves_links_to_open_projects(self):
+        state, _ = v2_state()
+        project = to_v2(add_project(state), "projects", U2)
+        project["note"] = "Projects/Obsidian kanban.md"
+        for parent, want in ((f"[[{U2}]]", "P-0001"), ("[[Projects/Obsidian kanban|Obsidian kanban]]", "P-0001"),
+                             ("[[Obsidian kanban]]", "P-0001"), ("Projects/Obsidian kanban.md", "P-0001"), (None, None),
+                             ("[[Other]]", None), ([f"[[{U1}]]", f"[[{U2}]]"], "P-0001")):
+            self.assertEqual(st.parent_project_id(state, parent), want, parent)
+        project["close"] = {"at": NOW, "reason": "x"}
+        self.assertIsNone(st.parent_project_id(state, f"[[{U2}]]"))
+
+    def test_project_picker_is_a_templater_script(self):
+        text = (SKILL / "assets" / "sv-project.md").read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("<%*"))
+        self.assertTrue(text.endswith("-%>\n"))
+        self.assertIn("(プロジェクトなし)", text)
 
 
 class ProposalNoteTest(unittest.TestCase):
@@ -6061,7 +6097,8 @@ class ObsidianVaultTest(unittest.TestCase):
         self.assertIn('file.hasTag("supervised")', board)
         self.assertIn("""'!file.inFolder("_plugin/type")'""", board)
         self.assertEqual(sorted(p.relative_to(memo).as_posix() for p in memo.rglob("*")),
-                         ["_plugin", "_plugin/type", "_plugin/type/sv-status.md", "_sv", "_sv/Board.md"])
+                         ["_plugin", "_plugin/type", "_plugin/type/sv-project.md", "_plugin/type/sv-status.md", "_sv",
+                          "_sv/Board.md"])
         self.assertFalse((self.sup / "vault").exists())
 
     def test_index_skips_the_dashboard_and_the_template_folder(self):
