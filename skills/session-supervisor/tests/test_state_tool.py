@@ -6154,6 +6154,29 @@ class WorktreeTest(unittest.TestCase):
                                   capture_output=True, text=True).stdout
         self.assertIn("claude/t0001-fix", branches)
 
+    def test_prepare_trusts_mise_configs_at_the_worktree_root(self):
+        self.assertEqual(json.loads(self.prepare("claude/t0001-none")[1])["mise_trusted"], [])
+        (self.repo / ".git" / "info" / "exclude").write_text(".mise.local.toml\n", encoding="utf-8")
+        hooks = self.repo / ".git" / "hooks"
+        hooks.mkdir(exist_ok=True)
+        (hooks / "post-checkout").write_text("#!/bin/sh\necho '[env]' > .mise.local.toml\n", encoding="utf-8")
+        (hooks / "post-checkout").chmod(0o755)
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        log = self.root / "mise.log"
+        (bin_dir / "mise").write_text(f'#!/bin/sh\necho "$@" >> {log}\n', encoding="utf-8")
+        (bin_dir / "mise").chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}):
+            code, out, err = self.prepare()
+        self.assertEqual(code, 0, err)
+        config = str(self.trees / "repo-a" / "t0001-fix" / ".mise.local.toml")
+        self.assertEqual((json.loads(out)["mise_trusted"], json.loads(out)["mise_untrusted"]), ([config], []))
+        self.assertEqual(log.read_text(encoding="utf-8"), f"trust --quiet {config}\n")
+        with mock.patch.object(st.shutil, "which", return_value=None):
+            code, out, err = self.prepare()
+        self.assertEqual((code, json.loads(out)["mise_untrusted"]), (0, [config]))
+        self.assertIn("mise is not on PATH", err)
+
     def test_prepare_refusals(self):
         self.assertEqual(self.prepare("bad..branch")[0], 1)
         self.assertEqual(self.prepare("claude/x", "--slug", "../escape")[0], 1)

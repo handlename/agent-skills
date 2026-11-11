@@ -4673,8 +4673,35 @@ def cmd_prepare_worktree(args):
         _git_run(["git", "-C", repo, "worktree", "add", "-b", args.branch, dest, args.base])
         status = "created"
     head = _git_run(["git", "-C", dest, "rev-parse", "HEAD"])
-    print(json.dumps({"status": status, "path": dest, "repo": repo, "branch": args.branch, "base": args.base, "head": head}))
+    trusted, untrusted = _mise_trust(dest)
+    print(json.dumps({"status": status, "path": dest, "repo": repo, "branch": args.branch, "base": args.base, "head": head,
+                      "mise_trusted": trusted, "mise_untrusted": untrusted}))
     return 0
+
+
+# Config files at a worktree's root that mise refuses until trusted (its trust is per path, so every new worktree
+# needs it again, for example for a .mise.local.toml copied from the main clone by a post-checkout hook).
+MISE_CONFIG_NAMES = (".mise.local.toml", "mise.local.toml", ".mise.toml", "mise.toml", ".config/mise.toml",
+                     ".config/mise/config.toml", ".mise/config.toml")
+
+
+def _mise_trust(dest):
+    """Trust the mise config files at the worktree root only (not its parents). Returns (trusted, untrusted) paths."""
+    found = [os.path.join(dest, n) for n in MISE_CONFIG_NAMES if os.path.isfile(os.path.join(dest, n))]
+    mise = shutil.which("mise")
+    if not found or mise is None:
+        if found:
+            print("warning: mise is not on PATH; could not trust " + ", ".join(found), file=sys.stderr)
+        return [], found
+    trusted, untrusted = [], []
+    for path in found:
+        proc = subprocess.run([mise, "trust", "--quiet", path], capture_output=True, text=True)
+        if proc.returncode == 0:
+            trusted.append(path)
+        else:
+            untrusted.append(path)
+            print(f"warning: mise trust {path} exited with {proc.returncode}: {proc.stderr.strip()}", file=sys.stderr)
+    return trusted, untrusted
 
 
 def cmd_remove_worktree(args):
