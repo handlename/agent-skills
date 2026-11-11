@@ -4171,6 +4171,33 @@ class ViewTest(unittest.TestCase):
         self.assertNotIn("title", state["archived"][0])
         self.assertEqual(st._storage_errors(state, self.notes), [])
 
+    def test_completion_ask_follows_the_finished_state(self):
+        state, notes = v2_state()
+        nongit_task(state, "T-0005", "w-0006", "/Users/example/notes", "archived", "idle")
+        v2_note(notes, "u5", groups=[[{"n": 1, "kind": "file", "path": "/Users/example/notes/a.txt"}]], request="メモを整理して")
+        to_v2(find(state["tasks"], "T-0005"), "tasks", "u5")
+        view = st.join_view(state, notes)
+        cand = copy.deepcopy(view)
+        find(cand["workers"], "w-0006")["observed_state"] = "archived"
+        new = st.next_state(view, cand, NOW)
+        task = find(new["tasks"], "T-0005")
+        self.assertEqual((task["status"], [(u["description"], u["detector"]) for u in task["user_actions"]]),
+                         ("needs_user", [(st.COMPLETION_ASK["ja"], "task_done")]))
+        self.assertEqual(st.note_props("task", task, {w["id"]: w for w in new["workers"]}), ("in progress", "user"))
+        self.assertEqual(st.next_state(new, copy.deepcopy(new), NOW)["tasks"][0]["user_actions"], task["user_actions"])
+        follow = copy.deepcopy(new)
+        nongit_task(follow, "T-0009", "w-0009", "/tmp/x", "pending", "none", session_id=None)
+        follow["tasks"] = [t for t in follow["tasks"] if t["id"] != "T-0009"]
+        w = find(follow["workers"], "w-0009")
+        w["task_id"] = "T-0005"
+        find(follow["tasks"], "T-0005")["worker_ids"].append("w-0009")
+        self.assertEqual(find(st.next_state(new, follow, NOW)["tasks"], "T-0005")["user_actions"], [])
+        for key, value in (("confirmed", {"at": NOW}), ("cancel", {"at": NOW, "reason": "やめる"})):
+            done = copy.deepcopy(new)
+            find(done["tasks"], "T-0005")[key] = value
+            after = st.next_state(new, done, NOW)
+            self.assertEqual(([t["id"] for t in after["tasks"]], after["archived"][0]["id"]), ([], "T-0005"), key)
+
     def test_waiting_start_action_becomes_a_ua_add(self):
         state, notes = v2_state()
         nongit_task(state, "T-0005", "w-0006", "/Users/example/notes", "archived", "idle")
@@ -4187,9 +4214,11 @@ class ViewTest(unittest.TestCase):
         out, ops = st.split_view(cand, new)
         self.assertEqual(ops, {"u7": [{"op": "ua_add", "ua": {
             "id": "UA-0041", "description": st.waiting_start_description("T-0007"), "kind": "auto",
-            "detector": "start_possible", "since": NOW}}]})
-        self.assertEqual(out["supervisor"]["last_ua_number"], 41)
-        self.assertEqual(out["archived"][0]["uid"], "u5")
+            "detector": "start_possible", "since": NOW}}],
+            "u5": [{"op": "ua_add", "ua": {"id": "UA-0042", "description": st.COMPLETION_ASK["en"], "kind": "auto",
+                                           "detector": "task_done", "since": NOW}}]})
+        self.assertEqual(out["supervisor"]["last_ua_number"], 42)
+        self.assertEqual(find(out["tasks"], "T-0005")["uid"], "u5")
         applied = dict(notes, u7=st.apply_note_ops(notes["u7"], ops["u7"], NOW, 2)[0])
         self.assertEqual(find(st.join_view(out, applied)["tasks"], "T-0007")["user_actions"][0]["id"], "UA-0041")
         # Paused or quarantined tasks start nothing, so they get no waiting-start action either.
@@ -4570,6 +4599,22 @@ class ArtifactDependencyTest(unittest.TestCase):
 
 
 
+def confirm_finished(test, env, uid, task_id):
+    """A finished task waits in progress / user with the completion ask; the user's done / user confirms it."""
+    test.assertEqual(st._pair(env.values(uid)), ("in progress", "user"))
+    asks = [u for u in st.parse_user_actions(note_section(env.text(uid), "アクション")) if u["detector"] == "task_done"]
+    test.assertEqual([(u["kind"], st.ua_open(u)) for u in asks], [("auto", True)])
+    env.put(uid, env.text(uid).replace('status: "in progress"', 'status: "done"'))
+    event = env.scan()["events"][0]
+    test.assertEqual((event["event"], event["row"]), ("confirm", 13))
+    cand = env.load()
+    find(cand["tasks"], task_id).update(note_seen=event["ack"], confirmed={"at": NOW})
+    code, out, err = env.commit(cand)
+    test.assertEqual(code, 0, err)
+    test.assertEqual(st._pair(env.values(uid)), ("done", "user"))
+    test.assertFalse(any(st.ua_open(u) for u in st.parse_user_actions(note_section(env.text(uid), "アクション"))))
+
+
 class Crash(BaseException):
     """Stands for the process being killed: nothing catches it."""
 
@@ -4817,8 +4862,10 @@ class NoteCommitTest(unittest.TestCase):
         find(cand["workers"], "w-0030")["observed_state"] = "archived"
         code, out, err = self.env.commit(cand)
         self.assertEqual(code, 0, err)
-        self.assertEqual(st._pair(self.env.values(U3)), ("done", "user"))
+        self.assertEqual(find(self.env.load()["tasks"], "T-0030")["uid"], U3)
+        confirm_finished(self, self.env, U3, "T-0030")
         self.assertEqual(self.env.load()["archived"][0]["uid"], U3)
+        self.assertNotIn("T-0030", [t["id"] for t in self.env.load()["tasks"]])
 
     def crash_ops(self):
         return {U1: [{"op": "log", "text": "検証しました"}, {"op": "ua_add", "ua": {"kind": "ask", "description": "push?"}}],
@@ -5540,7 +5587,7 @@ class VerifyFixesTest(unittest.TestCase):
         commit_ops = {U1: [{"op": "art_add", "items": [{"kind": "branch", "ref": "/repo/a#claude/license-x1"}, {"kind": "commit", "ref": "abc123",
                                                                                                                   "url": "https://github.com/org/repo-a/commit/abc123"}]}]}
         self.assertEqual(self.env.commit(cand, commit_ops)[0], 0)
-        self.assertEqual(st._pair(self.env.values(U1)), ("done", "user"))
+        confirm_finished(self, self.env, U1, "T-0020")
         state = self.env.load()
         state["archived"] = []  # the stub left the ARCHIVED_KEEP window
         self.env.state = state
@@ -5555,8 +5602,8 @@ class VerifyFixesTest(unittest.TestCase):
         self.env.put(U1, text.replace("## サブタスク", "### @agent README の別の typo も直して\n\nCHANGELOG も\n\n## サブタスク"))
         event = self.env.scan()["events"][0]
         self.assertEqual((event["event"], event["row"], event["live"], event["former"]), ("follow_up", 16, False, True))
-        self.assertEqual(([(u["id"], u["kind"], u["description"], u["body"]) for u in event["user_actions"]], event["last_artifact_number"]),
-                         ([(None, "req", "README の別の typo も直して", "CHANGELOG も")], 2))
+        self.assertEqual(([(u["id"], u["kind"], u["description"], u["body"]) for u in event["user_actions"] if u["kind"] == "req"],
+                          event["last_artifact_number"]), ([(None, "req", "README の別の typo も直して", "CHANGELOG も")], 2))
         cand = self.env.load()
         git_task(cand, "T-0030", "w-0030", intended="pending", observed="none")
         find(cand["workers"], "w-0030")["session_id"] = None

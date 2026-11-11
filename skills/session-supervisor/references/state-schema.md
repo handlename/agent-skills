@@ -350,7 +350,9 @@ Idempotency uses `message_ref`: if the latest message's id equals `last_report.m
 3. `waiting`: only unstarted workers (`observed_state == none`) remain.
 4. `done`: every worker is finished: observed `archived`, or `missing` with `intended_state: archived`. A worker with `replaced_by` is not counted as verified-archived by the final fallback of this rule: a task whose only remaining workers are replaced external-archive workers and replacements that gave up as `missing` derives `needs_user`, not `done`. A `missing` worker with `intended_state: archived`, no `replaced_by`, and an entry in its task's `findings` (a held investigation worker that vanished, SKILL.md 6.4) counts as verified-archived. Its `findings` entry carried into the stub is its last verified conclusion, or the previous generation's when it vanished during later work.
 
-Before deriving, `commit` maintains one automatic user action, the only one the supervisor never edits. When a non-git `cwd` is occupied in current and free in the candidate, every task with a `pending` / `none` non-git worker on that `cwd` gets `Waiting task T-xxxx can start now: send any message to the supervisor to start it.`, or `待機中のタスク T-xxxx を開始できます: supervisor に何かメッセージを送ると開始します。` when the task's request contains Japanese (`note_lang`); it is added once and matched by its `start_possible` detector or by either exact description. `commit` removes it from a task as soon as that task has no startable worker (non-git, `pending` / `none`, `cwd` free in the candidate): the worker was started or removed, or the `cwd` is busy again because another waiting task on it started. The supervisor never adds or removes this user action itself.
+Before deriving, `commit` maintains two automatic user actions, the only ones the supervisor never edits. The first is the waiting-task action. When a non-git `cwd` is occupied in current and free in the candidate, every task with a `pending` / `none` non-git worker on that `cwd` gets `Waiting task T-xxxx can start now: send any message to the supervisor to start it.`, or `待機中のタスク T-xxxx を開始できます: supervisor に何かメッセージを送ると開始します。` when the task's request contains Japanese (`note_lang`); it is added once and matched by its `start_possible` detector or by either exact description. `commit` removes it from a task as soon as that task has no startable worker (non-git, `pending` / `none`, `cwd` free in the candidate): the worker was started or removed, or the `cwd` is busy again because another waiting task on it started. The supervisor never adds or removes this user action itself.
+
+The second is the completion ask (`auto=task_done`), for tasks of a note (with `uid`; a v1 state archives a finished task at once). A task that is neither cancelled nor `confirmed` and would derive `done` without it gets `The work is done: check the results and set this note to done / user` (or `作業が完了しました。結果を確認して done / user にしてください`, `note_lang`), so it derives `needs_user`, stays in `tasks`, and its note shows `in progress` / `user`. `commit` removes it as soon as the task would no longer derive `done` without it (a follow-up worker was added, another user action opened, a cancel) or the task is `confirmed`; then a confirmed task derives `done` and is archived.
 
 A task derived as `done` is moved, **in the same commit**, to an `archived` stub, and its workers are removed from `workers`. `archived` is truncated to the 20 newest stubs. The stub keeps the task's `uid` and `last_artifact_number`.
 
@@ -368,8 +370,8 @@ A project with `confirmed`, no `close`, and no live task left gets `close = {at,
 | task `cancel` / project `close` (occupying workers or not) | `archived` (assignee kept) |
 | `user_hold` | not written |
 | project `done_proposed` | `in progress` / `user` (the user confirms with `done` / `user` or rejects with `in progress` / `agent`) |
-| task derived `done` | `done` / `user` (the user confirms the result, or follows up with `backlog` / `agent`) |
-| task derived `needs_user` (held read actions included) / project with open user actions | `in progress` / `user` |
+| task derived `done` (a v1 state; a task of a note derives `done` only when `confirmed` or cancelled) | `done` / `user` |
+| task derived `needs_user` (held read actions and the completion ask included) / project with open user actions | `in progress` / `user` |
 | otherwise | `in progress` / `agent` |
 
 When the written `status` becomes `done` or `archived`, `commit` also writes the properties of that line of `## Note props` in `<dir>/CLAUDE.md` (default: `completed_at` / `archived_at` with the time as `YYYY-MM-DD HH:mm:ss`); a `{now}` value is written only when the property is empty. When it becomes anything else, every property named in `## Note props` is reset (`para` to `Project`, `aliases` to `[]`, the others to null).
@@ -398,7 +400,7 @@ The `summary` prop is written only by the `summary` note op (SKILL.md section 4)
 | 10 | in progress/user | only `## アクション` changed (answers, requests) | open user actions | `none` |
 | 11 | in progress/user | in progress/agent, backlog/agent | | `resume` |
 | 12 | in progress/agent | backlog/agent | | `restore` |
-| 13 | done/agent; in progress/* with only held read actions open | done/user | task | `confirm` |
+| 13 | done/agent; in progress/* with only held read actions or the completion ask open | done/user | task | `confirm` |
 | 14 | done/agent, in progress/* | done/user | project | `confirm` |
 | 15 | in progress/*, paused | done/user, done/agent | task, except #13 | `cancel` |
 | 16 | done/agent, done/user; or any value but archived on a stub (a task that is not live) | backlog/agent; also in progress/agent on a stub | | `follow_up` |

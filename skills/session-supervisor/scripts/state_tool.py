@@ -85,7 +85,8 @@ ART_SECTION = "成果物"
 LOG_SECTION = "ログ"
 UA_KINDS = ("ask", "auto", "req")
 UA_DETECTORS = ("worker_report", "worker_started", "archived_observed", "approval_cleared", "pr_closed",
-                "review_state", "start_possible", "manager_report", "foreign_session_gone", "children_closed")
+                "review_state", "start_possible", "manager_report", "foreign_session_gone", "children_closed",
+                "task_done")
 UA_META_KEYS = ("rule", "url", "since")
 HOLD_REASONS = ("pause", "invalid")
 SEEN_KEYS = ("status", "assignee", "ua_sha", "art_sha")
@@ -1263,6 +1264,10 @@ WAITING_START = {"en": "Waiting task {task_id} can start now: send any message t
                  "ja": "待機中のタスク {task_id} を開始できます: supervisor に何かメッセージを送ると開始します。"}
 
 
+COMPLETION_ASK = {"en": "The work is done: check the results and set this note to done / user",
+                  "ja": "作業が完了しました。結果を確認して done / user にしてください"}
+
+
 def note_lang(text):
     """ja when the text has Japanese characters, otherwise en: the language of the user actions of a note (section 5)."""
     return "ja" if re.search(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]", text or "") else "en"
@@ -1310,6 +1315,27 @@ def _sync_waiting_start_actions(current, state, now):
             next_num += 1
 
 
+def _sync_completion_actions(state, now):
+    # Completion is the user's to confirm: a task of a note whose work is finished keeps an automatic completion ask
+    # (auto=task_done), which makes it needs_user (the note in progress / user) until the user confirms it (confirmed)
+    # or more work starts. A v1 state (tasks without uid) has no notes and archives a finished task at once.
+    next_num = _next_ua_number(state)
+    workers_by_id = {w["id"]: w for w in state["workers"]}
+    for task in state["tasks"]:
+        if not task.get("uid"):
+            continue
+        actions = task.setdefault("user_actions", [])
+        rest = [ua for ua in actions if ua.get("detector") != "task_done"]
+        finished = (not task.get("cancel") and not task.get("confirmed")
+                    and derive_status(dict(task, user_actions=rest), workers_by_id) == "done")
+        if not finished:
+            task["user_actions"] = rest
+        elif len(rest) == len(actions):
+            actions.append({"id": f"UA-{next_num:04d}", "description": COMPLETION_ASK[note_lang(task.get("request"))],
+                            "since": now, "detector": "task_done"})
+            next_num += 1
+
+
 def next_state(current, candidate, now):
     """Return the state to write for `candidate`, or raise StateError."""
     if not isinstance(candidate, dict) or candidate.get("rev") != current.get("rev"):
@@ -1328,6 +1354,7 @@ def next_state(current, candidate, now):
         raise StateError(errors)
 
     _sync_waiting_start_actions(current, state, now)
+    _sync_completion_actions(state, now)
     workers_by_id = {w["id"]: w for w in state["workers"]}
     for task in state["tasks"]:
         task["status"] = derive_status(task, workers_by_id)
@@ -4705,7 +4732,7 @@ def _scan_ctx(kind, item, view_item, workers, live, duplicate, items):
         active = any(_occupies(w) for w in workers if w.get("task_id") == item.get("id"))
     ctx = {"managed": True, "live": live, "kind": kind, "active": active, "duplicate": duplicate,
            "hold": (item.get("user_hold") or {}).get("reason"), "open_ua": bool((view_item or {}).get("user_actions")),
-           "held_only": bool(uas) and all(_read_action_worker(ua) for ua in uas),
+           "held_only": bool(uas) and all(_read_action_worker(ua) or ua.get("detector") == "task_done" for ua in uas),
            "done_proposed": bool(item.get("done_proposed"))}
     needs = artifact_needs(view_item, workers, items) if live and kind == "task" and view_item else []
     return dict(ctx, artifacts_ok=not needs), needs

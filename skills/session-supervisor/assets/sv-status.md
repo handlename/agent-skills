@@ -43,14 +43,17 @@ if (!tags.includes("supervised")) {
   const kind = tags.includes("project") ? "project" : "task";
   const managed = Boolean(value("task_id") || value("project_id"));
   const now = value("status") + "/" + value("assignee");
-  // state_tool never writes done/agent: a task held only for investigation results shows in progress/user with no
-  // open @user action, and a project the manager proposes as done shows in progress/user with its completion ask.
+  // state_tool never writes done/agent: a finished task shows in progress/user with only its completion ask
+  // (auto=task_done) open, a task held only for investigation results shows in progress/user with no open @user
+  // action, and a project the manager proposes as done shows in progress/user with its completion ask.
   // done/agent comes only from notes written by earlier versions. done/user with anything else open cancels the rest
   // of the task and marks it done (notes-scan row 15).
   const body = lines.slice(close + 1);
+  const open = body.map((line, i) => (/^### \[UA-\d+\] @user /.test(line) ? body[i + 1] || "" : null)).filter((m) => m !== null);
+  const waiting = open.every((meta) => /^<!-- sv auto=task_done /.test(meta));
   const when = {
-    held_only: managed && !body.some((line) => /^### \[UA-\d+\] @user /.test(line)),
-    unheld: managed && body.some((line) => /^### \[UA-\d+\] @user /.test(line)),
+    held_only: managed && waiting,
+    unheld: managed && !waiting,
     done_proposed: managed && body.some((line) => line.startsWith("### [UA-")
       && (line.includes("@user プロジェクトの完了を確認してください") || line.includes("@user Confirm that the project is done"))),
   };
