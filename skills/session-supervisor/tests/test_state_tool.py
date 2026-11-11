@@ -1463,6 +1463,18 @@ class ParseReportTest(unittest.TestCase):
         self.assertIn("task_id", st.parse_report(self.events, expect_task="T-9999")["error"])
         self.assertIn("worker_id", st.parse_report(self.events, expect_worker="w-9999")["error"])
 
+    def test_answered(self):
+        base = {"task_id": "T-1", "worker_id": "w-1", "status": "in_progress", "summary": "", "artifacts": {}, "blockers": [],
+                "next_action": ""}
+        ok = dict(base, answered=[{"question": "米国式と英国式のどちらですか", "answer": "米国式"}])
+        result = st.parse_report("```supervisor-report\n" + json.dumps(ok, ensure_ascii=False) + "\n```")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["report"]["answered"], ok["answered"])
+        for bad in ({"question": "q"}, [{"question": "q", "answer": 1}], [{"question": " ", "answer": "a"}], ["q"]):
+            with self.subTest(bad=bad):
+                result = st.parse_report("```supervisor-report\n" + json.dumps(dict(base, answered=bad)) + "\n```")
+                self.assertEqual(result["error"], "answered must be a list of {question, answer} with non-empty strings")
+
     def test_blocked_requires_blockers(self):
         report = {"task_id": "T-1", "worker_id": "w-1", "status": "blocked", "summary": "", "artifacts": {}, "blockers": [], "next_action": ""}
         result = st.parse_report("```supervisor-report\n" + json.dumps(report) + "\n```")
@@ -1547,12 +1559,12 @@ class SetupTest(unittest.TestCase):
     def hooks(self, target, event="SessionStart"):
         return json.loads((target / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"][event]
 
-    def test_creates_five_files_with_matcher(self):
+    def test_creates_six_files_with_matcher(self):
         target = self.root / "sup"
         proc = self.setup_dir(target)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.files(target), [".claude/settings.json", ".supervisor/state_tool.py", "CLAUDE.md", "state.json",
-                                              "vault/Supervisor.md"])
+                                              "vault/Supervisor.md", "vault/_templates/sv-status.md"])
         entries = self.hooks(target)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["matcher"], "startup|resume|clear|compact")
@@ -3404,7 +3416,7 @@ def note_section(text, title):
 
 
 def note_uas(text):
-    return {ua["id"]: ua for ua in st.parse_user_actions(note_section(text, "ユーザーアクション"))}
+    return {ua["id"]: ua for ua in st.parse_user_actions(note_section(text, "アクション"))}
 
 
 def apply_twice(test, text, ops, rev=13):
@@ -3480,7 +3492,7 @@ class FrontmatterTest(unittest.TestCase):
         sections = st.parse_sections(st.parse_frontmatter(note("task_obsidian"))[1])
         self.assertEqual(list(sections), ["概要", "サブタスク", "関連ノート", "関連資料", "ログ"])
         self.assertIn("## not a heading inside a fence", sections["サブタスク"])
-        self.assertIn("### メモ", note_section(note("task_managed"), "ユーザーアクション"))
+        self.assertIn("### メモ", note_section(note("task_managed"), "アクション"))
 
 
 class NoteTemplateTest(unittest.TestCase):
@@ -3542,92 +3554,272 @@ class NoteTemplateTest(unittest.TestCase):
             st.apply_note_ops(text, [{"op": "nope"}], NOTE_NOW, 13)
 
 
-class UserActionChecklistTest(unittest.TestCase):
-    def test_kinds_and_open_state(self):
-        uas = note_uas(note("task_managed"))
-        self.assertEqual(list(uas), ["UA-0160", "UA-0161", "UA-0162", "UA-0163", "UA-0164"])
-        self.assertEqual((uas["UA-0160"]["kind"], uas["UA-0160"]["answer_required"]), ("ask", True))
-        self.assertEqual((uas["UA-0161"]["kind"], uas["UA-0161"]["detector"]), ("auto", "pr_closed"))
-        self.assertEqual(uas["UA-0161"]["url"], "https://github.com/org/repo-a/pull/42")
-        self.assertEqual(uas["UA-0162"]["kind"], "slot")
-        self.assertEqual({k: st.ua_open(v) for k, v in uas.items()},
-                         {"UA-0160": True, "UA-0161": True, "UA-0162": False, "UA-0163": False, "UA-0164": True})
-        self.assertEqual({k: v["checked"] for k, v in uas.items()},
-                         {"UA-0160": False, "UA-0161": True, "UA-0162": False, "UA-0163": True, "UA-0164": False})
-        self.assertEqual((uas["UA-0163"]["done"], uas["UA-0163"]["done_rev"]), ("2026-11-09T22:40:00+09:00", 12))
-        self.assertEqual(uas["UA-0164"]["answer"], "")
+def section_of(lines):
+    return "\n".join(["## アクション", ""] + lines + ["", "## ログ", ""])
 
-    def test_sub_items_are_read_verbatim(self):
-        uas = note_uas(note("task_managed"))
-        self.assertEqual(uas["UA-0160"]["answer"], "- push してください\n\n    - main への PR も作ってください")
+
+def actions_note(lines):
+    return f"---\nuid: \"u\"\ntags: [\"supervised\"]\n---\n{section_of(lines)}"
+
+
+TRICKY = "見出しのような行:\n## 二段\n### 三段\n#### 回答\n> [!done]- 完了 (1)\n\n  先頭の空白"
+
+
+class ActionSectionTest(unittest.TestCase):
+    def test_kinds_and_open_state(self):
+        uas = st.parse_user_actions(note_section(note("task_managed"), "アクション"))
+        self.assertEqual([u["id"] for u in uas], ["UA-0160", "UA-0161", "UA-0164", None, "UA-0163"])
+        by_id = {u["id"]: u for u in uas}
+        self.assertEqual((by_id["UA-0160"]["kind"], by_id["UA-0160"]["answer_required"]), ("ask", True))
+        self.assertEqual((by_id["UA-0161"]["kind"], by_id["UA-0161"]["detector"]), ("auto", "pr_closed"))
+        self.assertEqual(by_id["UA-0161"]["url"], "https://github.com/org/repo-a/pull/42")
+        self.assertEqual((by_id[None]["kind"], by_id[None]["assignee"], by_id[None]["description"]), ("req", "agent", "CHANGELOG も直す"))
+        self.assertEqual({k: st.ua_open(v) for k, v in by_id.items()},
+                         {"UA-0160": True, "UA-0161": True, "UA-0164": True, None: True, "UA-0163": False})
+        self.assertEqual((by_id["UA-0163"]["done"], by_id["UA-0163"]["done_rev"], by_id["UA-0163"]["answer"]),
+                         ("2026-11-09T22:40:00+09:00", 12, "待ちます"))
+        self.assertEqual(by_id["UA-0160"]["body"], "typo を 3 か所直した。")
+        self.assertEqual(by_id["UA-0160"]["answer"], "push してください\n\nmain への PR も作ってください")
+        self.assertEqual((by_id["UA-0161"]["body"], by_id["UA-0161"]["answer"]), ("[repo-a#42](https://github.com/org/repo-a/pull/42)", ""))
+        self.assertEqual((by_id["UA-0164"]["body"], by_id["UA-0164"]["answer"]), ("", ""))
+
+    def test_sample_note(self):
+        uas = st.parse_user_actions(note_section(note("task_sample"), "アクション"))
+        self.assertEqual([(u["id"], u["assignee"], u["kind"], bool(u["done"])) for u in uas], [
+            ("UA-0240", "user", "ask", False), ("UA-0241", "user", "auto", False), ("AA-0242", "agent", "req", False),
+            (None, "agent", "req", False), ("UA-0238", "user", "ask", True), ("UA-0239", "user", "auto", True)])
+        by_id = {u["id"]: u for u in uas}
+        self.assertEqual(by_id["UA-0241"]["body"], "「Compatibilty」の表記は表の見出しにも使われています。\n見出しも含めてすべて「Compatibility」に直してよいですか。\n\n"
+                         "(1) すべて直す (2) 本文だけ直す\n\n[w-0130 の報告](https://github.com/handlename/agent-skills/blob/main/README.md)")
+        self.assertIn("## のような行が原文にあっても", by_id["AA-0242"]["body"])
+        self.assertEqual([by_id[i]["answer"] for i in ("UA-0240", "UA-0241", "AA-0242")], ["", "", ""])
+        self.assertEqual((by_id["UA-0238"]["body"], by_id["UA-0238"]["answer"]),
+                         ("どのリポジトリ (owner/repo) の README ですか。", "handlename/agent-skills"))
+        self.assertEqual((by_id["UA-0239"]["answer"], by_id["UA-0239"]["done_rev"]), ("米国式(w-0130 のセッションで回答)", 905))
+        self.assertEqual(by_id[None]["description"], "docs/ 配下の Markdown も同じ typo がないか見る")
 
     def test_render_round_trip(self):
-        for ua in note_uas(note("task_managed")).values():
-            line = st.render_ua_line(ua)
-            self.assertEqual(st.parse_user_actions(line)[0], dict(ua, answer=""))
-        self.assertIn(st.render_ua_line(note_uas(note("task_managed"))["UA-0163"]),
-                      note_section(note("task_managed"), "ユーザーアクション"))
+        for ua in st.parse_user_actions(note_section(note("task_sample"), "アクション")):
+            if ua["id"] is None:
+                continue
+            with self.subTest(ua=ua["id"]):
+                lines = ["> [!done]- 完了 (1)"] + st.render_ua_done(ua) if ua["done"] else st.render_ua_block(ua)
+                text = "\n".join(lines)
+                self.assertEqual(st.parse_user_actions(text), [ua])
+        self.assertEqual(st.render_ua_block(note_uas(note("task_sample"))["UA-0240"])[:3], [
+            "### [UA-0240] @user Decide whether to push branch `claude/t0999-readme-typo-1a2b3c` of `agent-skills` (and whether to open a PR)",
+            "<!-- sv ask answer since=2026-11-11T22:40:00+09:00 -->", ""])
+        self.assertIn("\n".join(st.render_ua_done(note_uas(note("task_sample"))["UA-0238"])), note("task_sample"))
 
-    def test_ua_add_is_idempotent_by_block_id_and_keeps_the_list_together(self):
+    def test_layout_rules(self):
+        lines = [
+            "### [UA-0001] @user メタデータの無い番号つき見出し",
+            "",
+            "### [UA-0002] @user 空行なし",
+            "<!-- sv ask since=s -->",
+            "本文",
+            "#### 回答",
+            "答え",
+            "### [UA-0003] @user 空行あり",
+            "<!-- sv ask since=s -->",
+            "",
+            "本文",
+            "",
+            "#### 回答",
+            "",
+            "答え",
+            "",
+            "### @user 番号なしの user は拾わない",
+            "### 自由な見出し",
+            "ユーザーのメモ",
+            "### [UA-0004] @user フェンス",
+            "<!-- sv auto=worker_started since=s -->",
+            "```",
+            "### [UA-0009] @user フェンスの中",
+            "#### 回答",
+            "```",
+            "### @agent 依頼",
+            "",
+            "ユーザーの文",
+        ]
+        uas = st.parse_user_actions("\n".join(lines))
+        self.assertEqual([(u["id"], u["description"]) for u in uas],
+                         [("UA-0002", "空行なし"), ("UA-0003", "空行あり"), ("UA-0004", "フェンス"), (None, "依頼")])
+        self.assertEqual([(u["body"], u["answer"]) for u in uas[:2]], [("本文", "答え"), ("本文", "答え")])
+        self.assertEqual((uas[2]["body"], uas[2]["answer"]), ("```\n### [UA-0009] @user フェンスの中\n#### 回答\n```", ""))
+        self.assertEqual(uas[3]["body"], "ユーザーの文")
+
+    def test_an_unclosed_comment_in_outside_text_hides_nothing(self):
         text = note("task_managed")
-        op = {"op": "ua_add", "ua": {"id": "UA-0165", "kind": "auto", "detector": "worker_report",
-                                     "description": "Answer w-0120 (which file?) in the app: which file?"}}
+        body = "README の `<!--` が閉じていません\n次の行"
+        out, ids, problems = apply_twice(self, text, [{"op": "ua_add", "ua": {"id": "UA-0165", "kind": "ask", "description": "q", "body": body}}])
+        sections = st.parse_sections(st.parse_frontmatter(out)[1])
+        self.assertEqual(list(sections), list(st.parse_sections(st.parse_frontmatter(text)[1])))
+        self.assertEqual(st.parse_artifacts(sections["成果物"])[0], st.parse_artifacts(note_section(text, "成果物"))[0])
+        self.assertEqual((note_uas(out)["UA-0165"]["body"], len(st.parse_user_actions(sections["アクション"]))), (body, 6))
+        create = {"op": "create", "uid": "u", "title": "t", "kind": "task", "status": "in progress", "assignee": "agent",
+                  "request": "整形した依頼", "original": "原文 <!-- 閉じない\n続き"}
+        created, _, problems = st.apply_note_ops("", [create, {"op": "ua_add", "ua": {"id": "UA-0001", "kind": "ask", "description": "q"}},
+                                                      {"op": "log", "text": "受領"}], NOTE_NOW, 1)
+        self.assertEqual(problems, [])
+        self.assertEqual(list(st.parse_sections(st.parse_frontmatter(created)[1])), list(st.NOTE_SECTIONS))
+        self.assertEqual(st._request_text(note_section(created, "概要")), "原文 <!-- 閉じない\n続き")
+        self.assertEqual(list(note_uas(created)), ["UA-0001"])
+
+    def test_a_quoted_callout_heading_is_not_the_callout(self):
+        text = note("task_sample")
+        op = {"op": "ua_add", "ua": {"id": "UA-0300", "kind": "ask", "description": "q", "body": "[!done]- 完了 (1)\n書式の説明"}}
+        out, _, _ = apply_twice(self, text, [op])
+        uas = note_uas(out)
+        self.assertEqual(uas["UA-0300"]["body"], "[!done]- 完了 (1)\n書式の説明")
+        self.assertTrue(uas["UA-0238"]["done"] and uas["UA-0239"]["done"])
+        acked = st.apply_note_ops(out, [{"op": "ua_ack", "id": "UA-0300"}], NOTE_NOW, 14)[0]
+        section = note_section(acked, "アクション")
+        self.assertIn("> [!done]- 完了 (3)\n", section)
+        self.assertNotIn("### [UA-0300]", section)
+        self.assertTrue(section.rstrip().endswith(f"> - [UA-0300] @user q <!-- sv ask since={NOTE_NOW} done={NOTE_NOW} r14 -->\n"
+                                                  ">     > [!done]- 完了 (1)\n>     > 書式の説明\n>\n>     #### 回答"))
+        self.assertEqual(note_uas(acked)["UA-0300"]["body"], "[!done]- 完了 (1)\n書式の説明")
+
+    def test_a_request_below_the_callout_is_read_and_adopted(self):
+        text = note("task_sample").replace("\n## サブタスク", "\n### @agent 最後に足した依頼\n\n本文\n\n## サブタスク")
+        uas = st.parse_user_actions(note_section(text, "アクション"))
+        self.assertIn((None, "最後に足した依頼", "本文"), [(u["id"], u["description"], u["body"]) for u in uas])
+        out, ids, problems = apply_twice(self, text, [{"op": "ua_adopt", "ua": {"id": "AA-0250", "description": "最後に足した依頼"}}])
+        self.assertEqual((ids, problems), (["aa-0250"], []))
+        acked = st.apply_note_ops(out, [{"op": "ua_ack", "id": "AA-0250"}], NOTE_NOW, 14)[0]
+        self.assertEqual((note_uas(acked)["AA-0250"]["done"], note_uas(acked)["AA-0250"]["body"]), (NOTE_NOW, "本文"))
+        self.assertIn("> [!done]- 完了 (3)\n", acked)
+
+    def test_quoted_text_keeps_the_section_layout(self):
+        text = note("task_managed")
+        ops = [{"op": "ua_add", "ua": {"id": "UA-0165", "kind": "auto", "detector": "worker_report", "description": "Answer w-0120",
+                                       "body": TRICKY}},
+               {"op": "ua_answer", "id": "UA-0165", "text": TRICKY}, {"op": "ua_answer", "id": "UA-0164", "text": TRICKY}]
+        out, ids, problems = apply_twice(self, text, ops)
+        self.assertEqual((ids, problems), (["ua-0165"], []))
+        sections = st.parse_sections(st.parse_frontmatter(out)[1])
+        self.assertEqual(list(sections), list(st.parse_sections(st.parse_frontmatter(text)[1])))
+        uas = note_uas(out)
+        self.assertEqual(len(st.parse_user_actions(sections["アクション"])), 6)
+        self.assertEqual((uas["UA-0165"]["body"], uas["UA-0165"]["answer"], uas["UA-0164"]["answer"]), (TRICKY, TRICKY, TRICKY))
+        acked = st.apply_note_ops(out, [{"op": "ua_ack", "id": "UA-0165"}], NOTE_NOW, 14)[0]
+        self.assertEqual((note_uas(acked)["UA-0165"]["body"], note_uas(acked)["UA-0165"]["answer"]), (TRICKY, TRICKY))
+        self.assertEqual(len(st.parse_user_actions(note_section(acked, "アクション"))), 6)
+
+    def test_ua_add_goes_before_the_callout_once(self):
+        text = note("task_managed")
+        op = {"op": "ua_add", "ua": {"id": "UA-0165", "kind": "auto", "detector": "worker_report", "description": "Answer w-0120 in Herdr",
+                                     "body": "which file?\n\n[w-0120](https://example.com)"}}
         out, ids, _ = apply_twice(self, text, [op])
         self.assertEqual(ids, ["ua-0165"])
-        section = note_section(out, "ユーザーアクション")
-        self.assertLess(section.index("^ua-0165"), section.index("自分用のチェック"))
-        self.assertEqual(note_uas(out)["UA-0165"]["since"], NOTE_NOW)
-        self.assertEqual(out.replace(st.render_ua_line(note_uas(out)["UA-0165"]) + "\n", ""), text)
+        block = "\n".join(st.render_ua_block(note_uas(out)["UA-0165"]))
+        self.assertEqual(block, "### [UA-0165] @user Answer w-0120 in Herdr\n<!-- sv auto=worker_report since=2026-11-10T09:00:00+09:00 -->\n\n"
+                                "> which file?\n>\n> [w-0120](https://example.com)\n\n#### 回答")
+        self.assertIn("- [ ] 自分用のチェック(メタデータなし)\n\n" + block + "\n\n> [!done]- 完了 (1)\n", out)
+        self.assertEqual(out.replace(block + "\n\n", ""), text)
         for bad in ({"id": "UA-0166", "kind": "auto", "detector": "nope", "description": "x"},
-                    {"id": "UA-0166", "kind": "ask", "description": "a\nb"}, {"id": "166", "kind": "slot", "description": "x"}):
-            with self.assertRaises(st.StateError):
+                    {"id": "UA-0166", "kind": "ask", "description": "a\nb"}, {"id": "166", "kind": "ask", "description": "x"},
+                    {"id": "UA-0166", "kind": "slot", "description": "x"}, {"id": "UA-0166", "kind": "ask", "description": "x", "body": 1},
+                    {"id": "UA-0166", "kind": "req", "description": "x"}, {"id": "AA-0166", "kind": "ask", "description": "x"},
+                    {"id": "AA-0166", "kind": "req", "detector": "worker_report", "description": "x"}):
+            with self.subTest(bad=bad), self.assertRaises(st.StateError):
                 st.apply_note_ops(text, [{"op": "ua_add", "ua": bad}], NOTE_NOW, 13)
+        # A number already used by the other prefix is the same item.
+        self.assertEqual(st.apply_note_ops(text, [{"op": "ua_add", "ua": {"id": "AA-0160", "kind": "req", "description": "x"}}], NOTE_NOW, 13)[0], text)
 
     def test_ua_add_creates_the_section_in_template_order(self):
         text = note("task_obsidian")
-        out, _, _ = apply_twice(self, text, [{"op": "ua_add", "ua": {"id": "UA-0001", "kind": "slot", "description": "再開時の指示"}}])
-        self.assertEqual(list(st.parse_sections(st.parse_frontmatter(out)[1]))[:3], ["概要", "ユーザーアクション", "サブタスク"])
+        out, _, _ = apply_twice(self, text, [{"op": "ua_add", "ua": {"id": "UA-0001", "kind": "ask", "description": "どちらにしますか"}}])
+        self.assertEqual(list(st.parse_sections(st.parse_frontmatter(out)[1]))[:3], ["概要", "アクション", "サブタスク"])
         self.assertEqual(list(note_uas(out)), ["UA-0001"])
-        self.assertIn("- [x] M3x10 (4pcs)\n\n## ユーザーアクション\n\n- [ ] UA-0001 ", out)
+        self.assertIn("- [x] M3x10 (4pcs)\n\n## アクション\n\n### [UA-0001] @user どちらにしますか\n", out)
 
-    def test_check_and_ack_leave_rev_marks(self):
+    def test_ack_moves_the_item_into_the_callout(self):
         text = note("task_managed")
-        out, _, problems = apply_twice(self, text, [{"op": "ua_check", "id": "UA-0164"}, {"op": "ua_ack", "id": "UA-0164"}])
+        out, _, problems = apply_twice(self, text, [{"op": "ua_ack", "id": "UA-0160"}])
         self.assertEqual(problems, [])
-        ua = note_uas(out)["UA-0164"]
-        self.assertEqual((ua["checked"], ua["chk_rev"], ua["done"], ua["done_rev"]), (True, 13, NOTE_NOW, 13))
+        ua = note_uas(out)["UA-0160"]
+        self.assertEqual((ua["done"], ua["done_rev"], ua["body"], ua["answer"]),
+                         (NOTE_NOW, 13, "typo を 3 か所直した。", "push してください\n\nmain への PR も作ってください"))
         self.assertFalse(st.ua_open(ua))
-        self.assertEqual(out.replace("- [x] UA-0164", "- [/] UA-0164").replace(f" chk=r13 done={NOTE_NOW} r13", ""), text)
-
-    def test_a_box_the_user_unchecked_is_not_checked_again(self):
-        ops = [{"op": "ua_check", "id": "UA-0160"}]
-        out = st.apply_note_ops(note("task_managed"), ops, NOTE_NOW, 13)[0]
-        unchecked = out.replace("- [x] UA-0160", "- [ ] UA-0160")
-        self.assertEqual(st.apply_note_ops(unchecked, ops, NOTE_NOW, 13)[0], unchecked)
-        self.assertTrue(note_uas(st.apply_note_ops(unchecked, ops, NOTE_NOW, 14)[0])["UA-0160"]["checked"])
-
-    def test_ack_keeps_an_existing_done_mark(self):
-        text = note("task_managed")
+        section = note_section(out, "アクション")
+        self.assertTrue(section.startswith("\n### [UA-0161] "))
+        self.assertIn("> [!done]- 完了 (2)\n", section)
+        self.assertTrue(section.rstrip().endswith(
+            "> - [UA-0160] @user Decide whether to push branch `claude/t0120-fix-typo` of `repo-a` "
+            f"<!-- sv ask answer since=2026-11-09T22:30:00+09:00 done={NOTE_NOW} r13 -->\n>     > typo を 3 か所直した。\n>\n"
+            ">     #### 回答\n>     push してください\n>\n>     main への PR も作ってください"))
+        self.assertTrue(st.journal_reflected(out, {"new_ids": []}, 13))
         self.assertEqual(st.apply_note_ops(text, [{"op": "ua_ack", "id": "UA-0163"}], NOTE_NOW, 13)[0], text)
 
-    def test_answer_appends_after_the_users_sub_items(self):
-        text = note("task_managed")
-        out, _, _ = apply_twice(self, text, [{"op": "ua_answer", "id": "UA-0160", "text": "やはり push しないでください\n理由は後で"}])
-        self.assertEqual(note_uas(out)["UA-0160"]["answer"],
-                         "- push してください\n\n    - main への PR も作ってください\n- やはり push しないでください\n  理由は後で")
-        self.assertEqual(out.replace("    - やはり push しないでください\n      理由は後で\n", ""), text)
+    def test_ack_creates_the_callout(self):
+        text = actions_note(["### [UA-0001] @user q", "<!-- sv ask since=s -->", "", "### メモ", "", "自由な文"])
+        out, _, _ = apply_twice(self, text, [{"op": "ua_ack", "id": "UA-0001"}])
+        self.assertEqual(out, actions_note(["### メモ", "", "自由な文", "", "> [!done]- 完了 (1)",
+                                            f"> - [UA-0001] @user q <!-- sv ask since=s done={NOTE_NOW} r13 -->"]))
 
-    def test_missing_items_are_problems(self):
+    def test_answer_writes_into_open_and_done_items(self):
         text = note("task_managed")
-        for name in ("ua_check", "ua_ack", "ua_answer"):
+        out, _, _ = apply_twice(self, text, [{"op": "ua_answer", "id": "UA-0164", "text": "~/notes"},
+                                             {"op": "ua_answer", "id": "UA-0161", "text": "マージ済み"}])
+        self.assertIn("#### 回答\n~/notes\n\n\n### @agent", out)
+        self.assertIn("[repo-a#42](https://github.com/org/repo-a/pull/42)\n\n#### 回答\nマージ済み\n\n### [UA-0164]", out)
+        self.assertEqual((note_uas(out)["UA-0164"]["answer"], note_uas(out)["UA-0161"]["answer"]), ("~/notes", "マージ済み"))
+        # ua_ack before ua_answer keeps the answer as well.
+        acked = st.apply_note_ops(text, [{"op": "ua_ack", "id": "UA-0164"}, {"op": "ua_answer", "id": "UA-0164", "text": "~/notes"}], NOTE_NOW, 13)[0]
+        self.assertEqual(note_uas(acked)["UA-0164"]["answer"], "~/notes")
+        self.assertIn("r13 -->\n>     #### 回答\n>     ~/notes\n", acked)
+
+    def test_answer_appends_once(self):
+        cases = (
+            ("plain", ["### [UA-0001] @user q", "<!-- sv ask since=s -->", "", "#### 回答", "A", "", "### メモ"], "B(w-0001 のセッションで回答)",
+             "A\n\nB(w-0001 のセッションで回答)"),
+            ("quoted", ["### [UA-0001] @user q", "<!-- sv ask since=s -->", "", "#### 回答", "> A1", "> A2"], "B",
+             "A1\nA2\n\nB"),
+            ("callout", ["> [!done]- 完了 (1)", "> - [UA-0001] @user q <!-- sv ask since=s done=d r1 -->", ">     #### 回答",
+                         ">     A"], "B1\nB2", "A\n\nB1\nB2"),
+        )
+        for name, lines, answer, expected in cases:
+            with self.subTest(name):
+                out, _, _ = apply_twice(self, actions_note(lines), [{"op": "ua_answer", "id": "UA-0001", "text": answer}])
+                self.assertEqual(note_uas(out)["UA-0001"]["answer"], expected)
+        out = st.apply_note_ops(actions_note(cases[2][1]), [{"op": "ua_answer", "id": "UA-0001", "text": "B1\nB2"}], NOTE_NOW, 13)[0]
+        self.assertIn(">     #### 回答\n>     A\n>\n>     > B1\n>     > B2\n", out)
+
+    def test_adopt_numbers_the_request_with_the_same_heading(self):
+        lines = ["### @agent CHANGELOG も直す", "本文 1", "", "### @agent docs も見る", "", "本文 2"]
+        text = actions_note(lines)
+        op = {"op": "ua_adopt", "ua": {"id": "AA-0010", "description": "docs も見る"}}
+        out, ids, problems = apply_twice(self, text, [op])
+        self.assertEqual((ids, problems), (["aa-0010"], []))
+        self.assertEqual(out, actions_note(lines[:3] + ["### [AA-0010] @agent docs も見る", f"<!-- sv req since={NOTE_NOW} -->", "", "本文 2"]))
+        uas = st.parse_user_actions(note_section(out, "アクション"))
+        self.assertEqual([(u["id"], u["body"]) for u in uas], [(None, "本文 1"), ("AA-0010", "本文 2")])
+        self.assertTrue(st.journal_reflected(out, {"new_ids": ids}, 99))
+        self.assertFalse(st.journal_reflected(text, {"new_ids": ids}, 99))
+        adopted = st.apply_note_ops(text, [op, {"op": "ua_adopt", "ua": {"id": "AA-0011", "description": "CHANGELOG も直す"}}], NOTE_NOW, 13)[0]
+        self.assertEqual([u["id"] for u in st.parse_user_actions(note_section(adopted, "アクション"))], ["AA-0011", "AA-0010"])
+        self.assertIn("### [AA-0011] @agent CHANGELOG も直す\n<!-- sv req since=2026-11-10T09:00:00+09:00 -->\n\n本文 1", adopted)
+        missing = st.apply_note_ops(text, [{"op": "ua_adopt", "ua": {"id": "AA-0012", "description": "直した見出し"}}], NOTE_NOW, 13)
+        self.assertEqual(missing[0], text)
+        self.assertEqual(missing[2], ["ua_adopt AA-0012: no unnumbered @agent request '直した見出し'"])
+        with self.assertRaises(st.StateError):
+            st.apply_note_ops(text, [{"op": "ua_adopt", "ua": {"id": "UA-0012", "description": "docs も見る"}}], NOTE_NOW, 13)
+
+    def test_ua_check_is_gone_and_missing_items_are_problems(self):
+        text = note("task_managed")
+        with self.assertRaises(st.StateError):
+            st.apply_note_ops(text, [{"op": "ua_check", "id": "UA-0160"}], NOTE_NOW, 13)
+        for name in ("ua_ack", "ua_answer"):
             out, _, problems = st.apply_note_ops(text, [{"op": name, "id": "UA-0999", "text": "x"}], NOTE_NOW, 13)
             self.assertEqual(out, text)
             self.assertEqual(problems, [f"{name} UA-0999: item not found"])
 
     def test_text_outside_managed_sections_is_kept(self):
         text = note("task_managed")
-        ops = [{"op": "ua_add", "ua": {"id": "UA-0165", "kind": "ask", "answer": True, "description": "q"}},
-               {"op": "ua_check", "id": "UA-0161"}, {"op": "ua_ack", "id": "UA-0161"}, {"op": "log", "text": "済"},
+        ops = [{"op": "ua_add", "ua": {"id": "UA-0165", "kind": "ask", "answer_required": True, "description": "q"}},
+               {"op": "ua_ack", "id": "UA-0161"}, {"op": "log", "text": "済"},
                {"op": "art_add", "items": [{"n": 4, "kind": "ci", "url": "https://ci.example.com/4"}]}]
         out = st.apply_note_ops(text, ops, NOTE_NOW, 13)[0]
         before, after = st.parse_frontmatter(text), st.parse_frontmatter(out)
@@ -3635,8 +3827,45 @@ class UserActionChecklistTest(unittest.TestCase):
         self.assertTrue(after[1].startswith("ユーザーが見出しの外に書いたメモ。\n\n## 概要\n"))
         for title in ("概要", "サブタスク", "関連ノート", "関連資料"):
             self.assertEqual(st.parse_sections(after[1])[title], st.parse_sections(before[1])[title])
-        self.assertIn("### メモ\n\nユーザーの小見出し。", out)
+        self.assertIn("### メモ\n\nユーザーの小見出し。\n\n- [ ] 自分用のチェック(メタデータなし)\n", out)
         self.assertEqual(note_uas(out)["UA-0160"]["answer"], note_uas(text)["UA-0160"]["answer"])
+
+
+class ActionNumberTest(unittest.TestCase):
+    def test_number_note_ops_uses_one_counter_for_both_prefixes(self):
+        ops = {"u": [{"op": "ua_add", "ua": {"kind": "ask", "description": "q"}},
+                     {"op": "ua_add", "ua": {"kind": "req", "description": "r", "body": "b"}},
+                     {"op": "ua_adopt", "ua": {"description": "d"}},
+                     {"op": "ua_add", "ua": {"kind": "auto", "detector": "worker_report", "description": "a"}}]}
+        out = st.number_note_ops(ops, 7, {})
+        self.assertEqual([op["ua"]["id"] for op in out["u"]], ["UA-0007", "AA-0008", "AA-0009", "UA-0010"])
+        self.assertNotIn("id", ops["u"][0]["ua"])
+
+    def test_view_and_counter(self):
+        state, notes = v2_state()
+        task = v2_git_task(state, notes, "T-0020", "w-0020", "u1", uas=[ua(1, "q", answer_required=True), ua(2, "r", kind="req")])
+        notes["u1"] = st.apply_note_ops(notes["u1"], [{"op": "ua_add", "ua": ua(5, "s", kind="req")}], NOTE_NOW, 2)[0]
+        view = st.join_view(state, notes)
+        vt = find(view["tasks"], "T-0020")
+        self.assertEqual([u["id"] for u in vt["user_actions"]], ["UA-0001"])
+        self.assertEqual([u["id"] for u in vt["agent_actions"]], ["AA-0002", "AA-0005"])
+        self.assertEqual((view["supervisor"]["last_ua_number"], st._next_ua_number(view)), (5, 6))
+        self.assertEqual(st.validate(view), [])
+        self.assertNotIn("AA-", st.digest(view, "/Users/example/supervisor/state.json"))
+        self.assertIn("UA-0001", st.digest(view, "/Users/example/supervisor/state.json"))
+        exported = find(st.export_v1(state, notes)["tasks"], "T-0020")
+        self.assertNotIn("agent_actions", exported)
+        # Requests never count as waiting for the user.
+        only_req = copy.deepcopy(state)
+        notes2 = dict(notes)
+        notes2["u1"] = st.apply_note_ops(notes["u1"], [{"op": "ua_ack", "id": "UA-0001"}], NOTE_NOW, 3)[0]
+        vt2 = find(st.join_view(only_req, notes2)["tasks"], "T-0020")
+        self.assertEqual((vt2["user_actions"], vt2["status"] == "needs_user"), ([], False))
+        unnumbered = st.apply_note_ops(notes["u1"], [], NOTE_NOW, 3)[0].replace("## サブタスク", "### @agent 番号なし\n\n## サブタスク")
+        self.assertEqual([u["id"] for u in find(st.join_view(state, dict(notes, u1=unnumbered))["tasks"], "T-0020")["agent_actions"]],
+                         ["AA-0002", "AA-0005"])
+        self.assertTrue(st.journal_reflected(notes["u1"], {"new_ids": ["aa-0005"]}, 99))
+        self.assertIs(task["uid"], "u1")
 
 
 BRANCH_REF = "/Users/example/src/github.com/org/repo-a#claude/t0120-fix-typo"
@@ -3811,7 +4040,7 @@ def v2_git_task(state, notes, task_id, worker_id, uid, uas=(), groups=(), **kw):
 
 
 def ua(num, description, kind="ask", **extra):
-    return dict({"id": f"UA-{num:04d}", "kind": kind, "description": description}, **extra)
+    return dict({"id": f"{'AA' if kind == 'req' else 'UA'}-{num:04d}", "kind": kind, "description": description}, **extra)
 
 
 def drop_line(text, block):
@@ -3822,7 +4051,7 @@ class ViewTest(unittest.TestCase):
     def setUp(self):
         self.state, self.notes = v2_state()
         self.task = v2_git_task(self.state, self.notes, "T-0020", "w-0020", "20261110_090000", uas=[
-            ua(1, "where should this run?", answer_required=True), ua(2, "再開時の指示", kind="slot"),
+            ua(1, "where should this run?", answer_required=True), ua(2, "CHANGELOG も直す", kind="req"),
             ua(3, "Review repo-a#42", kind="auto", detector="pr_closed", rule="review-pr", url="https://github.com/org/repo-a/pull/42"),
         ], groups=[[dict(BRANCH_A, n=1), dict(COMMIT_A, n=2)], [{"n": 3, "kind": "pr", "url": "https://github.com/org/repo-a/pull/42"}]])
 
@@ -3833,6 +4062,7 @@ class ViewTest(unittest.TestCase):
         task = find(view["tasks"], "T-0020")
         self.assertEqual((task["title"], task["request"]), ("task 20261110_090000", "fix the LICENSE year"))
         self.assertEqual([ua["id"] for ua in task["user_actions"]], ["UA-0001", "UA-0003"])
+        self.assertEqual(task["agent_actions"], [{"id": "AA-0002", "description": "CHANGELOG も直す", "since": NOTE_NOW}])
         self.assertTrue(task["user_actions"][0]["needs_answer"])
         self.assertEqual(task["user_actions"][1]["follow_up"],
                          {"rule": "review-pr", "url": "https://github.com/org/repo-a/pull/42", "done": "pr_closed"})
@@ -3865,7 +4095,10 @@ class ViewTest(unittest.TestCase):
         find(cand["workers"], "w-0020").update(intended_state="archived", observed_state="archived")
         new = st.next_state(view, cand, NOW)
         state, ops = st.split_view(cand, new)
-        self.assertEqual(ops, {"20261110_090000": [{"op": "ua_ack", "id": "UA-0001"}, {"op": "ua_ack", "id": "UA-0003"}]})
+        self.assertEqual(ops, {"20261110_090000": [{"op": "ua_ack", "id": "UA-0001"}, {"op": "ua_ack", "id": "UA-0003"},
+                                                   {"op": "ua_ack", "id": "AA-0002"}]})
+        acked = st.apply_note_ops(self.notes["20261110_090000"], ops["20261110_090000"], NOTE_NOW, 2)[0]
+        self.assertEqual(find(st.join_view(dict(self.state), {"20261110_090000": acked})["tasks"], "T-0020")["agent_actions"], [])
         self.assertEqual(state["archived"][0]["uid"], "20261110_090000")
         self.assertNotIn("title", state["archived"][0])
         self.assertEqual(st._storage_errors(state, self.notes), [])
@@ -4130,6 +4363,15 @@ class UserTransitionTest(unittest.TestCase):
         self.assertIsNone(st.user_transition(None, IPA, {})["ack"])
         self.assertFalse(st.user_transition(DA, IPA, PROJ)["pause"])
         self.assertTrue(st.user_transition(DA, IPU, PROJ)["pause"])
+
+    def test_a_stub_handed_to_the_agent_is_a_follow_up(self):
+        for prev in (PU, IPU, IPA, DA, DU):
+            for cur in (IPA, BA):
+                with self.subTest(prev=prev, cur=cur):
+                    got = st.user_transition(prev, cur, STUB)
+                    self.assertEqual((got["event"], got["row"]), ("none", 0) if prev == cur else ("follow_up", 16))
+        self.assertEqual(st.user_transition(IPU, IPA, LIVE)["row"], 11)
+        self.assertEqual(st.user_transition(PU, IPA, PAUSED)["row"], 8)
 
     def test_fixing_an_invalid_value_clears_the_hold(self):
         ctx = dict(LIVE, hold="invalid", active=True)
@@ -4405,7 +4647,7 @@ class NoteCommitTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(out["notes_deferred"], [st._new_note_path(U1)])
         self.assertEqual(st._pair(self.env.values(U1)), ("pending", "user"))
-        self.assertIn("UA-0001 どちらにしますか", self.env.text(U1))
+        self.assertIn("### [UA-0001] @user どちらにしますか", self.env.text(U1))
         events = self.env.scan()["events"]
         self.assertEqual([(e["uid"], e["event"]) for e in events], [(U1, "pause")])
 
@@ -4429,10 +4671,11 @@ class NoteCommitTest(unittest.TestCase):
                     {"op": "ua_add", "ua": {"kind": "ask", "description": "q2"}}]}
         self.assertEqual(self.env.commit(None, ops)[0], 0)
         self.assertEqual(st._pair(self.env.values(U1)), ("in progress", "user"))
-        self.env.put(U1, self.env.text(U1).replace("- [ ] UA-0001", "- [x] UA-0001").replace('assignee: "user"', 'assignee: "agent"'))
+        answered = re.sub(r"(### \[UA-0001\] .*\n.*\n\n#### 回答\n)", r"\1済み\n", self.env.text(U1))
+        self.env.put(U1, answered.replace('assignee: "user"', 'assignee: "agent"'))
         event = self.env.scan()["events"][0]
         self.assertEqual((event["event"], event["row"]), ("resume", 11))
-        self.assertTrue(next(u for u in event["user_actions"] if u["id"] == "UA-0001")["checked"])
+        self.assertEqual(next(u for u in event["user_actions"] if u["id"] == "UA-0001")["answer"], "済み")
         cand = self.env.load()
         find(cand["tasks"], "T-0020")["note_seen"] = event["ack"]
         code, out, err = self.env.commit(cand, {U1: [{"op": "ua_ack", "id": "UA-0001"}, {"op": "log", "text": "q2 が残っています"}]})
@@ -4487,7 +4730,7 @@ class NoteCommitTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         for uid, needle in ((U1, "検証しました"), (U2, "成果物を記録")):
             self.assertEqual(self.env.text(uid).count(needle), 1, uid)
-        self.assertEqual(self.env.text(U1).count("^ua-0001"), 1)
+        self.assertEqual(self.env.text(U1).count("[UA-0001]"), 1)
         self.assertEqual(self.env.text(U2).count("^sv-art-1"), 1)
         self.assertEqual(st._pair(self.env.values(U1)), ("in progress", "user"))
         self.assertEqual(self.env.scan()["events"], [])
@@ -4518,14 +4761,14 @@ class NoteCommitTest(unittest.TestCase):
         self.assertEqual([Path(c).name for c in calls], [f"{U2}.md"])
 
     def test_replay_does_not_restore_what_the_user_removed(self):
-        ops = {U1: [{"op": "ua_add", "ua": {"kind": "ask", "description": "q"}}, {"op": "ua_check", "id": "UA-0001"},
+        ops = {U1: [{"op": "ua_add", "ua": {"kind": "ask", "description": "q"}}, {"op": "ua_answer", "id": "UA-0001", "text": "回答した"},
                     {"op": "log", "text": "追記"}]}
         writes, _ = failing_writes({1})
         with writes, self.assertRaises(Crash):
             self.env.commit(None, ops)
-        # The user applies an older copy of the write by hand (e.g. sync), then deletes the log line and unchecks the box.
+        # The user applies an older copy of the write by hand (e.g. sync), then deletes the log line and the answer.
         text = st.apply_note_ops(self.env.text(U1), st.number_note_ops(ops, 1, {})[U1], NOW, 1)[0]
-        text = "\n".join(l for l in text.split("\n") if "追記" not in l).replace("- [x] UA-0001", "- [ ] UA-0001")
+        text = "\n".join(l for l in text.split("\n") if "追記" not in l and l != "回答した")
         self.env.put(U1, text)
         self.assertEqual(self.env.commit()[0], 0)
         self.assertEqual(self.env.text(U1), text)
@@ -4619,7 +4862,8 @@ class NotesScanCliTest(unittest.TestCase):
         env.state["tasks"][0]["note_seen"] = st.note_values(env.text(U1).replace('assignee: "agent"', 'assignee: "user"'))
         env.put(U1, env.text(U1).replace('assignee: "agent"', 'assignee: "user"'))
         env.save()
-        env.put(U1, env.text(U1).replace("- [ ] UA-0001", "- [x] UA-0001").replace("^ua-0001", "^ua-0001\n    - ~/notes"))
+        env.put(U1, env.text(U1).replace("#### 回答\n", "#### 回答\n~/notes\n"))
+        self.assertEqual(note_uas(env.text(U1))["UA-0001"]["answer"], "~/notes")
         self.assertEqual(env.scan()["events"], [])
         env.put(U1, env.text(U1).replace('assignee: "user"', 'assignee: "agent"'))
         event = env.scan()["events"][0]
@@ -4647,11 +4891,154 @@ class NotesScanCliTest(unittest.TestCase):
         self.assertIn("is not a schema_version 2 state", err)
 
     def test_note_show(self):
+        self.env.put(U1, self.env.text(U1).replace("## サブタスク", "### @agent 追加\n\n本文\n\n## サブタスク"))
         code, out, _ = self.env.run("note-show", "--state", str(self.env.state_path), "--uid", U1)
         shown = json.loads(out)
-        self.assertEqual((shown["path"], shown["props"]["uid"], shown["sections"]["概要"].strip()),
-                         (st._new_note_path(U1), U1, "fix the LICENSE year"))
+        self.assertEqual((shown["path"], shown["props"]["uid"], shown["sections"]["概要"].strip(), shown["request"]),
+                         (st._new_note_path(U1), U1, "fix the LICENSE year", "fix the LICENSE year"))
+        self.assertEqual([(u["id"], u["description"], u["body"]) for u in shown["requests"]], [(None, "追加", "本文")])
+
+    def test_events_carry_unnumbered_requests(self):
+        request = "### @agent CHANGELOG も直す\n\nUnreleased に 1 行\n\n## サブタスク"
+        # Writing a request without a status change prints nothing (it is read on the next transition).
+        self.env.put(U1, self.env.text(U1).replace("## サブタスク", request))
+        self.assertEqual(self.env.scan()["events"], [])
+        state = self.env.load()
+        paused = self.env.text(U1).replace('status: "in progress"', 'status: "pending"').replace('assignee: "agent"', 'assignee: "user"')
+        state["tasks"][0].update(note_seen=st.note_values(paused), user_hold={"at": NOW, "status": "pending", "assignee": "user", "reason": "pause"})
+        self.env.state = state
+        self.env.save()
+        event = self.env.scan()["events"][0]
+        self.assertEqual((event["event"], event["row"]), ("resume", 8))
+        self.assertEqual([(u["id"], u["kind"], u["assignee"], u["description"], u["body"]) for u in event["user_actions"]],
+                         [(None, "req", "agent", "CHANGELOG も直す", "Unreleased に 1 行")])
+        self.env.put(U3, st.new_note_text(U3, "新しい依頼", "task", "backlog", "agent", NOTE_NOW, "やって").replace("## サブタスク", request))
+        pickup = next(e for e in self.env.scan()["events"] if e["uid"] == U3)
+        self.assertEqual((pickup["event"], [u["description"] for u in pickup["user_actions"]]), ("pickup", ["CHANGELOG も直す"]))
         self.assertEqual(self.env.run("note-show", "--state", str(self.env.state_path), "--uid", "nope")[0], 1)
+
+
+def shortcut_moves():
+    text = (SKILL / "assets" / "sv-status.md").read_text(encoding="utf-8")
+    return json.loads(re.search(r"const MOVES = (\[.*?\]);", text, re.S).group(1))
+
+
+def pair_values(value):
+    status, assignee = value.split("/")
+    return nv(status, assignee)
+
+
+class StatusShortcutTest(unittest.TestCase):
+    CTX = {"unmanaged": {"managed": False}, "active": dict(LIVE, active=True), "idle": LIVE, "paused": PAUSED, "stub": STUB,
+           "project": dict(PROJ, active=True), "project_idle": PROJ, "project_paused": dict(PROJ, hold="pause")}
+    CANCEL_FROM = ("backlog/user", "backlog/agent", "in progress/user", "in progress/agent", "pending/user", "pending/agent")
+    CASES = [
+        # (kind, label, from, ctx, event, row)
+        ("task", "agent に渡す", "backlog/user", "unmanaged", "pickup", 1),
+        ("task", "agent に渡す", "backlog/user", "paused", "resume", 8),
+        ("task", "agent に渡す", "backlog/user", "stub", "follow_up", 16),
+        ("task", "agent に渡す", "in progress/user", "idle", "resume", 11),
+        ("task", "agent に渡す", "in progress/user", "paused", "resume", 8),
+        ("task", "agent に渡す", "in progress/user", "stub", "follow_up", 16),
+        ("task", "agent に渡す", "pending/user", "paused", "resume", 8),
+        ("task", "agent に渡す", "pending/user", "stub", "follow_up", 16),
+        ("task", "agent に渡す", "in progress/user", "unmanaged", "pickup", 1),
+        ("task", "agent に渡す", "pending/user", "unmanaged", "pickup", 1),
+        ("task", "agent に渡す", "done/agent", "idle", "follow_up", 16),
+        ("task", "agent に渡す", "done/user", "idle", "follow_up", 16),
+        ("task", "agent に渡す", "done/agent", "stub", "follow_up", 16),
+        ("task", "agent に渡す", "done/user", "stub", "follow_up", 16),
+        ("task", "自分に引き取る", "in progress/agent", "active", "pause", 5),
+        ("task", "自分に引き取る", "in progress/agent", "idle", "pause", 7),
+        ("task", "自分に引き取る", "in progress/agent", "unmanaged", "none", 2),
+        ("task", "保留", "in progress/agent", "active", "pause", 5),
+        ("task", "保留", "in progress/user", "active", "pause", 6),
+        ("task", "保留", "in progress/agent", "idle", "pause", 7),
+        ("task", "保留", "in progress/user", "idle", "pause", 7),
+        ("task", "保留", "in progress/user", "paused", "none", 9),
+        ("task", "保留", "in progress/agent", "unmanaged", "none", 2),
+        ("task", "保留", "backlog/user", "unmanaged", "none", 2),
+        ("task", "保留", "backlog/agent", "unmanaged", "none", 2),
+        ("task", "完了確認", "done/agent", "idle", "confirm", 13),
+        ("task", "完了確認", "done/agent", "stub", "confirm", 13),
+        *[("task", "取り消す", f, "active", "cancel", 17) for f in CANCEL_FROM],
+        ("task", "取り消す", "backlog/agent", "unmanaged", "none", 2),
+        ("project", "agent に渡す", "backlog/user", "unmanaged", "pickup", 1),
+        ("project", "agent に渡す", "in progress/user", "unmanaged", "pickup", 1),
+        ("project", "agent に渡す", "in progress/user", "project", "resume", 11),
+        ("project", "agent に渡す", "pending/user", "project_paused", "resume", 8),
+        ("project", "agent に渡す", "backlog/user", "project_paused", "resume", 8),
+        ("project", "完了を差し戻す", "done/agent", "project", "reject_done", 21),
+        ("project", "自分に引き取る", "in progress/agent", "project", "pause", 5),
+        ("project", "自分に引き取る", "in progress/agent", "project_idle", "pause", 7),
+        ("project", "保留", "in progress/agent", "project", "pause", 5),
+        ("project", "保留", "in progress/user", "project", "pause", 6),
+        ("project", "保留", "in progress/user", "project_paused", "none", 9),
+        ("project", "保留", "backlog/user", "unmanaged", "none", 2),
+        ("project", "保留", "backlog/agent", "unmanaged", "none", 2),
+        ("project", "完了確認", "done/agent", "project", "confirm", 14),
+        *[("project", "取り消す", f, "project", "close", 18) for f in CANCEL_FROM],
+        ("project", "取り消す", "backlog/agent", "unmanaged", "none", 2),
+    ]
+
+    def test_moves_classify_as_the_table_says(self):
+        moves = shortcut_moves()
+        covered = set()
+        for kind, label, frm, ctx_name, event, row in self.CASES:
+            ctx = self.CTX[ctx_name]
+            with self.subTest(kind=kind, label=label, frm=frm, ctx=ctx_name):
+                managed = ctx["managed"]
+                offered = [i for i, m in enumerate(moves) if m["kind"] == kind and frm in m["from"] and m.get("managed") in (None, managed)
+                           and m["label"] == label]
+                self.assertEqual(len(offered), 1)
+                covered.add((offered[0], frm))
+                seen = pair_values(frm) if managed else None
+                got = st.user_transition(seen, pair_values(moves[offered[0]]["to"]), dict(ctx, kind=kind) if managed else ctx)
+                self.assertEqual((got["event"], got["row"]), (event, row))
+        every = {(i, f) for i, m in enumerate(moves) for f in m["from"]}
+        self.assertEqual(every - covered, set())
+
+    def test_values_are_note_values(self):
+        for m in shortcut_moves():
+            for value in m["from"] + [m["to"]]:
+                status, assignee = value.split("/")
+                self.assertIn(status, st.NOTE_STATUSES)
+                self.assertIn(assignee, st.ASSIGNEES)
+        text = (SKILL / "assets" / "sv-status.md").read_text(encoding="utf-8")
+        self.assertIsNone(re.search(r"/Users/|~/|supervisor/vault", text))
+
+
+class RequestOriginalTest(unittest.TestCase):
+    ORIGINAL = "README の typo を直して。\n> 引用した行\n\n  先頭の空白。push して PR まで"
+
+    def test_view_and_note_show_read_the_original(self):
+        op = {"op": "create", "uid": U1, "title": "t", "kind": "task", "status": "in progress", "assignee": "agent",
+              "request": "README の typo を直す。\n\n- push して PR を作る", "original": self.ORIGINAL}
+        text = st.apply_note_ops("", [op], NOTE_NOW, 1)[0]
+        self.assertIn("- push して PR を作る\n\n> [!quote]- 依頼の原文\n> README の typo を直して。\n> > 引用した行\n>\n>   先頭の空白。", text)
+        env = VaultEnv(self)
+        task = env.add_task("T-0020", "w-0020", U1)
+        env.put(U1, st.set_props(text, {"task_id": "T-0020"}))
+        task["note_seen"] = env.values(U1)
+        env.save()
+        self.assertEqual(find(st.join_view(env.state, {U1: env.text(U1)})["tasks"], "T-0020")["request"], self.ORIGINAL)
+        code, out, _ = env.run("note-show", "--state", str(env.state_path), "--uid", U1)
+        self.assertEqual(json.loads(out)["request"], self.ORIGINAL)
+        self.assertEqual(st._request_text("\nそのまま\n"), "そのまま")
+
+    def test_consent_check_is_the_same_before_and_after_formatting(self):
+        plain = st.new_note_text(U1, "t", "task", "in progress", "agent", NOTE_NOW, self.ORIGINAL)
+        formatted = st.new_note_text(U1, "t", "task", "in progress", "agent", NOTE_NOW, "整形した文。push して PR まで", original=self.ORIGINAL)
+        for consent, ok in (("push して PR まで", True), ("整形した文", False)):
+            results = []
+            for text in (plain, formatted):
+                request = st._request_text(note_section(text, "概要"))
+                candidate = {"workers": [{"id": "w-1", "task_id": "T-1", "delivery": "push_pr"}],
+                             "tasks": [{"id": "T-1", "request": request, "push_consent": {"text": consent, "at": NOW}}]}
+                results.append(st._consent_request_errors({"tasks": []}, candidate))
+            with self.subTest(consent=consent):
+                self.assertEqual(results[0], results[1])
+                self.assertEqual(results[0] == [], ok)
 
 
 class NewNoteCliTest(unittest.TestCase):
@@ -4698,13 +5085,29 @@ class SetupVaultTest(unittest.TestCase):
             self.assertIn("""'assignee == "agent"'""", dashboard)
             self.assertIn("groupOrder: [backlog, in progress, pending, done, archived]", (vault / "Supervisor.md").read_text(encoding="utf-8"))
             self.assertIn('file.hasTag("supervised")', dashboard)
-            self.assertFalse((vault / "_templates").exists() or (vault / ".obsidian").exists())
+            self.assertEqual([p.name for p in (vault / "_templates").iterdir()], ["sv-status.md"])
+            self.assertFalse((vault / ".obsidian").exists())
             self.assertIn("vault/", (target / "CLAUDE.md").read_text(encoding="utf-8"))
             (vault / "Supervisor.md").write_text("mine\n", encoding="utf-8")
             proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
             self.assertTrue(all(l.startswith("exists:") for l in proc.stdout.splitlines()), proc.stdout)
             self.assertEqual((vault / "Supervisor.md").read_text(encoding="utf-8"), "mine\n")
             self.assertEqual(st._index_vault(str(vault)), ({}, {}))
+
+    def test_places_the_status_shortcut(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "sup"
+            shortcut = target / "vault" / "_templates" / "sv-status.md"
+            asset = (SKILL / "assets" / "sv-status.md").read_text(encoding="utf-8")
+            reports = []
+            for change in (None, None, "mine\n"):
+                if change:
+                    shortcut.write_text(change, encoding="utf-8")
+                proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                reports += [l.split(":")[0] for l in proc.stdout.splitlines() if l.endswith("sv-status.md")]
+                self.assertEqual(shortcut.read_text(encoding="utf-8"), asset)
+            self.assertEqual(reports, ["created", "exists", "updated"])
 
 
 class DigestFallbackTest(unittest.TestCase):
@@ -4871,6 +5274,12 @@ class MigrateExportTest(unittest.TestCase):
         log = note_section(self.note_of("T-0095"), "ログ")
         self.assertIn("    > b.md も\n    > 見直して", log)
 
+    def test_migrated_notes_use_the_action_format(self):
+        text = st._migrated_note("u", "t", "task", "in progress", "agent", NOW, "依頼", 1,
+                                 uas=[{"id": "UA-0001", "kind": "ask", "answer_required": True, "description": "q"}])
+        self.assertIn("## アクション\n\n### [UA-0001] @user q\n<!-- sv ask answer since=", text)
+        self.assertEqual(list(note_uas(text)), ["UA-0001"])
+
     def test_user_action_kinds(self):
         uas = note_uas(self.note_of("T-0102"))
         self.assertEqual((uas["UA-0121"]["kind"], uas["UA-0121"]["detector"], uas["UA-0121"]["rule"]), ("auto", "pr_closed", "merge-pr"))
@@ -4988,8 +5397,7 @@ class VerifyFixesTest(unittest.TestCase):
         cand = self.env.load()
         find(cand["workers"], "w-0020").update(intended_state="archived", observed_state="archived")
         commit_ops = {U1: [{"op": "art_add", "items": [{"kind": "branch", "ref": "/repo/a#claude/license-x1"}, {"kind": "commit", "ref": "abc123",
-                                                                                                                  "url": "https://github.com/org/repo-a/commit/abc123"}]},
-                           {"op": "ua_add", "ua": {"kind": "slot", "description": "追加の依頼(任意。サブアイテムに書いて backlog/agent にしてください)"}}]}
+                                                                                                                  "url": "https://github.com/org/repo-a/commit/abc123"}]}]}
         self.assertEqual(self.env.commit(cand, commit_ops)[0], 0)
         self.assertEqual(st._pair(self.env.values(U1)), ("done", "agent"))
         state = self.env.load()
@@ -5003,21 +5411,23 @@ class VerifyFixesTest(unittest.TestCase):
         self.env.put(U1, self.env.text(U1).replace('status: "done"', 'status: "pending"').replace('assignee: "agent"', 'assignee: "user"'))
         self.assertEqual(self.env.scan()["events"], [])
         text = self.env.text(U1).replace('status: "pending"', 'status: "backlog"').replace('assignee: "user"', 'assignee: "agent"')
-        self.env.put(U1, text.replace("^ua-0001", "^ua-0001\n    - README の別の typo も直して"))
+        self.env.put(U1, text.replace("## サブタスク", "### @agent README の別の typo も直して\n\nCHANGELOG も\n\n## サブタスク"))
         event = self.env.scan()["events"][0]
         self.assertEqual((event["event"], event["row"], event["live"], event["former"]), ("follow_up", 16, False, True))
-        self.assertEqual((event["slot"], event["follow_up_text"], event["last_artifact_number"]), ("UA-0001", "- README の別の typo も直して", 2))
+        self.assertEqual(([(u["id"], u["kind"], u["description"], u["body"]) for u in event["user_actions"]], event["last_artifact_number"]),
+                         ([(None, "req", "README の別の typo も直して", "CHANGELOG も")], 2))
         cand = self.env.load()
         git_task(cand, "T-0030", "w-0030", intended="pending", observed="none")
         find(cand["workers"], "w-0030")["session_id"] = None
         task = to_v2(find(cand["tasks"], "T-0030"), "tasks", U1)
         task.update(note_seen=event["ack"], art_from=event["last_artifact_number"] + 1, last_artifact_number=event["last_artifact_number"])
-        code, out, err = self.env.commit(cand, {U1: [{"op": "ua_ack", "id": "UA-0001"}, {"op": "log", "text": "追加の依頼:\n> README の別の typo も直して"}]})
+        code, out, err = self.env.commit(cand, {U1: [{"op": "ua_adopt", "ua": {"description": "README の別の typo も直して"}}]})
         self.assertEqual(code, 0, err)
         props = st.parse_frontmatter(self.env.text(U1))[0]
         self.assertEqual((props["status"], props["assignee"], props["completed_at"]), ("in progress", "agent", None))
         view = st.join_view(self.env.load(), {U1: self.env.text(U1)})
         self.assertEqual(find(view["tasks"], "T-0030")["artifacts"], [])
+        self.assertEqual([u["description"] for u in find(view["tasks"], "T-0030")["agent_actions"]], ["README の別の typo も直して"])
         self.assertEqual(self.env.scan()["events"], [])
 
     def test_unmarked_unmanaged_notes_are_still_picked_up(self):
@@ -5475,7 +5885,7 @@ class ObsidianVaultTest(unittest.TestCase):
         with self.assertRaisesRegex(st.StateError, "nested"):
             st.vault_locations(str(self.sup))
 
-    def test_setup_creates_only_the_dashboard_in_the_configured_vault(self):
+    def test_setup_creates_only_the_dashboard_and_the_shortcut_in_the_configured_vault(self):
         memo = self.root / "memo"
         self.claude_md(f"## Locations\n- vault: {memo}\n- dashboard: _sv/Board.md\n- templates: _plugin/type\n")
         proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(self.sup)], capture_output=True, text=True)
@@ -5483,7 +5893,8 @@ class ObsidianVaultTest(unittest.TestCase):
         board = (memo / "_sv" / "Board.md").read_text(encoding="utf-8")
         self.assertIn('file.hasTag("supervised")', board)
         self.assertIn("""'!file.inFolder("_plugin/type")'""", board)
-        self.assertEqual(sorted(p.relative_to(memo).as_posix() for p in memo.rglob("*")), ["_sv", "_sv/Board.md"])
+        self.assertEqual(sorted(p.relative_to(memo).as_posix() for p in memo.rglob("*")),
+                         ["_plugin", "_plugin/type", "_plugin/type/sv-status.md", "_sv", "_sv/Board.md"])
         self.assertFalse((self.sup / "vault").exists())
 
     def test_index_skips_the_dashboard_and_the_template_folder(self):

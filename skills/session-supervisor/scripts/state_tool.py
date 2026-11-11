@@ -6,7 +6,7 @@ parse_project_report, plan_actions, roster, waits, manager_reconcile,
 guard_decision (bash_violations, path_violation), parse_follow_ups, new_pr_urls, follow_up_actions,
 parse_locations, default_locations, add_missing_locations, clone_url_parts,
 parse_herdr, default_herdr, add_missing_herdr, launch_argv, observe_hc, watch_messages,
-parse_frontmatter, set_props, new_note_text, parse_sections, parse_user_actions, ua_open, render_ua_line,
+parse_frontmatter, set_props, new_note_text, parse_sections, parse_user_actions, ua_open, render_ua_block, render_ua_done,
 apply_note_ops, parse_artifacts, render_artifact_line, artifacts_view, art_sha,
 join_view, split_view, note_props, user_transition, artifact_needs, note_values, journal_reflected, number_note_ops,
 proposal_titles, migrate_v2, export_v1.
@@ -24,7 +24,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import textwrap
 import time
 import unicodedata
 from datetime import datetime, timedelta
@@ -57,7 +56,7 @@ REPORT_FIELDS = ("task_id", "worker_id", "status", "summary", "artifacts", "bloc
 REPORT_ARTIFACT_KEYS = ("branch", "commit", "pr", "ci")
 
 REPORT_RE = re.compile(r"```supervisor-report[ \t]*\r?\n(.*?)\r?\n[ \t]*```", re.S)
-UA_ID_RE = re.compile(r"^UA-(\d+)$")
+UA_ID_RE = re.compile(r"^(?:UA|AA)-(\d+)$")
 HUB_WAIT_PREFIX = "Hub wait {wid} ("
 REVIEW_WAIT_PREFIX = "Review wait {wid} ("
 READ_ACTION_PREFIX = "Read the result of "
@@ -77,18 +76,18 @@ ASSIGNEES = ("user", "agent")
 NOTE_KEYS = ("uid", "title", "para", "aliases", "created_at", "archived_at", "tags", "start_date", "due_date",
              "pending_until", "completed_at", "status", "assignee", "task_id", "project_id", "parent", "follows")
 NOTE_RAW_KEYS = ("created_at", "archived_at")
-NOTE_SECTIONS = ("概要", "ユーザーアクション", "サブタスク", "関連ノート", "関連資料", "成果物", "ログ")
-UA_SECTION = "ユーザーアクション"
+NOTE_SECTIONS = ("概要", "アクション", "サブタスク", "関連ノート", "関連資料", "成果物", "ログ")
+UA_SECTION = "アクション"
 ART_SECTION = "成果物"
 LOG_SECTION = "ログ"
-UA_KINDS = ("ask", "auto", "slot")
+UA_KINDS = ("ask", "auto", "req")
 UA_DETECTORS = ("worker_report", "worker_started", "archived_observed", "approval_cleared", "pr_closed",
                 "review_state", "start_possible", "manager_report", "foreign_session_gone", "children_closed")
 UA_META_KEYS = ("rule", "url", "since")
 HOLD_REASONS = ("pause", "invalid")
 SEEN_KEYS = ("status", "assignee", "ua_sha", "art_sha")
 NOTE_MOVED_KEYS = {
-    "tasks": ("title", "request", "status", "user_actions", "followups", "artifacts"),
+    "tasks": ("title", "request", "status", "user_actions", "agent_actions", "followups", "artifacts"),
     "projects": ("name", "context_doc_url", "user_actions"),
     "archived": ("title", "request", "followups", "artifacts"),
 }
@@ -99,7 +98,14 @@ ART_KEYS = ("n", "g", "kind", "ref", "url", "path", "label", "r")
 ART_FIELDS = ("kind", "ref", "url", "path", "label")
 FM_KEY_RE = re.compile(r"^([A-Za-z_][\w-]*):(?:[ \t]+(.*?))?[ \t]*$")
 FM_ITEM_RE = re.compile(r"^[ \t]*-(?:[ \t]+(.*?))?[ \t]*$")
-UA_LINE_RE = re.compile(r"^([ \t]*)[-*+] \[(.)\] (UA-\d+)\b(.*?)<!--[ \t]*sv[ \t]+(.*?)-->[ \t]*(?:\^([A-Za-z0-9-]+))?[ \t]*$")
+UA_HEAD_RE = re.compile(r"^### \[((?:UA|AA)-\d+)\] @(?:user|agent) (.+?)[ \t]*$")
+UA_REQ_RE = re.compile(r"^### @agent (.+?)[ \t]*$")
+UA_META_RE = re.compile(r"^<!-- sv (.*?) -->[ \t]*$")
+UA_DONE_RE = re.compile(r"^> - \[((?:UA|AA)-\d+)\] @(?:user|agent) (.*?) <!-- sv (.*?) -->[ \t]*$")
+UA_CALLOUT_RE = re.compile(r"^> \[!done\]- 完了 \((\d+)\)[ \t]*$")
+UA_ANSWER_RE = re.compile(r"^#### 回答[ \t]*$")
+UA_ANSWER_DETECTORS = ("worker_report", "pr_closed")
+QUOTE_HEAD = "> [!quote]- 依頼の原文"
 ART_COMMENT_RE = re.compile(r"<!--[ \t]*sv-art[ \t]+(.*?)[ \t]*-->")
 
 LOCATIONS_HEADING = "## Locations"
@@ -279,10 +285,10 @@ def cwd_busy(state, cwd):
 
 
 def _ua_ids(state):
-    """Every user action id; task and project user actions share one numbering."""
+    """Every UA-/AA- action id; user and agent actions of tasks and projects share one numbering."""
     owners = list(state.get("tasks", [])) + _projects(state)
-    return [ua.get("id") for o in owners if isinstance(o, dict) and isinstance(o.get("user_actions", []), list)
-            for ua in o.get("user_actions", []) if isinstance(ua, dict)]
+    return [ua.get("id") for o in owners if isinstance(o, dict) for key in ("user_actions", "agent_actions")
+            if isinstance(o.get(key, []), list) for ua in o.get(key, []) if isinstance(ua, dict)]
 
 
 def _next_ua_number(state):
@@ -1451,6 +1457,10 @@ def parse_report(text, expect_task=None, expect_worker=None, allow_awaiting_mana
         return {"ok": False, "error": "artifacts.files must be a list of strings"}
     if report["status"] in ("needs_input", "blocked", "awaiting_manager") and not report["blockers"]:
         return {"ok": False, "error": f"status {report['status']} requires at least one blocker"}
+    answered = report.get("answered", [])
+    if not isinstance(answered, list) or not all(
+            isinstance(a, dict) and all(isinstance(a.get(k), str) and a[k].strip() for k in ("question", "answer")) for a in answered):
+        return {"ok": False, "error": "answered must be a list of {question, answer} with non-empty strings"}
     confirmed = _read_confirmed_errors(report)
     if confirmed:
         return {"ok": False, "error": confirmed[0]}
@@ -1462,7 +1472,8 @@ def parse_report(text, expect_task=None, expect_worker=None, allow_awaiting_mana
 
 
 def _strip_ignored(lines):
-    """Blank out fenced blocks and HTML comments, keeping line numbers."""
+    """Blank out fenced blocks and HTML comments, keeping line numbers. A comment opened on a quoted (`>`) line ends with
+    that line, as an HTML block ends with its block quote: quoted outside text cannot hide the headings after it."""
     out, fence, in_comment = [], None, False
     for line in lines:
         if fence is None and not in_comment:
@@ -1490,6 +1501,8 @@ def _strip_ignored(lines):
                     kept, rest = kept + rest, ""
                 else:
                     kept, rest, in_comment = kept + rest[:start], rest[start + 4:], True
+        if in_comment and line.lstrip().startswith(">"):
+            in_comment = False
         out.append(kept)
     return out
 
@@ -1852,8 +1865,9 @@ def note_kind(props):
     return "project" if "project" in tags else "task"
 
 
-def new_note_text(uid, title, kind, status, assignee, now, request="", parent=None, follows=None):
-    """Text of a new task or project note in the create-task format. parent and follows are note uids."""
+def new_note_text(uid, title, kind, status, assignee, now, request="", parent=None, follows=None, original=None):
+    """Text of a new task or project note in the create-task format. parent and follows are note uids. original (the
+    chat message the request was written from) follows the request as a folded 依頼の原文 callout."""
     if kind not in ("task", "project"):
         raise StateError(f"note kind must be task or project, got {kind!r}")
     if status not in NOTE_STATUSES or assignee not in ASSIGNEES:
@@ -1866,6 +1880,8 @@ def new_note_text(uid, title, kind, status, assignee, now, request="", parent=No
     }
     head = "".join(_prop_line(k, values[k]) + "\n" for k in NOTE_KEYS if k in values and (values[k] is not None or k not in ("parent", "follows")))
     content = (request or "").strip("\n")
+    if original and original.strip("\n"):
+        content = "\n\n".join(c for c in (content, "\n".join([QUOTE_HEAD] + _quote(original.strip("\n")))) if c)
     body = "\n".join(f"## {name}\n\n{content}\n" if name == "概要" and content else f"## {name}\n\n" for name in NOTE_SECTIONS)
     return f"---\n{head}---\n{body}"
 
@@ -1883,35 +1899,16 @@ def parse_sections(body):
     return sections
 
 
-def _indent(line):
-    return len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip())
-
-
-def _sub_end(lines, i, limit):
-    """End (exclusive) of the sub-items of the list item at lines[i]: following lines indented deeper than it.
-    Blank lines count only when a deeper line follows them."""
-    base, last = _indent(lines[i]), i
-    for j in range(i + 1, limit):
-        if not lines[j].strip():
-            continue
-        if _indent(lines[j]) <= base:
-            break
-        last = j
-    return last + 1
-
-
 def _ua_meta(meta):
     ua = {"kind": None, "detector": None, "answer_required": False, "since": None, "rule": None, "url": None,
-          "done": None, "done_rev": None, "chk_rev": None}
+          "done": None, "done_rev": None}
     for token in meta.split():
-        if token in ("ask", "slot"):
+        if token in ("ask", "req"):
             ua["kind"] = token
         elif token.startswith("auto="):
             ua["kind"], ua["detector"] = "auto", token[5:]
         elif token == "answer":
             ua["answer_required"] = True
-        elif re.fullmatch(r"chk=r\d+", token):
-            ua["chk_rev"] = int(token[5:])
         elif re.fullmatch(r"r\d+", token):
             ua["done_rev"] = int(token[1:])
         elif "=" in token:
@@ -1921,54 +1918,163 @@ def _ua_meta(meta):
     return ua
 
 
+def _quote(text):
+    return [f"> {line}" if line.strip() else ">" for line in text.split("\n")]
+
+
+def _unquote(lines):
+    return [line[2:] if line.startswith("> ") else line[1:] for line in lines]
+
+
+def _text_of(lines):
+    """Text of a body or an answer: one quote level is removed from each blank-line separated run whose lines are all
+    quoted, so a quoted text followed by a plain link or a later answer reads back as written."""
+    out, run = [], []
+    for line in list(lines) + [""]:
+        if line.strip():
+            run.append(line)
+            continue
+        out += (_unquote(run) if all(r.startswith(">") for r in run) else run) + [""]
+        run = []
+    while out and not out[-1].strip():
+        out.pop()
+    while out and not out[0].strip():
+        out.pop(0)
+    return "\n".join(out)
+
+
+def _answer_at(content):
+    """Index of the `#### 回答` line in an item's content lines (fenced lines do not count), or None."""
+    return next((k for k, line in enumerate(_strip_ignored(content)) if UA_ANSWER_RE.match(line)), None)
+
+
+def _callout_plain(line):
+    return line[6:] if line.startswith(">     ") else ""
+
+
+def _ua_full(ua, ua_id, description, content):
+    k = _answer_at(content)
+    body, answer = (_text_of(content), "") if k is None else (_text_of(content[:k]), _text_of(content[k + 1:]))
+    return {"id": ua_id, "assignee": "agent" if ua["kind"] == "req" else "user", "description": description, **ua,
+            "body": body, "answer": answer}
+
+
+def _ua_layout(lines, start, end):
+    """(entries, callout) of the action section lines[start:end]. An entry is {ua, at, first, stop, done}: at is the
+    heading or callout item line, lines[first:stop] its content. callout is (head, end) of the 完了 callout or None.
+    An open item runs to the next H1-H3 heading or the callout; headings inside fenced blocks do not count."""
+    stripped = [""] * start + _strip_ignored(lines[start:end])
+    # A quoted `[!done]- 完了 (N)` line of outside text is not the callout: the real one starts with an item.
+    head = next((k for k in range(start, end - 1) if UA_CALLOUT_RE.match(stripped[k]) and UA_DONE_RE.match(lines[k + 1])), None)
+    callout = None if head is None else (head, next((k for k in range(head + 1, end) if not lines[k].startswith(">")), end))
+    entries = []
+    # Items are read above the callout and, for requests the user appended at the end, below it.
+    for lo, hi in ((start, end),) if callout is None else ((start, callout[0]), (callout[1], end)):
+        heads = [k for k in range(lo, hi) if re.match(r"^#{1,3} ", stripped[k])]
+        for n, k in enumerate(heads):
+            stop = heads[n + 1] if n + 1 < len(heads) else hi
+            meta = UA_META_RE.match(lines[k + 1]) if k + 1 < stop else None
+            ua = _ua_meta(meta.group(1)) if meta else None
+            m, req = UA_HEAD_RE.match(stripped[k]), UA_REQ_RE.match(stripped[k])
+            if m and ua and ua["kind"]:
+                entries.append({"ua": _ua_full(ua, m.group(1), m.group(2), lines[k + 2:stop]), "at": k, "first": k + 2,
+                                "stop": stop, "done": False})
+            elif req and not meta:
+                entries.append({"ua": _ua_full(dict(_ua_meta(""), kind="req"), None, req.group(1), lines[k + 1:stop]),
+                                "at": k, "first": k + 1, "stop": stop, "done": False})
+    if callout is not None:
+        k = head + 1
+        while k < callout[1]:
+            m = UA_DONE_RE.match(lines[k])
+            ua = _ua_meta(m.group(3)) if m else {}
+            if not ua.get("kind"):
+                k += 1
+                continue
+            # Content lines are `>     ` lines; a bare `>` counts only when one follows it.
+            last = k
+            for j in range(k + 1, callout[1]):
+                if lines[j].startswith(">     "):
+                    last = j
+                elif not re.fullmatch(r">[ \t]*", lines[j]):
+                    break
+            content = [_callout_plain(line) for line in lines[k + 1:last + 1]]
+            entries.append({"ua": _ua_full(ua, m.group(1), m.group(2), content), "at": k, "first": k + 1,
+                            "stop": last + 1, "done": True})
+            k = last + 1
+    return entries, callout
+
+
 def parse_user_actions(section_text):
-    """User action items of a `## ユーザーアクション` section. Lines without `<!-- sv ... -->` metadata are the user's
-    and are skipped. answer is the item's sub-items, dedented but otherwise verbatim."""
-    lines = section_text.split("\n")
-    items = []
-    for i, line in enumerate(lines):
-        m = UA_LINE_RE.match(line)
-        if not m:
-            continue
-        ua = _ua_meta(m.group(5))
-        if ua["kind"] is None:
-            continue
-        sub = lines[i + 1:_sub_end(lines, i, len(lines))]
-        items.append({"id": m.group(3), "description": m.group(4).strip(), "checked": m.group(2) in "xX",
-                      **ua, "block": m.group(6), "answer": textwrap.dedent("\n".join(sub)).strip()})
-    return items
+    """Action items of a `## アクション` section: open `### [UA|AA-NNNN] @user|@agent` headings with a
+    `<!-- sv ... -->` line, unnumbered `### @agent` requests (id None, kind req), then the items of the 完了 callout.
+    Anything else is the user's and is skipped. body and answer are read with one quote level removed."""
+    lines = (section_text or "").split("\n")
+    return [e["ua"] for e in _ua_layout(lines, 0, len(lines))[0]]
 
 
 def ua_open(ua):
-    """True for an unresolved user action: anything but a slot that has no done mark."""
-    return ua.get("kind") != "slot" and not ua.get("done")
+    """True for an action without a done mark."""
+    return not ua.get("done")
 
 
-def render_ua_line(ua):
+def _ua_tokens(ua):
     meta = [f"auto={ua['detector']}" if ua["kind"] == "auto" else ua["kind"]]
     if ua.get("answer_required"):
         meta.append("answer")
     meta += [f"{key}={ua[key]}" for key in UA_META_KEYS if ua.get(key)]
-    if ua.get("chk_rev") is not None:
-        meta.append(f"chk=r{ua['chk_rev']}")
     if ua.get("done"):
         meta.append(f"done={ua['done']}")
         if ua.get("done_rev") is not None:
             meta.append(f"r{ua['done_rev']}")
-    box = "x" if ua.get("checked") else " "
-    return f"- [{box}] {ua['id']} {ua['description']} <!-- sv {' '.join(meta)} --> ^{ua.get('block') or ua['id'].lower()}"
+    return " ".join(meta)
+
+
+def _ua_title(ua):
+    return f"[{ua['id']}] @{'agent' if ua['kind'] == 'req' else 'user'} {ua['description']}"
+
+
+def _answer_lines(text):
+    text = text.strip("\n")
+    return [text] if "\n" not in text and not text.lstrip().startswith(("#", ">", "```", "~~~")) else _quote(text)
+
+
+def _ua_content(ua):
+    lines = (_quote(ua["body"]) + [""]) if ua.get("body") else []
+    if ua.get("answer") or ua["kind"] == "ask" or ua.get("detector") in UA_ANSWER_DETECTORS:
+        lines += ["#### 回答"] + (_answer_lines(ua["answer"]) if ua.get("answer") else [])
+    return lines[:-1] if lines and not lines[-1] else lines
+
+
+def _callout_lines(content):
+    return [f">     {line}" if line.strip() else ">" for line in content]
+
+
+def render_ua_block(ua):
+    """Lines of an open action: heading, metadata, a blank line, the quoted body and the `#### 回答` field."""
+    content = _ua_content(ua)
+    return [f"### {_ua_title(ua)}", f"<!-- sv {_ua_tokens(ua)} -->"] + ([""] + content if content else [])
+
+
+def render_ua_done(ua):
+    """Lines of an item of the 完了 callout."""
+    return [f"> - {_ua_title(ua)} <!-- sv {_ua_tokens(ua)} -->"] + _callout_lines(_ua_content(ua))
 
 
 def _ua_errors(ua):
     errors = []
-    if not isinstance(ua.get("id"), str) or not UA_ID_RE.match(ua["id"]):
+    valid_id = isinstance(ua.get("id"), str) and UA_ID_RE.match(ua["id"])
+    if not valid_id:
         errors.append(f"invalid user action id {ua.get('id')!r}")
     if ua.get("kind") not in UA_KINDS:
         errors.append(f"user action kind must be one of {list(UA_KINDS)}")
-    elif (ua["kind"] == "auto") != (ua.get("detector") in UA_DETECTORS):
+    elif (ua["kind"] == "auto") != (ua.get("detector") in UA_DETECTORS) or (ua["kind"] == "req" and ua.get("detector")):
         errors.append(f"auto needs a detector in {list(UA_DETECTORS)}, got {ua.get('detector')!r}")
+    elif valid_id and ua["id"][:2] != ("AA" if ua["kind"] == "req" else "UA"):
+        errors.append(f"{ua['id']}: a {ua['kind']} action takes the {'AA' if ua['kind'] == 'req' else 'UA'}- prefix")
     if not isinstance(ua.get("description"), str) or not ua["description"].strip() or "\n" in ua["description"]:
         errors.append("user action description must be one non-empty line")
+    if ua.get("body") is not None and not isinstance(ua["body"], str):
+        errors.append("user action body must be a string")
     errors += [f"{key} must not contain spaces" for key in UA_META_KEYS if ua.get(key) and re.search(r"\s", str(ua[key]))]
     return errors
 
@@ -2108,23 +2214,35 @@ def _insert_in_section(lines, title, new_lines):
 
 
 def _has_block(lines, block_id):
+    if re.fullmatch(r"(?:ua|aa)-\d+", block_id):
+        return _find_ua(lines, block_id.upper()) is not None
     pattern = re.compile(rf"\^{re.escape(block_id)}[ \t]*$")
     return any(pattern.search(line) for line in lines)
 
 
 def _find_ua(lines, ua_id):
+    """The layout entry of the action numbered like ua_id (UA and AA share one numbering), or None."""
     span = _section_span(lines, UA_SECTION)
-    for i in range(*span) if span else ():
-        m = UA_LINE_RE.match(lines[i])
-        if m and (m.group(3) == ua_id or m.group(6) == ua_id.lower()):
-            return i, span[1]
-    return None, None
+    number = _ua_number(ua_id)
+    if not span or not number:
+        return None
+    return next((e for e in _ua_layout(lines, span[0] + 1, span[1])[0]
+                 if e["ua"]["id"] and _ua_number(e["ua"]["id"]) == number), None)
 
 
-def _edit_ua(line, tokens, checked=False):
-    m = UA_LINE_RE.match(line)
-    line = line[:m.start(5)] + " ".join(tokens) + " " + line[m.end(5):]
-    return line[:m.start(2)] + "x" + line[m.end(2):] if checked else line
+def _put_block(lines, pos, block):
+    """Insert block at pos with a blank line before and after it."""
+    before = [""] if pos > 0 and lines[pos - 1].strip() else []
+    after = [""] if pos >= len(lines) or lines[pos].strip() else []
+    lines[pos:pos] = before + block + after
+
+
+def _open_end(lines):
+    """Position right after the last non-blank line before the 完了 callout (or the section end)."""
+    head, end = _ensure_section(lines, UA_SECTION)
+    callout = _ua_layout(lines, head + 1, end)[1]
+    limit = callout[0] if callout else end
+    return max((i for i in range(head + 1, limit) if lines[i].strip()), default=head) + 1
 
 
 def _art_data(line):
@@ -2164,61 +2282,91 @@ def _op_log(lines, op, now, rev, index, problems):
 
 
 def _op_ua_add(lines, op, now, rev, index, problems):
-    ua = {"since": now, **(op.get("ua") or {}), "checked": False, "chk_rev": None, "done": None, "done_rev": None}
+    ua = {"since": now, **(op.get("ua") or {}), "done": None, "done_rev": None, "answer": ""}
     errors = _ua_errors(ua)
     if errors:
         raise StateError(f"ua_add: {errors}")
-    block_id = ua.get("block") or ua["id"].lower()
-    if _has_block(lines, block_id):
+    if _find_ua(lines, ua["id"]):
         return []
-    span = _section_span(lines, UA_SECTION)
-    items = [i for i in range(*span) if UA_LINE_RE.match(lines[i])] if span else []
-    if items:
-        # Keep the checklist together: a user's ### heading later in the section stays below it.
-        pos = _sub_end(lines, items[-1], span[1])
-        lines[pos:pos] = [render_ua_line(ua)]
-    else:
-        _insert_in_section(lines, UA_SECTION, [render_ua_line(ua)])
-    return [block_id]
-
-
-def _op_ua_check(lines, op, now, rev, index, problems):
-    i, _ = _find_ua(lines, op["id"])
-    if i is None:
-        problems.append(f"ua_check {op['id']}: item not found")
-        return []
-    tokens = UA_LINE_RE.match(lines[i]).group(5).split()
-    # The rev mark makes a re-application a no-op, so a box the user unchecked afterwards stays unchecked.
-    if f"chk=r{rev}" not in tokens:
-        lines[i] = _edit_ua(lines[i], [t for t in tokens if not t.startswith("chk=")] + [f"chk=r{rev}"], checked=True)
-    return []
+    _put_block(lines, _open_end(lines), render_ua_block(ua))
+    return [ua["id"].lower()]
 
 
 def _op_ua_ack(lines, op, now, rev, index, problems):
-    i, _ = _find_ua(lines, op["id"])
-    if i is None:
+    e = _find_ua(lines, op["id"])
+    if e is None:
         problems.append(f"ua_ack {op['id']}: item not found")
         return []
-    tokens = UA_LINE_RE.match(lines[i]).group(5).split()
+    if e["done"]:
+        return []
+    tokens = UA_META_RE.match(lines[e["at"] + 1]).group(1).split()
     if not any(t.startswith("done=") for t in tokens):
-        lines[i] = _edit_ua(lines[i], tokens + [f"done={op.get('at') or now}", f"r{rev}"])
+        tokens += [f"done={op.get('at') or now}", f"r{rev}"]
+    content = lines[e["first"]:e["stop"]]
+    while content and not content[0].strip():
+        content.pop(0)
+    while content and not content[-1].strip():
+        content.pop()
+    item = [f"> - {_ua_title(e['ua'])} <!-- sv {' '.join(tokens)} -->"] + _callout_lines(content)
+    del lines[e["at"]:e["stop"]]
+    head, end = _section_span(lines, UA_SECTION)
+    callout = _ua_layout(lines, head + 1, end)[1]
+    if callout is None:
+        _put_block(lines, _open_end(lines), ["> [!done]- 完了 (1)"] + item)
+        return []
+    lines[callout[1]:callout[1]] = item
+    count = sum(1 for line in lines[callout[0] + 1:callout[1] + len(item)] if UA_DONE_RE.match(line))
+    lines[callout[0]] = f"> [!done]- 完了 ({count})"
     return []
 
 
 def _op_ua_answer(lines, op, now, rev, index, problems):
-    i, end = _find_ua(lines, op["id"])
-    if i is None:
+    e = _find_ua(lines, op["id"])
+    if e is None:
         problems.append(f"ua_answer {op['id']}: item not found")
         return []
     if not isinstance(op.get("text"), str) or not op["text"].strip():
         raise StateError("ua_answer needs text")
-    base = UA_LINE_RE.match(lines[i]).group(1) + "    "
-    first, *rest = op["text"].strip("\n").split("\n")
-    new = [f"{base}- {first}"] + [f"{base}  {line}".rstrip() for line in rest]
-    sub_end = _sub_end(lines, i, end)
-    if "\n".join(new) not in "\n".join(lines[i + 1:sub_end]):
-        lines[sub_end:sub_end] = new
+    text = op["text"].strip("\n")
+    if text in e["ua"]["answer"]:
+        return []
+    raw = lines[e["first"]:e["stop"]]
+    content = [_callout_plain(line) for line in raw] if e["done"] else list(raw)
+    tail = []
+    while content and not content[-1].strip():
+        tail.insert(0, content.pop())
+    new = _answer_lines(text)
+    k = _answer_at(content)
+    if k is None:
+        content += ([""] if content or not e["done"] else []) + ["#### 回答"] + new
+    elif not _text_of(content[k + 1:]):
+        content[k + 1:k + 1] = new
+    else:
+        content += [""] + new
+    if e["done"]:
+        lines[e["first"]:e["stop"]] = _callout_lines(content)
+    else:
+        lines[e["first"]:e["stop"]] = content + (tail or ([""] if e["stop"] < len(lines) and lines[e["stop"]].strip() else []))
     return []
+
+
+def _op_ua_adopt(lines, op, now, rev, index, problems):
+    ua = dict(op.get("ua") or {}, kind="req")
+    errors = _ua_errors(ua)
+    if errors:
+        raise StateError(f"ua_adopt: {errors}")
+    if _find_ua(lines, ua["id"]):
+        return []
+    span = _section_span(lines, UA_SECTION)
+    entries = _ua_layout(lines, span[0] + 1, span[1])[0] if span else []
+    e = next((e for e in entries if e["ua"]["id"] is None and e["ua"]["description"] == ua["description"]), None)
+    if e is None:
+        problems.append(f"ua_adopt {ua['id']}: no unnumbered @agent request {ua['description']!r}")
+        return []
+    k = e["at"]
+    blank = [""] if k + 1 < len(lines) and lines[k + 1].strip() else []
+    lines[k:k + 1] = [f"### {_ua_title(ua)}", f"<!-- sv req since={ua.get('since') or now} -->"] + blank
+    return [ua["id"].lower()]
 
 
 def _op_art_add(lines, op, now, rev, index, problems):
@@ -2283,7 +2431,7 @@ def _op_art_replace_group(lines, op, now, rev, index, problems):
 
 
 _NOTE_BODY_OPS = {
-    "log": _op_log, "ua_add": _op_ua_add, "ua_check": _op_ua_check, "ua_answer": _op_ua_answer, "ua_ack": _op_ua_ack,
+    "log": _op_log, "ua_add": _op_ua_add, "ua_answer": _op_ua_answer, "ua_ack": _op_ua_ack, "ua_adopt": _op_ua_adopt,
     "art_add": _op_art_add, "art_set": _op_art_set, "art_replace_group": _op_art_replace_group,
 }
 
@@ -2291,7 +2439,7 @@ _NOTE_BODY_OPS = {
 def apply_note_ops(text, ops, now, rev):
     """Apply note ops to a note's text. Returns (text, new_ids, problems).
     Re-applying the same ops with the same rev is a no-op: lines are added once per block id, and edits of existing
-    lines leave a rev mark (chk=r<rev>, done=<at> r<rev>, "r": <rev>). new_ids are the block ids this call added.
+    lines leave a rev mark (done=<at> r<rev>, "r": <rev>). new_ids are the block ids this call added.
     create writes a note only into empty text; assign_uid sets uid only when the note has none."""
     new_ids, problems = [], []
     for index, op in enumerate(ops):
@@ -2299,7 +2447,7 @@ def apply_note_ops(text, ops, now, rev):
         if name == "create":
             if not text.strip():
                 text = new_note_text(op["uid"], op["title"], op["kind"], op["status"], op["assignee"], now,
-                                     op.get("request", ""), op.get("parent"), op.get("follows"))
+                                     op.get("request", ""), op.get("parent"), op.get("follows"), op.get("original"))
             continue
         if name == "assign_uid":
             props, _, errors = parse_frontmatter(text)
@@ -2329,10 +2477,10 @@ def _note_view(text):
 
 
 def _view_user_actions(section_text):
-    """Open user actions in the v1 shape. Slots are left out: derive_status would count them."""
+    """Open user actions in the v1 shape. Requests to the agent are left out: derive_status would count them."""
     actions = []
     for ua in parse_user_actions(section_text or ""):
-        if not ua_open(ua):
+        if not ua_open(ua) or ua["kind"] == "req":
             continue
         item = {"id": ua["id"], "description": ua["description"], "since": ua["since"]}
         if ua["rule"]:
@@ -2344,6 +2492,26 @@ def _view_user_actions(section_text):
             item["needs_answer"] = True
         actions.append(item)
     return actions
+
+
+def _view_agent_actions(section_text):
+    """Open numbered requests to the agent (AA-NNNN). split_view acks them when the task leaves the view."""
+    return [{"id": ua["id"], "description": ua["description"], "since": ua["since"]}
+            for ua in parse_user_actions(section_text or "") if ua["kind"] == "req" and ua["id"] and ua_open(ua)]
+
+
+def _request_text(section):
+    """The task request: the 依頼の原文 callout of `## 概要` when there is one, else the whole section."""
+    lines = (section or "").split("\n")
+    k = next((i for i, line in enumerate(lines) if line.rstrip() == QUOTE_HEAD), None)
+    if k is None:
+        return (section or "").strip()
+    quoted = []
+    for line in lines[k + 1:]:
+        if not line.startswith(">"):
+            break
+        quoted.append(line)
+    return "\n".join(_unquote(quoted)).strip("\n")
 
 
 def _held_action(task, wid):
@@ -2367,7 +2535,7 @@ def join_view(state, notes):
     empty = ({}, {}, [])
     sup = view["supervisor"]
     numbers = [_ua_number(ua["id"]) for _, sections, _ in parsed.values()
-               for ua in parse_user_actions(sections.get(UA_SECTION, ""))]
+               for ua in parse_user_actions(sections.get(UA_SECTION, "")) if ua["id"]]
     sup["last_ua_number"] = max(numbers + [sup.get("last_ua_number", 0)])
     for project in view.get("projects", []):
         props, sections, _ = parsed.get(project.get("uid"), empty)
@@ -2379,10 +2547,11 @@ def join_view(state, notes):
     live = {t["id"]: t for t in view["tasks"]}
     for task in view["tasks"]:
         props, sections, items = parsed.get(task.get("uid"), empty)
-        task.update(title=_note_title(task, props), request=sections.get("概要", "").strip(), followups=[],
+        task.update(title=_note_title(task, props), request=_request_text(sections.get("概要")), followups=[],
                     artifacts=artifacts_view(items, task.get("art_from")),
                     user_actions=(_view_user_actions(sections.get(UA_SECTION))
                                   + [_held_action(task, wid) for wid in task.get("held", [])]),
+                    agent_actions=_view_agent_actions(sections.get(UA_SECTION)),
                     last_artifact_number=max([i["n"] for i in items] + [task.get("last_artifact_number", 0)]))
         task["status"] = derive_status(task, workers_by_id)
         if isinstance(task.get("proposal"), dict):
@@ -2393,7 +2562,7 @@ def join_view(state, notes):
         last = max([i["n"] for i in items] + [stub.get("last_artifact_number", 0)])
         if stub["id"] in live:
             items = [i for i in items if i["n"] < (live[stub["id"]].get("art_from") or 1)]
-        stub.update(title=_note_title(stub, props), request=sections.get("概要", "").strip(),
+        stub.update(title=_note_title(stub, props), request=_request_text(sections.get("概要")),
                     artifacts=artifacts_view(items), last_artifact_number=last)
         if "project" in stub:
             stub["project"] = {"id": stub["project"]["id"], "name": names.get(stub["project"]["id"], stub["project"]["id"])}
@@ -2435,6 +2604,8 @@ def split_view(view_cand, view_new, ops=None):
             numbers += [_ua_number(ua["id"]) for ua in after]
             added = [_ua_add_op(old["id"], ua) for ua in after if ua["id"] not in before]
             acked = [{"op": "ua_ack", "id": i} for i in sorted(before - {ua["id"] for ua in after})]
+            requests = {ua["id"] for ua in after_by_id.get(old["id"], {}).get("agent_actions", [])}
+            acked += [{"op": "ua_ack", "id": ua["id"]} for ua in old.get("agent_actions", []) if ua["id"] not in requests]
             if added or acked:
                 ops.setdefault(old.get("uid"), []).extend(added + acked)
     state["supervisor"]["last_ua_number"] = max(numbers)
@@ -2596,6 +2767,9 @@ def user_transition(seen, cur, ctx):
         return result("invalid", 19, seen)
     if pair[0] == "archived":
         return result("cancel", 17, ack) if task else result("close", 18, ack)
+    if task and not ctx.get("live") and pair in NOTE_AGENT_RESUME:
+        # A stub has no worker or hold to resume: handing it to the agent is a follow-up whatever it showed before.
+        return result("follow_up", 16, ack)
     found = None
     if hold == "pause":
         if pair in NOTE_AGENT_RESUME:
@@ -2698,7 +2872,7 @@ def journal_reflected(text, entry, rev):
     lines = text.split("\n")
     if any(_has_block(lines, block_id) for block_id in entry.get("new_ids", [])):
         return True
-    if re.search(rf"(?:chk=r{rev}|\bdone=\S+ r{rev})(?=[ \t])|\"r\":{rev}[,}}]", text):
+    if re.search(rf"\bdone=\S+ r{rev}(?=[ \t])|\"r\":{rev}[,}}]", text):
         return True
     after, before = _pair(entry.get("after")), _pair(entry.get("before"))
     return after != before and _pair(note_values(text)) == after
@@ -2706,14 +2880,15 @@ def journal_reflected(text, entry, rev):
 
 def number_note_ops(ops, next_ua, art_last):
     """Fill the user action ids and artifact numbers the supervisor left out (3.5 step 3). ops is {uid: [op, ...]},
-    next_ua the first free UA number, art_last {uid: highest artifact number used}. Returns new ops."""
+    next_ua the first free action number (UA- for user actions, AA- for requests to the agent), art_last {uid: highest artifact number used}. Returns new ops."""
     out = {}
     for uid in sorted(ops):
         last = art_last.get(uid, 0)
         filled = []
         for op in copy.deepcopy(ops[uid]):
-            if op.get("op") == "ua_add" and not (op.get("ua") or {}).get("id"):
-                op.setdefault("ua", {})["id"] = f"UA-{next_ua:04d}"
+            if op.get("op") in ("ua_add", "ua_adopt") and not (op.get("ua") or {}).get("id"):
+                req = op["op"] == "ua_adopt" or (op.get("ua") or {}).get("kind") == "req"
+                op.setdefault("ua", {})["id"] = f"{'AA' if req else 'UA'}-{next_ua:04d}"
                 next_ua += 1
             if op.get("op") in ("art_add", "art_replace_group"):
                 for item in op.get("items") or []:
@@ -2912,6 +3087,7 @@ def export_v1(state, notes):
             item.pop(key, None)
         if "user_actions" in item:
             item["user_actions"] = [{k: v for k, v in ua.items() if k not in ("detector", "needs_answer")} for ua in item["user_actions"]]
+        item.pop("agent_actions", None)
         if not item.get("followups"):
             item.pop("followups", None)
     return view
@@ -3732,7 +3908,7 @@ This directory belongs to the session-supervisor skill. It is not a project.
 - The supervisor runs in the Herdr terminal `sv`, with `sv-watch` (`state_tool.py watch-vault`) beside it. It starts sessions only by running the argv of `state_tool.py launch-plan`, and never deletes branches.
 - The supervisor only operates sessions, changes state through commit, and talks to the user. Workers edit, commit, push, and open PRs; observer subagents run read-only checks and investigations, write results under .supervisor/observations/, and return the path.
 - A PreToolUse hook (state_tool.py guard) blocks edits outside this directory and mutating git / jj / gh commands. The allowed exceptions are `state_tool.py prepare-dir`, `prepare-worktree`, and `remove-worktree`, which write only under the `## Locations` roots. To disable it, remove its entry from .claude/settings.json by hand; the supervisor asks before restoring a missing entry.
-- The Obsidian vault (`vault` in `## Locations`, default `vault/`) has one note per task and project, tagged `supervised`: the note holds the meaning (title, `## 概要`, status, assignee, `## ユーザーアクション`, `## 成果物`). Only `python3 .supervisor/state_tool.py commit --notes <ops.json>` writes it (the guard blocks edits); read changes with `notes-scan` and a note with `note-show`. The `dashboard` note (default `vault/Supervisor.md`) is the kanban: moving a card changes the note's status. Delegate a task by setting a note tagged `supervised` to `backlog` / `agent`.
+- The Obsidian vault (`vault` in `## Locations`, default `vault/`) has one note per task and project, tagged `supervised`: the note holds the meaning (title, `## 概要`, status, assignee, `## アクション`, `## 成果物`). Only `python3 .supervisor/state_tool.py commit --notes <ops.json>` writes it (the guard blocks edits); read changes with `notes-scan` and a note with `note-show`. The `dashboard` note (default `vault/Supervisor.md`) is the kanban: moving a card changes the note's status. Delegate a task by setting a note tagged `supervised` to `backlog` / `agent`.
 - `## Follow-ups` (optional) turns each newly verified PR into a user action such as "Review org/repo#42". Format: references/follow-ups-format.md in the session-supervisor skill. Check it with `python3 .supervisor/state_tool.py validate-follow-ups --claude-md CLAUDE.md`.
 
 <!-- Example: remove the comment markers to enable it.
@@ -3828,7 +4004,8 @@ def supervisor_note(templates):
 
 
 def _setup_vault(supervisor_dir):
-    """Create the dashboard note when it is missing; never overwrite it. Templates are built with the user (section 3)."""
+    """Create the dashboard note when it is missing; never overwrite it. Templates are built with the user (section 3),
+    except the status shortcut sv-status.md, which is placed in the template folder (created, exists or updated)."""
     vault, dashboard, templates = vault_locations(supervisor_dir)
     files = ((Path(vault) / dashboard, supervisor_note(templates)),)
     report = []
@@ -3839,6 +4016,16 @@ def _setup_vault(supervisor_dir):
             path.parent.mkdir(parents=True, exist_ok=True)
             _write_atomic(str(path), text)
             report.append(("created", path))
+    # The status shortcut is overwritten like .supervisor/state_tool.py, so its MOVES stay in step with user_transition.
+    src, dest = HERE.parent / "assets" / "sv-status.md", Path(vault) / templates / "sv-status.md"
+    if not src.exists():
+        report.append(("skipped", dest))
+        return report
+    status = "exists" if dest.exists() and dest.read_bytes() == src.read_bytes() else ("updated" if dest.exists() else "created")
+    if status != "exists":
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dest)
+    report.append((status, dest))
     return report
 
 
@@ -4404,7 +4591,8 @@ def _require_v2(state, path):
 
 
 def _ua_summary(ua):
-    return {k: ua[k] for k in ("id", "kind", "detector", "answer_required", "checked", "done", "description", "answer", "rule", "url")}
+    return {k: ua[k] for k in ("id", "kind", "assignee", "detector", "answer_required", "done", "description", "body", "answer",
+                               "rule", "url")}
 
 
 def _scan_ctx(kind, item, view_item, workers, live, duplicate, items):
@@ -4494,7 +4682,8 @@ def notes_scan(state, texts, uids, vault=None):
             event["warning_key"], event["warning_sha"] = uid or rel, sha
         sections = parse_sections(body_text)
         event.update(title=props.get("title"), request=sections.get("概要", "").strip(),
-                     parent=props.get("parent"), follows=props.get("follows"))
+                     parent=props.get("parent"), follows=props.get("follows"),
+                     user_actions=[_ua_summary(u) for u in parse_user_actions(sections.get(UA_SECTION, ""))])
         if uid is None and vault:
             event["proposed_uid"] = _proposed_uid(os.path.join(vault, rel), taken)
             taken.add(event["proposed_uid"])
@@ -4502,7 +4691,7 @@ def notes_scan(state, texts, uids, vault=None):
     return {"events": events, "warnings": warnings}
 
 
-FORMER_MARK_RE = re.compile(r"\^(?:ua-\d+|sv-log-[\w-]+|sv-art-\d+)[ \t]*$|<!--[ \t]*sv-art ", re.M)
+FORMER_MARK_RE = re.compile(r"\^(?:sv-log-[\w-]+|sv-art-\d+)[ \t]*$|<!--[ \t]*sv(?:-art)? ", re.M)
 
 
 def _former_note(props, body):
@@ -4512,17 +4701,16 @@ def _former_note(props, body):
 
 def _former_follow_up(uid, rel, kind, props, body, cur):
     """done/archived or anything but backlog/agent: no event. backlog/agent: a follow-up (#16) without a stub, carrying
-    the open slot's text and the highest artifact number, so the new T-id keeps the uid and starts its own rows."""
+    the actions (unnumbered `### @agent` requests have id None) and the highest artifact number, so the new T-id keeps
+    the uid and starts its own rows."""
     if _pair(cur) != ("backlog", "agent"):
         return None
     sections = parse_sections(body)
     uas = parse_user_actions(sections.get(UA_SECTION, ""))
-    slots = [u for u in uas if u["kind"] == "slot" and not u["done"]]
     rows = parse_artifacts(sections.get(ART_SECTION, ""))[0]
     return {"event": "follow_up", "row": 16, "ack": cur, "clear_invalid": False, "uid": uid, "path": rel, "kind": kind,
-            "live": False, "former": True, "cur": cur, "title": props.get("title"), "request": sections.get("概要", "").strip(),
-            "slot": slots[-1]["id"] if slots else None, "follow_up_text": slots[-1]["answer"] if slots else "",
-            "last_artifact_number": max([r["n"] for r in rows] + [0]),
+            "live": False, "former": True, "cur": cur, "title": props.get("title"),
+            "request": _request_text(sections.get("概要")), "last_artifact_number": max([r["n"] for r in rows] + [0]),
             "user_actions": [_ua_summary(u) for u in uas]}
 
 
@@ -4607,8 +4795,8 @@ def cmd_note_show(args):
     uas = parse_user_actions(sections.get(UA_SECTION, ""))
     items, problems = parse_artifacts(sections.get(ART_SECTION, ""))
     print(json.dumps({"uid": args.uid, "path": rel, "props": props, "frontmatter_errors": errors, "sections": sections,
-                      "user_actions": [_ua_summary(u) for u in uas],
-                      "slots": {u["id"]: u["answer"] for u in uas if u["kind"] == "slot" and not u["done"]},
+                      "request": _request_text(sections.get("概要")), "user_actions": [_ua_summary(u) for u in uas],
+                      "requests": [_ua_summary(u) for u in uas if u["kind"] == "req" and ua_open(u)],
                       "artifacts": items, "artifact_problems": problems}, ensure_ascii=False))
     return 0
 

@@ -12,7 +12,7 @@ Field names are agent-neutral:
 - `session_id`: for `runtime: "herdr"`, the Claude Code conversation uuid that the supervisor chooses (a lowercase uuid4, set and committed before the start; `launch-plan` passes it as `claude --session-id`), or `null` before it is set. It locates the session's transcript for its latest message. For a desktop-app session, the id the app returned.
 - `handle`: for `runtime: "herdr"`, the `hc` terminal name and equal to the id: `w-NNNN` for a worker, `m-p-NNNN` for the manager of `P-NNNN` (lowercase, since `hc` names allow only `a-z 0-9 - _`). `validate` checks it. For a desktop-app session, the start-time name, e.g. `t0003-w0004`.
 - `branch` / `worktree_path`: printed by `state_tool.py prepare-worktree` (SKILL.md 6.2 step 2); copy them from its output, never guess them.
-- `task.id`: `T-NNNN`. `worker.id`: `w-NNNN`. `user_actions[].id`: `UA-NNNN`. Allocate the next number after the highest one in the current `tasks` / `workers` / `user_actions`; for task ids also count the `archived` stubs, which keep their task id (a revived task reuses its stub's id, see archived[]). Stubs keep no worker or user-action ids, so those numbers may be reused after a task is archived; uniqueness is checked only within the current state. User-action numbers are allocated across the user actions of `tasks` and `projects` together, so a task and a project never share one, and never reused: the next number is above both the highest open one and `supervisor.last_ua_number` (which covers user actions already acked in the notes).
+- `task.id`: `T-NNNN`. `worker.id`: `w-NNNN`. `user_actions[].id`: `UA-NNNN` (kinds `ask` and `auto`). `agent_actions[].id`: `AA-NNNN` (kind `req`, the user's requests to the agent). `UA-` and `AA-` share one number sequence, so `UA-0241` and `AA-0241` never both exist, and `commit` rejects a prefix that does not match the kind; "user-action numbers" below covers both. Allocate the next number after the highest one in the current `tasks` / `workers` / `user_actions`; for task ids also count the `archived` stubs, which keep their task id (a revived task reuses its stub's id, see archived[]). Stubs keep no worker or user-action ids, so those numbers may be reused after a task is archived; uniqueness is checked only within the current state. User-action numbers are allocated across the user actions of `tasks` and `projects` together, so a task and a project never share one, and never reused: the next number is above both the highest open one and `supervisor.last_ua_number` (which covers user actions already acked in the notes).
 - `project.id`: `P-NNNN`, allocated as `supervisor.last_project_number + 1`; the counter is raised in the same candidate and never reused, even after the project is removed.
 - `review.id`: `R-NNNN`, allocated per project as `projects[].last_review_number + 1`; the counter is raised in the same candidate, and a review id is unique within its project (two projects may both have `R-0001`).
 
@@ -151,7 +151,7 @@ The example is a snapshot of the v1 view for illustration: `w-0005` and `w-0006`
 
 | Object | From the note (not stored) | Added runtime fields |
 | :--- | :--- | :--- |
-| `tasks[]` | `title` (note `title`), `request` (`## 概要`), `status` (derived), `user_actions` (open items of `## ユーザーアクション`, without `slot`s), `followups` (`## ログ`), `artifacts` (`## 成果物` rows numbered `art_from` or later) | `uid`, `note` (path relative to the vault), `note_seen`, `user_hold`, `confirmed`, `held`, `last_artifact_number`, `art_from`, `artifacts_quarantine` |
+| `tasks[]` | `title` (note `title`), `request` (the `> [!quote]- 依頼の原文` callout of `## 概要` when present, otherwise `## 概要`), `status` (derived), `user_actions` (open `@user` items of `## アクション`: kinds `ask` and `auto`), `agent_actions` (open numbered `@agent` items: kind `req`), `followups` (always empty; follow-up requests are `req` items), `artifacts` (`## 成果物` rows numbered `art_from` or later) | `uid`, `note` (path relative to the vault), `note_seen`, `user_hold`, `confirmed`, `held`, `last_artifact_number`, `art_from`, `artifacts_quarantine` |
 | `projects[]` | `name` (note `title`), `context_doc_url` (first URL of `## 概要` / `## 関連資料`), `user_actions` | `uid`, `note`, `note_seen`, `user_hold`, `done_proposed`, `confirmed` |
 | `archived[]` | `title`, `request`, `followups`, `artifacts` (all rows, or the rows before the `art_from` of a revived task with the same id) | `uid`, `note_seen`, `last_artifact_number`; `project` is stored as `{id}` |
 | `supervisor` | — | `last_ua_number`, `note_warnings: {uid: sha}`, `note_journal: {rev, entries}` |
@@ -173,11 +173,11 @@ Runtime fields:
 
 In the view, an open user action also carries `detector` (for `auto=<detector>` items) and `needs_answer: true` (for `ask answer` items).
 
-`commit --notes <ops.json>` (ops `{uid: [op, ...]}`) re-applies the previous commit's unconfirmed note writes once, checks that every ack copied into `note_seen` still matches its note, fills missing user-action ids and artifact numbers, applies the ops in memory, runs `next_state` on the views, derives note props (for the tasks archived in this commit from the candidate's task), writes `state.json` with `note_journal`, and only then writes the notes. Its output adds `notes_written`, `notes_deferred`, `notes_failed`, and `note_problems`. A `state.json` still at `schema_version: 1` keeps the v1 commit until it is migrated.
+`commit --notes <ops.json>` (ops `{uid: [op, ...]}`) re-applies the previous commit's unconfirmed note writes once, checks that every ack copied into `note_seen` still matches its note, fills missing action ids (`UA-` or `AA-` by kind, `ua_adopt` included) and artifact numbers, applies the ops in memory, runs `next_state` on the views, derives note props (for the tasks archived in this commit from the candidate's task), writes `state.json` with `note_journal`, and only then writes the notes. Its output adds `notes_written`, `notes_deferred`, `notes_failed`, and `note_problems`. A `state.json` still at `schema_version: 1` keeps the v1 commit until it is migrated.
 
 The vault is `vault` of `## Locations` in `<dir>/CLAUDE.md` (default `<dir>/vault`); its `dashboard` note and `templates` folder are never read as notes. A task note is tagged `supervised`, a project note `supervised`, `project`, `task` (`note_kind`).
 
-Subcommands that read the vault: `notes-scan --state` (the user's changes as events, 3.4 (2); writes nothing), `note-show --state --uid` (props, sections, user actions, slots, artifacts), `new-note --state --kind task|project` (reserves `{uid, path}`; writes nothing), `migrate-v2 --state [--dry-run]` (v1 → notes and a v2 state), `export-v1 --state --out` (the v1 form for rollback), and `retag-notes --state [--dry-run]` (gives the task and project notes of `<dir>/vault` the tags above; tags only). `check-template --kind --file` checks a note template (SKILL.md section 3, Vault interview). `digest`, `check-cwd`, `plan-actions`, `roster`, `waits`, and `manager-reconcile` read a v2 state through `join_view`. A task's `proposal` may be stored as `{from, message_ref}` (a proposal note: `message_ref` is `note:<uid>`); the view fills `title` and `text` from the note. `push_consent.source` is `chat` or `note` (SKILL.md 6.3 step 7).
+Subcommands that read the vault: `notes-scan --state` (the user's changes as events, 3.4 (2); writes nothing), `note-show --state --uid` (props, sections, `request`, user actions with their `body` and `answer`, `requests` (every open `req` item, unnumbered ones included), artifacts), `new-note --state --kind task|project` (reserves `{uid, path}`; writes nothing), `migrate-v2 --state [--dry-run]` (v1 → notes and a v2 state), `export-v1 --state --out` (the v1 form for rollback), and `retag-notes --state [--dry-run]` (gives the task and project notes of `<dir>/vault` the tags above; tags only). `check-template --kind --file` checks a note template (SKILL.md section 3, Vault interview). `digest`, `check-cwd`, `plan-actions`, `roster`, `waits`, and `manager-reconcile` read a v2 state through `join_view`. A task's `proposal` may be stored as `{from, message_ref}` (a proposal note: `message_ref` is `note:<uid>`); the view fills `title` and `text` from the note. `push_consent.source` is `chat` or `note` (SKILL.md 6.3 step 7).
 
 `_storage_errors(state_v2, notes)` checks what the view cannot see: `schema_version` is 2; no key that belongs to the note is stored; every task, project, and stub has a `uid`, and every live task and project's note exists (a stub's note may be gone); no two live tasks or projects share a uid; `held` lists workers of its task; a revived task has `art_from`; and the shapes of the runtime fields above.
 
@@ -234,13 +234,14 @@ Optional (absent counts as an empty list). A project groups tasks under one proj
 | Field | Meaning |
 | :--- | :--- |
 | `id`, `title` | Task id and short display title. |
-| `request` | The user's request, copied **verbatim** (never summarized) into the note's `## 概要` when the note is created. The user may edit the note later, so `commit` does not compare it across commits; it is read only at pickup and when a brief is written. |
-| `followups[]` | Optional. `{text, at}` entries (both non-empty strings), oldest first: later user requests that continue this task, each `text` copied **verbatim** (the whole message). Appended by the supervisor (SKILL.md 6.7); an existing `text` is never changed; an entry is removed only by a correction (SKILL.md 6.9). Carried into the `archived` stub when non-empty. |
+| `request` | The user's request. A note the agent creates gets a formatted `## 概要`, followed by the chat message copied **verbatim** (never summarized) as the callout `> [!quote]- 依頼の原文` (`create`'s `original`); `request` is that callout's content, or the whole `## 概要` when there is no callout (a picked-up note, a proposal note). The user may edit the note later, so `commit` does not compare it across commits; it is read only at pickup and when a brief is written. |
+| `followups[]` | Optional. `{text, at}` entries (both non-empty strings), oldest first: the v1 record of later user requests. The schema 2 view always leaves it empty: a follow-up request is a `req` item of `## アクション` (SKILL.md 6.7), listed in `agent_actions`. |
 | `push_consent` | `null`, or `{text, at, message?}` where `text` is the exact phrase that grants push / PR. Without `message`, `text` comes from `request`, checked when `push_consent` is set or changed. `message` is a later user message verbatim (including a consent given while the worker was still running, applied once the push-decision user action exists) and holds `text`; it may be set or changed only in a candidate that resolves a pending push-decision user action of the task (enforced by `commit`, the only path that accepts it). Its content is an audit record. Each push decision covers only the branch its user action names; a later consent overwrites `message`. |
 | `status` | Derived by `commit`. Never write it yourself (see Derivation). |
 | `next_action` | What the supervisor will do next for this task. |
-| `user_actions[]` | `{id, description, since, follow_up?}`: things the user must do. `description` is markdown, written into the note's checklist line (`[text](https://…)` and bare `https://…` URLs become links in Obsidian). A non-empty list makes the task `needs_user`. The supervisor removes each one in the candidate that records its resolution (SKILL.md section 5). `follow_up`, when present, is `{rule, url, done}`: the action is remaining work for the user (e.g. reviewing a PR) created from a `## Follow-ups` rule by `state_tool.py follow-ups` ([follow-ups-format.md](follow-ups-format.md)). `rule` is the rule id, `url` the PR URL it is about (the digest appends it when the description does not contain it), and `done` is `pr_closed` (also removed once the PR is merged or closed) or `manual` (removed only when the user says it is done). Never write it by hand. |
+| `user_actions[]` | `{id, description, since, follow_up?}`: things the user must do. `description` is markdown, the short heading of the note's `### [UA-NNNN] @user` item (`[text](https://…)` and bare `https://…` URLs become links in Obsidian); details and links go in the item's body (SKILL.md section 5). A non-empty list makes the task `needs_user`. The supervisor removes each one in the candidate that records its resolution (SKILL.md section 5). `follow_up`, when present, is `{rule, url, done}`: the action is remaining work for the user (e.g. reviewing a PR) created from a `## Follow-ups` rule by `state_tool.py follow-ups` ([follow-ups-format.md](follow-ups-format.md)). `rule` is the rule id, `url` the PR URL it is about (the digest appends it when the description does not contain it), and `done` is `pr_closed` (also removed once the PR is merged or closed) or `manual` (removed only when the user says it is done). Never write it by hand. |
 | `artifacts[]` | Results recorded from values the supervisor observed (see Artifacts). |
+| `agent_actions[]` | View only. `{id, description, since}` of the open numbered `req` items (`### [AA-NNNN] @agent`): the user's requests to the agent (SKILL.md section 5). They never make the task `needs_user`; `split_view` acks them (`ua_ack`) when the task is archived. Never write them by hand. |
 | `worker_ids[]` | Workers that belong to this task. |
 | `created_at` | ISO 8601 timestamp with offset. |
 | `cancel` | Optional. `{at, reason}` once the user cancelled the task (see Cancellation). |
@@ -376,7 +377,7 @@ Every commit also writes `task_id` and `project_id` (`id_props`) to each note of
 
 ### User changes (`user_transition`)
 
-`notes-scan` compares each note with `note_seen` (or with the `before` values of an unconfirmed journal entry) and classifies the change. Any combination not listed is `invalid`: the user is told, `user_hold` (`reason: invalid`) stops props and starts, and nothing is acked until the user sets listed values. A change of `## ユーザーアクション` alone needs no handling.
+`notes-scan` compares each note with `note_seen` (or with the `before` values of an unconfirmed journal entry) and classifies the change. Any combination not listed is `invalid`: the user is told, `user_hold` (`reason: invalid`) stops props and starts, and nothing is acked until the user sets listed values. A change of `## アクション` alone needs no handling.
 
 | # | Seen | Now | Condition | Event |
 | :--- | :--- | :--- | :--- | :--- |
@@ -389,13 +390,13 @@ Every commit also writes `task_id` and `project_id` (`id_props`) to each note of
 | 7 | in progress/agent or in progress/user | the user values of #5 / #6 | not active | `pause` |
 | 8 | paused | in progress/agent, backlog/agent | | `resume` |
 | 9 | paused | another user value | | `none` |
-| 10 | in progress/user | only checkboxes / answers changed | open user actions | `none` |
+| 10 | in progress/user | only `## アクション` changed (answers, requests) | open user actions | `none` |
 | 11 | in progress/user | in progress/agent, backlog/agent | | `resume` |
 | 12 | in progress/agent | backlog/agent | | `restore` |
 | 13 | done/agent | done/user | task | `confirm` |
 | 14 | done/agent, in progress/* | done/user | project | `confirm` |
 | 15 | in progress/*, paused | done/user, done/agent | task | `cancel` |
-| 16 | done/agent, done/user | backlog/agent | | `follow_up` |
+| 16 | done/agent, done/user; or any value but archived on a stub (a task that is not live) | backlog/agent; also in progress/agent on a stub | | `follow_up` |
 | 17 | managed | archived | task | `cancel` |
 | 18 | managed | archived | project | `close` |
 | 19 | archived | any | | `invalid` |
@@ -403,6 +404,8 @@ Every commit also writes `task_id` and `project_id` (`id_props`) to each note of
 | 21 | done/agent | in progress/agent, in progress/user | project | `reject_done` (with `pause` for in progress/user) |
 | 22 | only `## 成果物` changed | dependencies met (or a stub) | | `artifacts_edit` |
 | 23 | only `## 成果物` changed | dependencies not met | live task | `artifacts_broken` |
+
+The stub case of #16 is checked right after #19 and before the rows that look at a hold or a worker (#8, #11, #12), so a stub set to in progress/agent or backlog/agent is always `follow_up` (SKILL.md 6.7 (c)). A change to the same values as before stays `none`.
 
 ### Artifact quarantine
 
@@ -466,7 +469,7 @@ Checks against the current state (`next_state`):
 
 - The candidate's `rev` equals the current `rev`. The written state gets `rev + 1`.
 - No silent deletion: a task present in current but absent from the candidate is always rejected. Tasks leave `tasks` only through the move that `commit` itself performs for tasks derived as `done`, so never remove a task from the candidate. A worker with a non-null `session_id` may disappear only together with its task's move.
-- Push consent without `message`: when a task with a `push_pr` worker has a `push_consent` that differs from current's, its `text` is a substring of the task's `request` (the note's `## 概要` at that time).
+- Push consent without `message`: when a task with a `push_pr` worker has a `push_consent` that differs from current's, its `text` is a substring of the task's `request` at that time (the content of the note's `依頼の原文` callout when present, otherwise its `## 概要`), so formatting `## 概要` never changes the result.
 - Transition to archived: for each worker whose `intended_state` is not `archived` in current and is `archived` in the candidate:
   - if its delivery is `commit`, the task is not cancelled, the worker has no `replaced_by` and is not in the task's `no_result`, and its group is not pushed at its verified head (the `commit` artifact right after the last `branch` artifact `<cwd>#<branch>` of that worker has a `url` ending in `/commit/<its ref>`; SKILL.md 6.3 step 6), the candidate task must contain the push-decision user action. A group's `commit` always directly follows its `branch`; a `pr` artifact is appended after the group
   - `supervisor.archive_consent` must not be null, unless the worker is already observed `archived` or `missing` (no archive call follows); a worker with `replaced_by` is not exempt from this

@@ -20,21 +20,42 @@ parent: "[[20261101_090000]]"
 
 README の typo を直してください。
 
-## ユーザーアクション
+## アクション
 
-- [ ] UA-0160 push してよいか判断してください: `claude/t0120-fix-typo` (repo-a) <!-- sv ask answer since=2026-11-09T22:30:00+09:00 --> ^ua-0160
-    - push してください
+### [UA-0160] @user Decide whether to push branch `claude/t0120-fix-typo` of `repo-a`
+<!-- sv ask answer since=2026-11-09T22:30:00+09:00 -->
 
-        - main への PR も作ってください
-- [X] UA-0161 PR をマージしてください: [repo-a#42](https://github.com/org/repo-a/pull/42) <!-- sv auto=pr_closed url=https://github.com/org/repo-a/pull/42 since=2026-11-09T22:31:00+09:00 --> ^ua-0161
-- [ ] UA-0162 再開時の指示(任意。サブアイテムに書いてください) <!-- sv slot since=2026-11-09T22:32:00+09:00 --> ^ua-0162
-- [x] UA-0163 w-0120 is not progressing <!-- sv ask answer since=2026-11-09T22:33:00+09:00 done=2026-11-09T22:40:00+09:00 r12 --> ^ua-0163
-- [/] UA-0164 作業場所を教えてください <!-- sv ask answer since=2026-11-09T22:34:00+09:00 --> ^ua-0164
-- [ ] 自分用のチェック(メタデータなし)
+> typo を 3 か所直した。
+
+#### 回答
+push してください
+
+main への PR も作ってください
+
+### [UA-0161] @user PR をマージしてください: repo-a#42
+<!-- sv auto=pr_closed url=https://github.com/org/repo-a/pull/42 since=2026-11-09T22:31:00+09:00 -->
+[repo-a#42](https://github.com/org/repo-a/pull/42)
+
+### [UA-0164] @user 作業場所を教えてください
+<!-- sv ask answer since=2026-11-09T22:34:00+09:00 -->
+
+#### 回答
+
+
+### @agent CHANGELOG も直す
+
+CHANGELOG の Unreleased に 1 行足してください。
 
 ### メモ
 
 ユーザーの小見出し。
+
+- [ ] 自分用のチェック(メタデータなし)
+
+> [!done]- 完了 (1)
+> - [UA-0163] @user w-0120 is not progressing <!-- sv ask answer since=2026-11-09T22:33:00+09:00 done=2026-11-09T22:40:00+09:00 r12 -->
+>     #### 回答
+>     待ちます
 
 ## サブタスク
 
