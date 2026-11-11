@@ -4230,7 +4230,7 @@ class NotePropsTest(unittest.TestCase):
             (item(user_hold={"at": NOW, "reason": "pause"}), wk(), None),
             (item(user_hold={"at": NOW, "reason": "pause"}, artifacts_quarantine={"at": NOW, "ua": "UA-0001"},
                   user_actions=[{"id": "UA-0001", "description": "q", "since": NOW}]), wk(), None),
-            (item(), wk("archived", "archived"), ("done", "agent")),
+            (item(), wk("archived", "archived"), ("done", "user")),
             (item(user_actions=[read]), wk(), ("done", "agent")),
             (item(user_actions=[read, {"id": "UA-0001", "description": "q", "since": NOW}]), wk(), ("in progress", "user")),
             (item(artifacts_quarantine={"at": NOW, "ua": "UA-0001"},
@@ -4734,7 +4734,7 @@ class NoteCommitTest(unittest.TestCase):
         self.assertEqual((stub["uid"], stub["note_seen"]["status"]), (U1, "done"))
         self.assertEqual(self.env.scan()["events"], [])
 
-    def test_finished_task_gets_done_agent_when_archived(self):
+    def test_finished_task_gets_done_user_when_archived(self):
         nongit = self.env.load()
         nongit_task(nongit, "T-0030", "w-0030", "/Users/example/notes", "archived", "idle")
         v2_note({}, U3)
@@ -4748,7 +4748,7 @@ class NoteCommitTest(unittest.TestCase):
         find(cand["workers"], "w-0030")["observed_state"] = "archived"
         code, out, err = self.env.commit(cand)
         self.assertEqual(code, 0, err)
-        self.assertEqual(st._pair(self.env.values(U3)), ("done", "agent"))
+        self.assertEqual(st._pair(self.env.values(U3)), ("done", "user"))
         self.assertEqual(self.env.load()["archived"][0]["uid"], U3)
 
     def crash_ops(self):
@@ -5444,7 +5444,7 @@ class VerifyFixesTest(unittest.TestCase):
         commit_ops = {U1: [{"op": "art_add", "items": [{"kind": "branch", "ref": "/repo/a#claude/license-x1"}, {"kind": "commit", "ref": "abc123",
                                                                                                                   "url": "https://github.com/org/repo-a/commit/abc123"}]}]}
         self.assertEqual(self.env.commit(cand, commit_ops)[0], 0)
-        self.assertEqual(st._pair(self.env.values(U1)), ("done", "agent"))
+        self.assertEqual(st._pair(self.env.values(U1)), ("done", "user"))
         state = self.env.load()
         state["archived"] = []  # the stub left the ARCHIVED_KEEP window
         self.env.state = state

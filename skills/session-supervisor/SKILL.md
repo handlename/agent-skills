@@ -849,7 +849,7 @@ A note `state_tool` wrote whose stub has left the 20-stub window (it has an acti
 
 `clear_invalid: true` on an event means the user fixed the values: remove `user_hold` in the same candidate. Quarantine answers, at `resume`: when the rows are back (the next scan reports `artifacts_edit`) the quarantine ends there; 「行を戻した」 with rows still missing gets the user action again with the current needs; 「削除」 records, in one candidate, `no_result` (`summary` 「成果物の記録をユーザーが削除(UA-NNNN)」) for each archived worker that depended on the rows, acks the push decision as "no push" and the follow-ups, and removes `artifacts_quarantine`.
 
-A task finishing (`commit` derives `done`) writes `done` / `agent`; the user asks for more by writing `### @agent` and setting the note to `backlog` / `agent` (`follow_up`). `warnings` name live items whose note is missing: tell the user once.
+A task finishing (`commit` derives `done`) writes `done` / `user`, since only the user confirms that a task is complete; the user asks for more by writing `### @agent` and setting the note to `backlog` / `agent` (`follow_up`). `warnings` name live items whose note is missing: tell the user once.
 
 #### 6.14 Chat requests
 

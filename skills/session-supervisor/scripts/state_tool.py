@@ -2742,7 +2742,10 @@ def note_props(kind, item, workers_by_id):
         return ("in progress", "user") if item.get("user_actions") else ("in progress", "agent")
     actions = item.get("user_actions", [])
     status = derive_status(item, workers_by_id)
-    if status == "done" or (actions and all(_read_action_worker(ua) for ua in actions)):
+    # A finished task is the user's to confirm (or to follow up with backlog/agent), so it is never done/agent.
+    if status == "done":
+        return ("done", "user")
+    if actions and all(_read_action_worker(ua) for ua in actions):
         return ("done", "agent")
     return ("in progress", "user") if status == "needs_user" else ("in progress", "agent")
 

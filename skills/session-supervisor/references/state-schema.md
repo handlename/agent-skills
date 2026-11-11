@@ -365,7 +365,8 @@ A project with `confirmed`, no `close`, and no live task left gets `close = {at,
 | task `cancel` / project `close` (occupying workers or not) | `archived` (assignee kept) |
 | `user_hold` | not written |
 | project `done_proposed` | `done` / `agent` |
-| task derived `done`, or its only open user actions are held read actions | `done` / `agent` |
+| task derived `done` | `done` / `user` (the user confirms the result, or follows up with `backlog` / `agent`) |
+| task whose only open user actions are held read actions | `done` / `agent` |
 | task derived `needs_user` / project with open user actions | `in progress` / `user` |
 | otherwise | `in progress` / `agent` |
 
