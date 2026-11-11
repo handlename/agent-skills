@@ -450,6 +450,11 @@ Every fact from outside `<dir>` reaches the supervisor as a result file written 
    - "Find out why the retry does not work" → set
    - "Find the cause and fix it" → not set
    - "Make a comparison table and leave it there" → not set
+
+   **Interactive**: set `interactive: true` on each worker of the task when the request asks to work it out with the agent in the session (「対話で進めたい」「相談しながら」「一緒に決めたい」, "interactively"), or when much of it is unclear to you: several plausible readings, an unstated goal, scope, or done criterion, or a design choice only the user can make. Choose it over guessing for such requests, and for large or intricate changes. The worker starts at once, asks its questions in its first turn (`needs_input`), and its guidance (6.3 step 4) shows the note as `in progress` / `user`, telling the user to talk to it in its terminal. An `investigation` task may be interactive too. Examples:
+   - "uploader のリトライを直して" with the issue and the log → not set
+   - "認証まわりをいい感じに整理したい" → set (goal and scope unstated)
+   - "対話しながら設計を詰めたい" → set
 6. Record push consent only when the request contains explicit wording, copying the exact phrase into `push_consent.text` (it must be a substring of `request`). A negated phrase is not consent even though it contains the words:
    - "README を直して。push して PR を作ってよい" → consent, text `push して PR を作ってよい`, delivery `push_pr`
    - "Fix the typo and open a PR" → consent, text `open a PR`, delivery `push_pr`
@@ -477,7 +482,7 @@ Start in any turn: the user's chat, a signal, a `sv-watch` message, or a `/loop`
 
    It prints `{status, path, repo, branch, base, head}`. On exit 1, report its `error:` lines and do not start.
 3. In one candidate set on the worker: `runtime: "herdr"`, `handle` = its id (`w-NNNN`), `session_id` = a new lowercase uuid4, `model` (6.2.1), `title` (6.2.2), and for git `worktree_path` = `path` and `branch` = `branch` (`cwd` stays the repository root; `launch-plan` starts a git worker in its `worktree_path`). Set `base_branch`: the `--base` you passed, except that a push-only worker (6.3 step 7) and a replacement worker (6.8) keep the `base_branch` inherited from the worker they continue, so that `commit_count` still counts the original commits; a push worker of the "Archived stub" path of 6.3 step 7 uses the observer's remote default branch. Set `started_by: "sv"` and `intended_state: running`, `observed_state: none`. Run the state-change set.
-4. Build `prompt` and `background` from [references/worker-prompt.md](references/worker-prompt.md), join them into one prompt file `<dir>/.supervisor/prompt-<id>.md` (the `prompt`, a blank line, then the `background`), and print the argv. For a worker of a project task, fill the project, proposal, and redo fields as well. A worker of a task with `investigation` gets the `{investigation only: ...}` rules, except a push-only worker. A worker of a task with `derived_from` gets the `{derived from an investigation only: ...}` block.
+4. Build `prompt` and `background` from [references/worker-prompt.md](references/worker-prompt.md), join them into one prompt file `<dir>/.supervisor/prompt-<id>.md` (the `prompt`, a blank line, then the `background`), and print the argv. For a worker of a project task, fill the project, proposal, and redo fields as well. A worker of a task with `investigation` gets the `{investigation only: ...}` rules, except a push-only worker. A worker of a task with `derived_from` gets the `{derived from an investigation only: ...}` block. A worker with `interactive` gets the `{interactive only: ...}` parts.
 
    ```bash
    python3 "<dir>/.supervisor/state_tool.py" launch-plan --state "<dir>/state.json" --claude-md "<dir>/CLAUDE.md" --worker w-0004 --prompt-file "<dir>/.supervisor/prompt-w-0004.md"
@@ -702,6 +707,8 @@ Decide from the content of each user message whether it continues an existing ta
 - A follow-up: a fix, addition, review response, or redo of the same deliverable; a mention of its T-ID, PR, branch, or files; a request on the same subject in the same directory as the previous one.
 - Undecidable: a new task (6.1).
 
+**Interactive follow-up**: a follow-up is interactive when it asks to talk it over with the worker, or when much of it is unclear to you (the criteria of 6.1 step 5). For (a), send the Interactive message ([references/worker-prompt.md](references/worker-prompt.md)) instead of the Follow-up message and set `interactive: true` on the worker in the same candidate; for (b) and (c), add the new worker with `interactive: true`. Either way the note shows `in progress` / `user` once the worker asks (6.3 step 4).
+
 Record a follow-up from this chat as an agent action (section 5): `ua_add {ua: {kind: req, description: <short title>, body: <the whole message verbatim>}, reply: <what was started>}`. A follow-up from the note is the user's `### @agent` request, numbered with `ua_adopt` (6.13). The request's body is the `{followup.text}` of the Follow-up message. Never change `request`.
 
 **Target directory**: add workers only for the directories the follow-up concerns (each a `cwd`, the absolute repo root for git). When a task spans several directories and you cannot tell which one the follow-up concerns, make it a new task (6.1).
@@ -748,7 +755,7 @@ A worker that went missing (6.4 "Not listed") or was archived outside the superv
    - remove the old worker's guidance (6.3 step 4); the new worker asks again in its own report;
    - add a new worker with `intended_state: pending`, `observed_state: none`, copying from the old worker `kind`, `cwd`, `delivery`, `base_branch`, `title`, and its brief type (normal, push-only, or follow-up); a push-only worker also copies `branch` (the pushed branch) and `{commit}`. Do not copy `model`: 6.2.1 chooses it again from the inherited brief type when the worker is launched;
    - its `source_branch`, decided when it is launched (6.2): the pushed branch for a push-only worker; otherwise the old worker's branch when the `base` observer reports it exists (`branch_head`), else the same start condition as the old worker;
-   - its brief gets the same `{investigation only: ...}` rules and `{derived from an investigation only: ...}` block as the old worker's, from the task's `investigation` and `derived_from`;
+   - its brief gets the same `{investigation only: ...}` rules and `{derived from an investigation only: ...}` block as the old worker's, from the task's `investigation` and `derived_from`, and it copies `interactive` from the old worker;
    - set the task's `next_action` to `start w-xxxx` and add no user action.
 
    Run the state-change set. Launch it with 6.2 in the same turn (6.4, last paragraph); it keeps the inherited `base_branch` (6.2 step 3).
@@ -832,7 +839,7 @@ Called from 6.4 when a manager of an open project is `missing` or archived outsi
 | :--- | :--- |
 | `pickup` | 6.1 (task) or 6.10 (project) "From a note"; a task note's unnumbered `### @agent` requests are part of the request and get `ua_adopt` with a `reply` (section 5, Agent replies) |
 | `pause` | Record `user_hold = {at, status, assignee, reason: "pause"}`. The user writes resume instructions as `### @agent` (section 5). A running worker gets the Pause message ([references/worker-prompt.md](references/worker-prompt.md)); a project's manager gets "Stop proposing and reviewing until the supervisor tells you to continue". `pause: true` on a `reject_done` event does the same |
-| `resume` | Remove `user_hold`. Complete the open user actions whose `#### 回答` is not empty (section 5, Completion); an `ask answer` without an answer stays and gets a `log` asking again. Answers under a worker's guidance go to that worker in one Answer message and close the guidance (6.3 step 4, "Answers"). `ua_adopt` each unnumbered `### @agent` request with a `reply` saying where it went: send a running worker the Follow-up message with their bodies (or 「続けてください」 when there is none); with no running worker in the target directory, start one with 6.7 (b). A pending worker starts in the same turn (6.4, last paragraph) |
+| `resume` | Remove `user_hold`. Complete the open user actions whose `#### 回答` is not empty (section 5, Completion); an `ask answer` without an answer stays and gets a `log` asking again. Answers under a worker's guidance go to that worker in one Answer message and close the guidance (6.3 step 4, "Answers"). `ua_adopt` each unnumbered `### @agent` request with a `reply` saying where it went: send a running worker the Follow-up message with their bodies (or 「続けてください」 when there is none), or the Interactive message for an interactive request (6.7); with no running worker in the target directory, start one with 6.7 (b). A pending worker starts in the same turn (6.4, last paragraph) |
 | `restore` | Nothing but the ack; `commit` writes the derived value back. Log 「稼働中のため in progress に戻しました」 for in progress |
 | `confirm` | Record `confirmed`. A task: archive its `held` workers and empty `held`. A project: ack the completion user action of 6.11 `project_done` if any, then 6.10 "Done from the note" |
 | `cancel` | 6.6, with `confirmed` too when the user moved it to `done` (the note then shows `done` / `user`) |
@@ -972,3 +979,4 @@ Moving a supervisor from the desktop app to Herdr needs no state migration: run 
 - No project manager started or archived a session (no `foreign_session` user action).
 - Every worker of an investigation task (except push-only workers) became `intended_state: archived` only in a release candidate of 6.3 step 6 (a verified `done` with `read_confirmed: true`, the user's confirmation in this chat, `approve_ok` of such a report, or a worker observed `archived` or `missing`), or by cancel or `replaced_by`.
 - Every worker or manager named in a reply or in `findings` was named by its handle (`w-NNNN`, `m-p-NNNN`).
+- Every request that asked to work it out in the session, or that was unclear to the supervisor, went to a worker with `interactive: true` (or to a running worker with the Interactive message), not to a worker told to proceed on a guess.

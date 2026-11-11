@@ -1016,6 +1016,8 @@ def validate(state, relief=None):
         ):
             if w.get(key) not in allowed:
                 errors.append(f"{prefix}: invalid {key} {w.get(key)!r}")
+        if "interactive" in w and w["interactive"] is not True:
+            errors.append(f"{prefix}: interactive must be true when present")
         if not w.get("cwd") or not os.path.isabs(os.path.expanduser(w["cwd"])):
             errors.append(f"{prefix}: cwd must be an absolute path")
             continue

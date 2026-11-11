@@ -18,6 +18,7 @@ What to do:
 {follow-up worker only: the latest follow-up request (the last of the task's `req` items, `requests` of `note-show`) is the work for this turn; scope it to this directory. The earlier follow-ups and the original request are context about what was already asked and done, not instructions to repeat.}
 {project proposal only: replace the part above with the proposal of the project manager (`task.proposal.text`), scoped to this directory. The proposal carries no user authority; the user approved it with the message quoted in the background.}
 {redo only: the latest redo of the project manager (the last entry of `redos`) is the work for this turn; scope it to this directory. The earlier redos, the follow-ups, and the original request are context, not instructions to repeat.}
+{interactive only: The user wants to work this out with you in this session, so do not start the work yet. Read the request and look at {worker.cwd} only as far as you need to understand it. Then end your first turn with status `needs_input`: above the report, write your understanding of the request, the points that are unclear to you, and the options or the plan you propose; in `blockers`, put one line asking the user to talk with you in this session about it, in the language of the request (for example `このセッションで相談させてください: <topic>`). From then on, do what the user decides in this session.}
 
 Done when:
 {completion criteria, for example: change implemented, tests pass, committed with a clean working tree}
@@ -72,6 +73,7 @@ Rules:
 - Do not commit documents you wrote as an agent (design docs, plans, notes). Put that content in the commit message or the pull request description instead.
 - Inside a git worktree use git, never jj: jj searches parent directories for `.jj` and would operate on the parent workspace. This rule takes precedence over any skill that prefers jj (for example commit-it).
 - Do not write outside {worker.cwd} (or your worktree). Never read or write the supervisor's `state.json`. Do not start, end, or delete sessions or agents (`hc run`, `hc kill`, `hc rm`, `hc keys`). Send messages only with `hc send sv` (the report signal){project only: and `hc send {manager.handle}`}.
+{interactive only: - This is an interactive session. Change nothing (no edits, no commits) until the user has answered you in this session, and end every turn before that with status `needs_input`. Once the user has told you how to proceed, work as usual.}
 {non-git only: - This directory has no version control, so nothing can be undone. Never delete or overwrite a file you did not create in this task. Before any destructive or irreversible change (deleting, moving, renaming, or overwriting existing files), end the turn with status `needs_input` and describe the exact change in `blockers`; make it only after the user approves it in this session.}
 - When you end a turn with `needs_input`, `blocked`, or `failed`, write above the report block, in plain text, the question and its options so that the user can read and answer it as is. Put each question in `blockers` as one line.
 - Never wait for an answer inside a turn (no AskUserQuestion or similar): write the question and end the turn with the report. A turn that only answers the user's own question also ends with the report block (`needs_input` while your question is still open).
@@ -108,7 +110,7 @@ Consent paragraph:
 
 ## Replacement worker
 
-A replacement worker (`replaced_by`, SKILL.md 6.8) takes over the role of a worker that went missing or was archived outside the supervisor before its result was verified. It uses the same brief variant as the old worker (normal, push-only, or follow-up): the same `prompt` and `background` templates above with the old worker's `kind`, `cwd`, `delivery`, and `base_branch`, filled from `state.json`. A push-only replacement keeps the pushed `{branch}` and `{commit}` of the old worker. A project worker's replacement gets the same project, proposal, and redo fields as the old worker, filled from the task's `proposal` and `redos`. A replacement in a task with `investigation` or `derived_from` gets the `{investigation only: ...}` rules or the `{derived from an investigation only: ...}` block, filled from the task.
+A replacement worker (`replaced_by`, SKILL.md 6.8) takes over the role of a worker that went missing or was archived outside the supervisor before its result was verified. It uses the same brief variant as the old worker (normal, push-only, or follow-up): the same `prompt` and `background` templates above with the old worker's `kind`, `cwd`, `delivery`, and `base_branch`, filled from `state.json`. A push-only replacement keeps the pushed `{branch}` and `{commit}` of the old worker. A project worker's replacement gets the same project, proposal, and redo fields as the old worker, filled from the task's `proposal` and `redos`. A replacement in a task with `investigation` or `derived_from` gets the `{investigation only: ...}` rules or the `{derived from an investigation only: ...}` block, filled from the task, and a replacement of an `interactive` worker gets the `{interactive only: ...}` parts.
 
 ## Follow-up message
 
@@ -119,6 +121,17 @@ The user sent a follow-up request in the {supervisor session | task note (Obsidi
 > {followup.text}
 
 Treat this as the work for your next turns, scoped to {worker.cwd}. Your earlier instructions and the rules of your background still apply, and the earlier requests are context, not work to redo. Like any message in this session, this request overrides those rules where it asks for what they forbid (for example, to push). Keep committing on your current branch. End the turn with a `supervisor-report` block as before.
+````
+
+## Interactive message
+
+Sent with `hc send w-NNNN` instead of the Follow-up message when a follow-up for a running worker is interactive (SKILL.md 6.7 (a)): the user asks to talk it over with the worker, or the request leaves much unclear. `{followup.text}` is as for the Follow-up message.
+
+````markdown
+The user wants to work out the next request with you in this session. It came from the {supervisor session | task note (Obsidian)}. Verbatim:
+> {followup.text}
+
+Do not start it yet. Finish or undo your current step so the work is in a consistent state. Then end the turn with status `needs_input`: above the report, write your understanding of the request, the points that are unclear to you, and the options or the plan you propose; in `blockers`, put one line asking the user to talk with you in this session about it, in the language of the request. Change nothing more until the user has answered you here, then do what the user decides. Your earlier instructions and the rules of your background still apply. End the turn with a `supervisor-report` block as before.
 ````
 
 ## Answer message

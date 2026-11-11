@@ -3216,6 +3216,14 @@ class InvestigationTest(unittest.TestCase):
         stub["findings"][0]["title"] = ""
         self.assertInvalid(state, r"archived T-0091: findings must be a list of")
 
+    def test_interactive_worker_flag_is_true_when_present(self):
+        state = fixture_state()
+        worker = state["workers"][0]
+        worker["interactive"] = True
+        self.assertEqual(st.validate(state), [])
+        worker["interactive"] = "yes"
+        self.assertInvalid(state, rf"worker {worker['id']}: interactive must be true when present")
+
     def test_findings_and_investigation_carried_into_stub_and_concatenated(self):
         investigation_task(self.current, "T-0090", "w-0090")
         cand = copy.deepcopy(self.current)
