@@ -4086,13 +4086,16 @@ def cmd_setup(args):
     return 0
 
 
-def _kanban_base(name, assignee, templates):
+KANBAN_ORDER = "[formula.title, summary, task_id, project_id, created_at]"
+
+
+def _kanban_base(name, filters, templates, order=KANBAN_ORDER):
+    lines = "".join(f"\n    - {f}" for f in filters)
     return f"""```base
 filters:
   and:
     - file.hasTag("supervised")
-    - '!file.inFolder("{templates}")'
-    - 'assignee == "{assignee}"'
+    - '!file.inFolder("{templates}")'{lines}
 formulas:
   title: link(file.name, title)
 views:
@@ -4101,27 +4104,45 @@ views:
     groupBy:
       property: status
       direction: ASC
-    order: [formula.title, summary, task_id, project_id, created_at]
+    order: {order}
     groupOrder: [backlog, in progress, pending, done, archived]
     hideEmptyGroups: false
 ```
 """
 
 
+_NOT_PROJECT = """'!file.hasTag("project")'"""
+_ASSIGNEE_IS = """'assignee == "{}"'"""
+
+
 def supervisor_note(templates):
-    return (f"## ユーザーの番\n\n{_kanban_base('ユーザー', 'user', templates)}\n"
-            f"## エージェントの番\n\n{_kanban_base('エージェント', 'agent', templates)}")
+    """Tasks on two kanbans by assignee, and projects, which stay in progress / agent until closed, on their own."""
+    user = _kanban_base("ユーザー", (_NOT_PROJECT, _ASSIGNEE_IS.format("user")), templates)
+    agent = _kanban_base("エージェント", (_NOT_PROJECT, _ASSIGNEE_IS.format("agent")), templates)
+    project = _kanban_base("プロジェクト", ('file.hasTag("project")',), templates,
+                           "[formula.title, summary, project_id, assignee, created_at]")
+    return f"## ユーザーの番\n\n{user}\n## エージェントの番\n\n{agent}\n## プロジェクト\n\n{project}"
+
+
+def legacy_supervisor_notes(templates):
+    """Dashboards that earlier setups generated, which setup may replace because the user never edited them."""
+    return tuple(f"## ユーザーの番\n\n{_kanban_base('ユーザー', (_ASSIGNEE_IS.format('user'),), templates, order)}\n"
+                 f"## エージェントの番\n\n{_kanban_base('エージェント', (_ASSIGNEE_IS.format('agent'),), templates, order)}"
+                 for order in (KANBAN_ORDER, "[formula.title, task_id, project_id, created_at]"))
 
 
 def _setup_vault(supervisor_dir):
-    """Create the dashboard note when it is missing; never overwrite it. Templates are built with the user (section 3),
+    """Create the dashboard note when it is missing; never overwrite it unless it is an unedited earlier version. Templates are built with the user (section 3),
     except the Templater scripts sv-status.md and sv-project.md, which are placed in the template folder (created,
     exists or updated)."""
     vault, dashboard, templates = vault_locations(supervisor_dir)
     files = ((Path(vault) / dashboard, supervisor_note(templates)),)
     report = []
     for path, text in files:
-        if path.exists():
+        if path.exists() and path.read_text(encoding="utf-8") in legacy_supervisor_notes(templates):
+            _write_atomic(str(path), text)
+            report.append(("updated", path))
+        elif path.exists():
             report.append(("exists", path))
         else:
             path.parent.mkdir(parents=True, exist_ok=True)

@@ -5241,6 +5241,19 @@ class VaultGuardTest(unittest.TestCase):
 
 
 class SetupVaultTest(unittest.TestCase):
+    def test_replaces_an_unedited_earlier_dashboard_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "sup"
+            dashboard = target / "vault" / "Supervisor.md"
+            for old in (*st.legacy_supervisor_notes("_templates"), "mine\n"):
+                dashboard.parent.mkdir(parents=True, exist_ok=True)
+                dashboard.write_text(old, encoding="utf-8")
+                proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                edited = old == "mine\n"
+                self.assertIn(f"{'exists' if edited else 'updated'}: {dashboard}", proc.stdout)
+                self.assertEqual(dashboard.read_text(encoding="utf-8"), old if edited else st.supervisor_note("_templates"))
+
     def test_creates_the_vault_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "sup"
@@ -5248,9 +5261,12 @@ class SetupVaultTest(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             vault = target / "vault"
             dashboard = (vault / "Supervisor.md").read_text(encoding="utf-8")
-            self.assertEqual(dashboard.count("type: kanban"), 2)
+            self.assertEqual(dashboard.count("type: kanban"), 3)
             self.assertIn("""'assignee == "user"'""", dashboard)
             self.assertIn("""'assignee == "agent"'""", dashboard)
+            self.assertEqual(dashboard.count("""'!file.hasTag("project")'"""), 2)
+            self.assertIn("## プロジェクト", dashboard)
+            self.assertIn("order: [formula.title, summary, project_id, assignee, created_at]", dashboard)
             self.assertIn("groupOrder: [backlog, in progress, pending, done, archived]", (vault / "Supervisor.md").read_text(encoding="utf-8"))
             self.assertEqual(dashboard.count("order: [formula.title, summary, task_id, project_id, created_at]"), 2)
             self.assertIn('file.hasTag("supervised")', dashboard)
