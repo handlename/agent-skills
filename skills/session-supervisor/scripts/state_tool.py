@@ -5,6 +5,7 @@ Functional core: validate, next_state, digest, parse_report, cwd_busy, serialize
 parse_project_report, plan_actions, roster, waits, manager_reconcile,
 guard_decision (bash_violations, path_violation), parse_follow_ups, new_pr_urls, follow_up_actions,
 parse_locations, default_locations, add_missing_locations, clone_url_parts,
+parse_herdr, default_herdr, add_missing_herdr, launch_argv, observe_hc, watch_messages,
 parse_frontmatter, set_props, new_note_text, parse_sections, parse_user_actions, ua_open, render_ua_line,
 apply_note_ops, parse_artifacts, render_artifact_line, artifacts_view, art_sha,
 join_view, split_view, note_props, user_transition, artifact_needs, note_values, journal_reflected, number_note_ops,
@@ -24,6 +25,8 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -100,11 +103,22 @@ UA_LINE_RE = re.compile(r"^([ \t]*)[-*+] \[(.)\] (UA-\d+)\b(.*?)<!--[ \t]*sv[ \t
 ART_COMMENT_RE = re.compile(r"<!--[ \t]*sv-art[ \t]+(.*?)[ \t]*-->")
 
 LOCATIONS_HEADING = "## Locations"
-LOCATION_KEYS = ("clone_root", "work_root")
-LOCATIONS_NOTE = ("`python3 .supervisor/state_tool.py prepare-dir` is the only command that writes outside this directory: "
-                  "it clones repositories into `clone_root/<host>/<owner>/<repo>` and creates work directories "
-                  "and project directories (with a guard hook) under `work_root`. "
-                  "A missing key uses its default.")
+LOCATION_KEYS = ("clone_root", "work_root", "worktree_root")
+# Optional keys that setup never adds: the vault (absolute or ~) and, relative to it, the dashboard note and template folder.
+VAULT_REL_KEYS = ("dashboard", "templates")
+LOCATIONS_NOTE = ("`python3 .supervisor/state_tool.py prepare-dir` and `prepare-worktree` are the only commands that write outside "
+                  "this directory: they clone repositories into `clone_root/<host>/<owner>/<repo>`, create work directories "
+                  "and project directories (with a guard hook) under `work_root`, and add worker worktrees under "
+                  "`worktree_root/<repo>/<slug>`. A missing key uses its default.")
+RUNTIMES = ("herdr",)
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+HERDR_HEADING = "## Herdr"
+HERDR_KEYS = ("max_workers", "worker_path")
+HERDR_NOTE = ("Settings for workers started with `hc run` (Herdr). `max_workers`: how many herdr workers may run at once. "
+              "`worker_path`: the PATH workers start with, because hc does not run them through an interactive shell. "
+              "A missing key uses its default (8; the core's PATH).")
+DEFAULT_MAX_WORKERS = 8
+MISE_SHIMS = "~/.local/share/mise/shims"
 CLONE_URL_RES = (
     re.compile(r"^https://([^/]+)/([^/]+)/([^/]+?)(?:\.git)?/?$"),
     re.compile(r"^git@([^:/]+):([^/]+)/([^/]+?)(?:\.git)?$"),
@@ -119,11 +133,16 @@ GUARD_INPUT_KEYS = {"Edit": "file_path", "MultiEdit": "file_path", "Write": "fil
 GUARD_PROTECTED = (".claude", "state.json", ".supervisor/state_tool.py")
 GUARD_SEPARATOR_CHARS = frozenset(";&|()\n")
 GUARD_SHELLS = ("sh", "bash", "zsh")
-GUARD_WORD_RE = re.compile(r"(?<![\w./-])(git|jj|gh)(?![\w.-])")
+GUARD_WORD_RE = re.compile(r"(?<![\w./-])(git|jj|gh|hc)(?![\w.-])")
+HC_DENY = frozenset({"keys", "exec", "attach", "server", "update", "machine", "file", "put", "connect"})
+# Catches the denied hc subcommands also where tokens cannot see them, e.g. a Python list ['hc', 'keys', ...].
+HC_DENY_RE = re.compile(r"(?<![\w./-])hc(?![\w.-])['\"]?\s*,?\s*['\"]?(" + "|".join(sorted(HC_DENY)) + r")(?![\w-])")
+HC_TARGET_RE = re.compile(r"^(w-\d+|m-p-\d+|sv-watch)$")
 GUARD_VALUE_OPTIONS = {
     "git": ("-C", "-c", "--git-dir", "--work-tree", "--namespace"),
     "jj": ("-R", "--repository", "--at-op", "--at-operation", "--color", "--config", "--config-file"),
     "gh": ("-R", "--repo"),
+    "hc": (),
 }
 GIT_DENY = frozenset({
     "commit", "push", "pull", "fetch", "merge", "rebase", "reset", "add", "rm", "mv", "cherry-pick", "revert",
@@ -371,7 +390,26 @@ def _gh_violation(sub, args):
     return _action_violation(sub, pos[0] if pos else None, GH_DENY_ACTIONS, {})
 
 
-GUARD_CHECKS = {"git": _git_violation, "jj": _jj_violation, "gh": _gh_violation}
+def _hc_labels(args):
+    labels = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--label"]
+    return labels + [a.split("=", 1)[1] for a in args if a.startswith("--label=")]
+
+
+def _hc_violation(sub, args):
+    if sub in HC_DENY:
+        return f"{sub} (the supervisor never types into, attaches to or manages terminals directly)"
+    if sub == "run" and not any(label.startswith("sv=") for label in _hc_labels(args)):
+        return "run without --label sv=... (start sessions only with the argv from launch-plan)"
+    if sub in ("kill", "rm"):
+        pos = _positionals(args)
+        if not pos or not HC_TARGET_RE.match(pos[0]):
+            return f"{sub} {pos[0] if pos else ''} (only terminals named w-NNNN, m-p-NNNN or sv-watch)".replace("  ", " ")
+    if sub == "send" and _has_flag(args, ("--force",)):
+        return "send --force (never answer a blocked dialog for the user)"
+    return None
+
+
+GUARD_CHECKS = {"git": _git_violation, "jj": _jj_violation, "gh": _gh_violation, "hc": _hc_violation}
 
 
 def _split_subcommand(tool, args):
@@ -405,7 +443,7 @@ def _shell_c_violations(words):
 
 
 def bash_violations(command):
-    """Deny-list matches of git / jj / gh in a Bash command. A guardrail, not a security boundary."""
+    """Deny-list matches of git / jj / gh / hc in a Bash command. A guardrail, not a security boundary."""
     command = command.replace("\\\n", "")
     try:
         tokens = _shell_tokens(command)
@@ -414,19 +452,27 @@ def bash_violations(command):
             return ["unparsable command (could not parse; quote the command correctly or split it)"]
         return []
     violations = []
+    hidden = {m.group(1) for m in HC_DENY_RE.finditer(command)}
     for segment in _segments(tokens):
         text = " ".join(segment)
         if ("`" in text or "$(" in text) and GUARD_WORD_RE.search(text):
-            violations.append("command substitution (split the command; command substitution around git/jj/gh is not inspected)")
+            violations.append("command substitution (split the command; command substitution around git/jj/gh/hc is not inspected)")
             continue
         words = _strip_redirections(segment)
         violations += _shell_c_violations(words) + _tool_violations(words)
+    named = " ".join(violations)
+    violations += [f"hc {sub} (the supervisor never types into, attaches to or manages terminals directly)"
+                   for sub in sorted(hidden) if f"hc {sub} " not in named]
     return violations
 
 
 def path_violation(path, cwd, supervisor_dir, config_dir, tmp_dirs):
     full = _real(os.path.join(_real(cwd), os.path.expanduser(path)))
-    if _under(full, os.path.join(supervisor_dir, "vault")):
+    try:
+        vault = vault_locations(supervisor_dir)[0]
+    except (StateError, OSError):
+        vault = os.path.join(supervisor_dir, VAULT_DIR)
+    if _under(full, vault):
         return f"{full} (vault notes are written only by state_tool commit)"
     if _under(full, supervisor_dir):
         if any(_under(full, os.path.join(supervisor_dir, rel)) for rel in GUARD_PROTECTED):
@@ -700,8 +746,29 @@ def _review_shape_errors(prefix, review):
     return errors
 
 
-def _manager_shape_errors(prefix, m):
+def manager_handle(project_id):
+    # hc terminal names are lowercase: m-p-0006 for P-0006.
+    return f"m-{str(project_id).lower()}"
+
+
+def _runtime_errors(prefix, obj, handle):
+    """A herdr session is the hc terminal named `handle` running claude with the uuid `session_id`."""
+    runtime = obj.get("runtime")
+    if runtime is None:
+        return []
+    if runtime not in RUNTIMES:
+        return [f"{prefix}: runtime must be one of {list(RUNTIMES)}, got {runtime!r}"]
     errors = []
+    sid = obj.get("session_id")
+    if sid is not None and not (isinstance(sid, str) and UUID_RE.match(sid)):
+        errors.append(f"{prefix}: a herdr session_id must be a lowercase uuid or null, got {sid!r}")
+    if obj.get("handle") != handle:
+        errors.append(f"{prefix}: a herdr handle must be {handle!r}, got {obj.get('handle')!r}")
+    return errors
+
+
+def _manager_shape_errors(prefix, m, project_id=None):
+    errors = _runtime_errors(f"{prefix}: manager", m, manager_handle(project_id))
     for key in ("session_id", "started_by", "handle", "observed_at"):
         if m.get(key) is not None and not isinstance(m[key], str):
             errors.append(f"{prefix}: manager.{key} must be a string or null")
@@ -772,7 +839,7 @@ def _project_shape_errors(state):
         if not isinstance(p.get("manager"), dict):
             errors.append(f"{prefix}: manager must be an object")
         else:
-            errors += _manager_shape_errors(prefix, p["manager"])
+            errors += _manager_shape_errors(prefix, p["manager"], p.get("id"))
     owners = [(f"task {t['id']}", t) for t in state["tasks"]] + [(f"archived {s['id']}", s) for s in state["archived"]]
     for prefix, owner in owners:
         if owner.get("project_id") is not None and not isinstance(owner["project_id"], str):
@@ -859,7 +926,9 @@ def validate(state, relief=None):
         if task.get("status") is not None and task.get("status") not in TASK_STATUSES:
             errors.append(f"{prefix}: invalid status {task.get('status')!r}")
         # A task waiting for the user's answer to where it should run has no worker yet.
-        if not task.get("worker_ids") and not any(ua.get("needs_answer") for ua in task.get("user_actions", [])):
+        # A cancelled one may have none left: commit archives it.
+        if (not task.get("worker_ids") and not task.get("cancel")
+                and not any(ua.get("needs_answer") for ua in task.get("user_actions", []))):
             errors.append(f"{prefix}: worker_ids must not be empty")
         for wid in task.get("worker_ids", []):
             w = workers_by_id.get(wid)
@@ -917,6 +986,7 @@ def validate(state, relief=None):
         task = tasks_by_id.get(w.get("task_id"))
         if task is None or wid not in task.get("worker_ids", []):
             errors.append(f"{prefix}: task {w.get('task_id')} does not list it")
+        errors += _runtime_errors(prefix, w, wid)
         for key, allowed in (
             ("kind", KINDS),
             ("delivery", DELIVERIES),
@@ -1528,10 +1598,18 @@ def parse_locations(text):
         if not m:
             continue
         key, value = m.group(1), m.group(2).strip()
-        if key not in LOCATION_KEYS:
-            errors.append(f"CLAUDE.md:{i + 1}: unknown key {key!r} (use {list(LOCATION_KEYS)})")
+        if key not in LOCATION_KEYS + VAULT_REL_KEYS + ("vault",):
+            errors.append(f"CLAUDE.md:{i + 1}: unknown key {key!r} (use {list(LOCATION_KEYS + ('vault',) + VAULT_REL_KEYS)})")
         elif key in values:
             errors.append(f"CLAUDE.md:{i + 1}: duplicate key {key!r}")
+        elif key in VAULT_REL_KEYS:
+            parts = value.split("/")
+            if not value or value.startswith(("/", "~")) or any(p in ("", ".", "..") for p in parts) or \
+                    (key == "dashboard") != value.endswith(".md"):
+                errors.append(f"CLAUDE.md:{i + 1}: {key} must be a path relative to the vault without '..'"
+                              f"{' ending in .md' if key == 'dashboard' else ''}, got {value!r}")
+            else:
+                values[key] = value
         elif not (os.path.isabs(value) or value == "~" or value.startswith("~/")):
             errors.append(f"CLAUDE.md:{i + 1}: {key} must be an absolute path or start with ~, got {value!r}")
         else:
@@ -1541,7 +1619,8 @@ def parse_locations(text):
 
 def default_locations(supervisor_dir):
     sup = os.path.normpath(supervisor_dir)
-    return {"clone_root": "~/src", "work_root": os.path.join(os.path.dirname(sup), os.path.basename(sup) + "-work")}
+    return {"clone_root": "~/src", "work_root": os.path.join(os.path.dirname(sup), os.path.basename(sup) + "-work"),
+            "worktree_root": "~/.claude-worktrees"}
 
 
 def add_missing_locations(text, supervisor_dir):
@@ -1551,11 +1630,60 @@ def add_missing_locations(text, supervisor_dir):
         raise StateError(errors)
     defaults = default_locations(supervisor_dir)
     missing = [f"- {key}: {defaults[key]}\n" for key in LOCATION_KEYS if key not in values]
+    return _add_section_lines(text, LOCATIONS_HEADING, LOCATIONS_NOTE, missing)
+
+
+def parse_herdr(text):
+    """Parse the `## Herdr` section of CLAUDE.md. Returns (values, errors); max_workers is an int, worker_path a string."""
+    lines = _strip_ignored(text.splitlines())
+    heads = _section_heads(lines, HERDR_HEADING)
+    if not heads:
+        return {}, []
+    if len(heads) > 1:
+        return {}, [f"CLAUDE.md:{i + 1}: duplicate '{HERDR_HEADING}' heading" for i in heads[1:]]
+    values, errors = {}, []
+    for i in range(heads[0] + 1, _section_end(lines, heads[0])):
+        m = re.match(r"^- ([A-Za-z_]+):(.*)$", lines[i].rstrip())
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2).strip()
+        if key not in HERDR_KEYS:
+            errors.append(f"CLAUDE.md:{i + 1}: unknown key {key!r} (use {list(HERDR_KEYS)})")
+        elif key in values:
+            errors.append(f"CLAUDE.md:{i + 1}: duplicate key {key!r}")
+        elif key == "max_workers" and not re.match(r"^[1-9]\d*$", value):
+            errors.append(f"CLAUDE.md:{i + 1}: max_workers must be a positive integer, got {value!r}")
+        elif key == "worker_path" and not value:
+            errors.append(f"CLAUDE.md:{i + 1}: worker_path must not be empty")
+        else:
+            values[key] = int(value) if key == "max_workers" else value
+    return ({}, errors) if errors else (values, [])
+
+
+def default_herdr(env_path, shims_dir):
+    """Defaults for `## Herdr`. worker_path is set only when mise shims exist and are missing from the given PATH."""
+    defaults = {"max_workers": DEFAULT_MAX_WORKERS}
+    if shims_dir and shims_dir not in (env_path or "").split(os.pathsep):
+        defaults["worker_path"] = os.pathsep.join(p for p in (shims_dir, env_path) if p)
+    return defaults
+
+
+def add_missing_herdr(text, env_path, shims_dir):
+    """Return CLAUDE.md text with each missing `## Herdr` key added at its default. Existing values are kept."""
+    values, errors = parse_herdr(text)
+    if errors:
+        raise StateError(errors)
+    defaults = default_herdr(env_path, shims_dir)
+    missing = [f"- {key}: {defaults[key]}\n" for key in HERDR_KEYS if key in defaults and key not in values]
+    return _add_section_lines(text, HERDR_HEADING, HERDR_NOTE, missing)
+
+
+def _add_section_lines(text, heading, note, missing):
     if not missing:
         return text
-    heads = _section_heads(_strip_ignored(text.splitlines()), LOCATIONS_HEADING)
+    heads = _section_heads(_strip_ignored(text.splitlines()), heading)
     if not heads:
-        section = f"{LOCATIONS_HEADING}\n\n{LOCATIONS_NOTE}\n\n" + "".join(missing)
+        section = f"{heading}\n\n{note}\n\n" + "".join(missing)
         return text.rstrip("\n") + "\n\n" + section if text.strip() else section
     lines = text.splitlines(keepends=True)
     end = _section_end(_strip_ignored(text.splitlines()), heads[0])
@@ -1711,6 +1839,19 @@ def set_props(text, changes):
     return "".join(out)
 
 
+SUPERVISED_TAG = "supervised"
+# A project note also carries `task` so that daily notes listing `task` notes show the project, not its tasks.
+NOTE_TAGS = {"task": (SUPERVISED_TAG,), "project": (SUPERVISED_TAG, "project", "task")}
+
+
+def note_kind(props):
+    """task / project for a note with the supervised tag, else None (the user's own notes are never picked up)."""
+    tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]
+    if SUPERVISED_TAG not in tags:
+        return None
+    return "project" if "project" in tags else "task"
+
+
 def new_note_text(uid, title, kind, status, assignee, now, request="", parent=None, follows=None):
     """Text of a new task or project note in the create-task format. parent and follows are note uids."""
     if kind not in ("task", "project"):
@@ -1719,7 +1860,7 @@ def new_note_text(uid, title, kind, status, assignee, now, request="", parent=No
         raise StateError(f"invalid status/assignee {status!r}/{assignee!r}")
     values = {
         "uid": uid, "title": title, "para": "Project", "aliases": [], "created_at": f"{now[:10]} {now[11:19]}",
-        "archived_at": None, "tags": [kind], "start_date": None, "due_date": None, "pending_until": None,
+        "archived_at": None, "tags": list(NOTE_TAGS[kind]), "start_date": None, "due_date": None, "pending_until": None,
         "completed_at": None, "status": status, "assignee": assignee,
         "parent": f"[[{parent}]]" if parent else None, "follows": f"[[{follows}]]" if follows else None,
     }
@@ -2968,8 +3109,7 @@ def proposal_titles(texts, project_uid):
     titles = set()
     for text in texts.values():
         props = parse_frontmatter(text)[0]
-        tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]
-        if ("task" in tags and (props.get("status"), props.get("assignee")) == ("backlog", "user")
+        if (note_kind(props) == "task" and (props.get("status"), props.get("assignee")) == ("backlog", "user")
                 and project_uid in _parent_uids(props.get("parent")) and isinstance(props.get("title"), str)):
             titles.add(props["title"])
     return titles
@@ -3054,8 +3194,8 @@ def _row_is(row, flag):
 
 
 def manager_reconcile(manager, rows, events=None):
-    """Decisions for one manager session from list rows (include_archived) and an optional summary of its latest events.
-    rows: objects with sessionId (or session_id / id), startedBy, and running / archived flags.
+    """Decisions for one manager session from rows (manager_rows_from_hc) and an optional summary of its latest message.
+    rows: objects with session_id, started_by, and running / archived flags.
     events: {"last_message_ref": str | null, "pending_approval": bool}; without it, handle_turn and pending_approval are not judged."""
     sid = manager.get("session_id")
     previous = set(manager.get("previous_session_ids", []))
@@ -3152,28 +3292,56 @@ def cmd_commit(args):
 
 
 VAULT_DIR = "vault"
-VAULT_SKIP = ("_templates",)
 DASHBOARD_NOTE = "Supervisor.md"
+TEMPLATES_DIR = "_templates"
+
+
+def vault_locations(supervisor_dir):
+    """(vault, dashboard, templates) from `## Locations`: the vault's absolute path, and the dashboard note and the
+    template folder relative to it. Without `vault` the vault is <dir>/vault."""
+    sup = os.path.abspath(supervisor_dir)
+    claude_md = os.path.join(sup, "CLAUDE.md")
+    text = Path(claude_md).read_text(encoding="utf-8") if os.path.exists(claude_md) else ""
+    values, errors = parse_locations(text)
+    if errors:
+        raise StateError(errors)
+    vault = os.path.join(sup, VAULT_DIR)
+    if "vault" in values:
+        vault = _real(values["vault"])
+        defaults = default_locations(sup)
+        for key in LOCATION_KEYS:
+            root = _real(values.get(key, defaults[key]))
+            if _cwds_overlap(vault, root):
+                raise StateError(f"vault {vault} and {key} {root} are nested")
+    return vault, values.get("dashboard", DASHBOARD_NOTE), values.get("templates", TEMPLATES_DIR)
 
 
 def _vault_path(state_path):
-    return os.path.join(os.path.dirname(os.path.abspath(state_path)), VAULT_DIR)
+    return vault_locations(os.path.dirname(os.path.abspath(state_path)))[0]
+
+
+def _vault_index(state_path):
+    """(vault, texts, uids) of the vault configured for this supervisor directory."""
+    vault, dashboard, templates = vault_locations(os.path.dirname(os.path.abspath(state_path)))
+    return (vault, *_index_vault(vault, dashboard, templates))
 
 
 def _new_note_path(uid):
     return f"{uid[:4]}/{uid[4:6]}/{uid}.md"
 
 
-def _index_vault(vault):
-    """({relpath: text}, {uid: [relpath, ...]}) of the vault's notes, without _templates/, hidden folders and Supervisor.md."""
+def _index_vault(vault, dashboard=DASHBOARD_NOTE, templates=TEMPLATES_DIR):
+    """({relpath: text}, {uid: [relpath, ...]}) of the vault's notes, without the template folder, hidden folders and
+    the dashboard note."""
     texts, uids = {}, {}
     if not os.path.isdir(vault):
         return texts, uids
     for root, dirs, files in os.walk(vault):
-        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and not (root == vault and d in VAULT_SKIP))
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".")
+                         and Path(os.path.relpath(os.path.join(root, d), vault)).as_posix() != templates)
         for name in sorted(files):
             rel = Path(os.path.relpath(os.path.join(root, name), vault)).as_posix()
-            if not name.endswith(".md") or rel == DASHBOARD_NOTE:
+            if not name.endswith(".md") or rel == dashboard:
                 continue
             try:
                 text = Path(root, name).read_text(encoding="utf-8")
@@ -3201,7 +3369,7 @@ def _load_view(state_path):
     if not isinstance(state, dict) or state.get("schema_version") != SCHEMA_VERSION:
         return state
     try:
-        texts, uids = _index_vault(_vault_path(state_path))
+        _, texts, uids = _vault_index(state_path)
     except OSError:
         texts, uids = {}, {}
     return join_view(state, _notes_by_uid(texts, uids))
@@ -3275,24 +3443,90 @@ def _numbered_ops(raw_ops, candidate, base, view_cur):
     return number_note_ops(raw_ops, next_ua, art_last)
 
 
-def _date_props(status, now):
-    if status == "done":
-        return {"completed_at": now[:10]}
-    if status == "archived":
-        return {"archived_at": f"{now[:10]} {now[11:19]}"}
-    return {}
+NOTE_PROPS_HEADING = "## Note props"
+# Properties the supervisor may set when a note reaches done / archived; the ones it owns or the user delegates with
+# (status, assignee, tags, ids, links) are not among them.
+NOTE_PROP_KEYS = ("para", "aliases", "archived_at", "start_date", "due_date", "pending_until", "completed_at")
+NOTE_PROP_RESET = {"para": "Project", "aliases": []}
+NOW_TOKENS = (("YYYY", "%Y"), ("MM", "%m"), ("DD", "%d"), ("HH", "%H"), ("mm", "%M"), ("ss", "%S"))
+DEFAULT_NOTE_PROPS = {"done": {"completed_at": "{now}"}, "archived": {"archived_at": "{now}"}, "now_format": "YYYY-MM-DD HH:mm:ss"}
+
+
+def parse_note_props(text):
+    """Parse `## Note props` of CLAUDE.md: `- done: k=v, ...`, `- archived: k=v, ...`, `- now_format: <format>`.
+    Returns (props, errors); a missing line keeps its default. `{now}` is the time in now_format; `k=` writes null."""
+    lines = _strip_ignored(text.splitlines())
+    heads = _section_heads(lines, NOTE_PROPS_HEADING)
+    props = {key: (dict(value) if isinstance(value, dict) else value) for key, value in DEFAULT_NOTE_PROPS.items()}
+    if not heads:
+        return props, []
+    if len(heads) > 1:
+        return props, [f"CLAUDE.md:{i + 1}: duplicate '{NOTE_PROPS_HEADING}' heading" for i in heads[1:]]
+    errors, seen = [], set()
+    for i in range(heads[0] + 1, _section_end(lines, heads[0])):
+        m = re.match(r"^- ([A-Za-z_]+):(.*)$", lines[i].rstrip())
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2).strip()
+        where = f"CLAUDE.md:{i + 1}"
+        if key not in DEFAULT_NOTE_PROPS:
+            errors.append(f"{where}: unknown key {key!r} (use {list(DEFAULT_NOTE_PROPS)})")
+        elif key in seen:
+            errors.append(f"{where}: duplicate key {key!r}")
+        elif key == "now_format":
+            if not any(token in value for token, _ in NOW_TOKENS) or "%" in value:
+                errors.append(f"{where}: now_format must use YYYY, MM, DD, HH, mm, ss, got {value!r}")
+            else:
+                props[key] = value
+        else:
+            pairs = {}
+            for part in filter(None, (p.strip() for p in value.split(","))):
+                name, eq, val = part.partition("=")
+                name, val = name.strip(), val.strip()
+                if not eq or name not in NOTE_PROP_KEYS or name in pairs:
+                    errors.append(f"{where}: {part!r} must be <key>=<value> once per key, with a key in {list(NOTE_PROP_KEYS)}")
+                else:
+                    pairs[name] = val or None
+            props[key] = pairs
+        seen.add(key)
+    return props, errors
+
+
+def _note_props_for(state_path):
+    claude_md = os.path.join(os.path.dirname(os.path.abspath(state_path)), "CLAUDE.md")
+    props, errors = parse_note_props(Path(claude_md).read_text(encoding="utf-8") if os.path.exists(claude_md) else "")
+    if errors:
+        raise StateError(errors)
+    return props
+
+
+def _format_now(now, fmt):
+    for token, code in NOW_TOKENS:
+        fmt = fmt.replace(token, code)
+    return datetime.fromisoformat(now).strftime(fmt)
+
+
+def _date_props(status, now, conf=DEFAULT_NOTE_PROPS):
+    """The properties a note gets when it reaches done / archived (`## Note props`)."""
+    return {k: (_format_now(now, conf["now_format"]) if v == "{now}" else v) for k, v in conf.get(status, {}).items()}
+
+
+def _reset_props(props, conf):
+    """Back to the values of a new note for every property `## Note props` sets, when a note leaves done / archived."""
+    keys = set(conf.get("done", {})) | set(conf.get("archived", {}))
+    return {k: NOTE_PROP_RESET.get(k) for k in sorted(keys) if props.get(k) not in (None, "", NOTE_PROP_RESET.get(k))}
 
 
 def _commit_v2(args, current):
     now = _now()
-    vault = _vault_path(args.state)
+    note_conf = _note_props_for(args.state)
+    vault, texts, uids = _vault_index(args.state)
     candidate = _read_json(args.candidate)
     if not isinstance(candidate, dict):
         raise StateError("candidate must be a JSON object")
     raw_ops = _ops_arg(args.notes)
     rev = current["rev"] + 1
     warnings = []
-    texts, uids = _index_vault(vault)
     # 1. Re-apply the last commit's note writes that did not happen.
     carried = _replay_journal(current, vault, texts, uids, warnings)
     pending = {e["uid"]: e for e in carried}
@@ -3366,10 +3600,13 @@ def _commit_v2(args, current):
         changes = {}
         if derived[0] != cur_pair[0]:
             changes["status"] = derived[0]
-            if derived[0] not in ("done", "archived") and parse_frontmatter(after[uid])[0].get("completed_at"):
-                changes["completed_at"] = None
-        # The date is set when the note reaches done / archived, also when the user moved it there first.
-        changes.update({k: v for k, v in _date_props(derived[0], now).items() if not parse_frontmatter(after[uid])[0].get(k)})
+            if derived[0] not in ("done", "archived"):
+                changes.update(_reset_props(parse_frontmatter(after[uid])[0], note_conf))
+        # A time is set when the note reaches done / archived, also when the user moved it there first; a fixed value
+        # (e.g. para) is always written.
+        fm = parse_frontmatter(after[uid])[0]
+        changes.update({k: v for k, v in _date_props(derived[0], now, note_conf).items()
+                        if fm.get(k) != v and not (note_conf[derived[0]].get(k) == "{now}" and fm.get(k))})
         if derived[1] and derived[1] != cur_pair[1]:
             changes["assignee"] = derived[1]
         if changes:
@@ -3491,11 +3728,11 @@ This directory belongs to the session-supervisor skill. It is not a project.
 
 - Use the session-supervisor skill first, and read the state with `python3 .supervisor/state_tool.py digest --state state.json`.
 - Write `state.json` only through `python3 .supervisor/state_tool.py commit`.
-- `supervisor.archive_consent` in `state.json` is the user's explicit consent that archiving requires. It covers only worker sessions whose `startedBy` is in `supervisor.session_ids`.
-- Never delete sessions.
+- `supervisor.archive_consent` in `state.json` is the user's explicit consent that archiving requires. It covers only workers and managers with `runtime: "herdr"` in `state.json`.
+- The supervisor runs in the Herdr terminal `sv`, with `sv-watch` (`state_tool.py watch-vault`) beside it. It starts sessions only by running the argv of `state_tool.py launch-plan`, and never deletes branches.
 - The supervisor only operates sessions, changes state through commit, and talks to the user. Workers edit, commit, push, and open PRs; observer subagents run read-only checks and investigations, write results under .supervisor/observations/, and return the path.
-- A PreToolUse hook (state_tool.py guard) blocks edits outside this directory and mutating git / jj / gh commands. The one allowed exception is `state_tool.py prepare-dir`, which writes only under the `## Locations` roots. To disable it, remove its entry from .claude/settings.json by hand; the supervisor asks before restoring a missing entry.
-- `vault/` is an Obsidian vault with one note per task and project: the note holds the meaning (title, `## 概要`, status, assignee, `## ユーザーアクション`, `## 成果物`). Only `python3 .supervisor/state_tool.py commit --notes <ops.json>` writes it (the guard blocks edits); read changes with `notes-scan` and a note with `note-show`. `vault/Supervisor.md` is the kanban dashboard: moving a card changes the note's status. Delegate a task by setting a note to `backlog` / `agent`.
+- A PreToolUse hook (state_tool.py guard) blocks edits outside this directory and mutating git / jj / gh commands. The allowed exceptions are `state_tool.py prepare-dir`, `prepare-worktree`, and `remove-worktree`, which write only under the `## Locations` roots. To disable it, remove its entry from .claude/settings.json by hand; the supervisor asks before restoring a missing entry.
+- The Obsidian vault (`vault` in `## Locations`, default `vault/`) has one note per task and project, tagged `supervised`: the note holds the meaning (title, `## 概要`, status, assignee, `## ユーザーアクション`, `## 成果物`). Only `python3 .supervisor/state_tool.py commit --notes <ops.json>` writes it (the guard blocks edits); read changes with `notes-scan` and a note with `note-show`. The `dashboard` note (default `vault/Supervisor.md`) is the kanban: moving a card changes the note's status. Delegate a task by setting a note tagged `supervised` to `backlog` / `agent`.
 - `## Follow-ups` (optional) turns each newly verified PR into a user action such as "Review org/repo#42". Format: references/follow-ups-format.md in the session-supervisor skill. Check it with `python3 .supervisor/state_tool.py validate-follow-ups --claude-md CLAUDE.md`.
 
 <!-- Example: remove the comment markers to enable it.
@@ -3515,7 +3752,9 @@ def cmd_setup(args):
         raise StateError(f"{target} is inside a git repository; choose a directory outside any repository")
     claude_md = target / "CLAUDE.md"
     old_md = claude_md.read_text(encoding="utf-8") if claude_md.exists() else None
-    new_md = add_missing_locations(CLAUDE_MD if old_md is None else old_md, str(target))
+    shims = os.path.expanduser(MISE_SHIMS)
+    new_md = add_missing_herdr(add_missing_locations(CLAUDE_MD if old_md is None else old_md, str(target)),
+                               os.environ.get("PATH", ""), shims if os.path.isdir(shims) else None)
     settings_path = target / ".claude" / "settings.json"
     settings = _read_settings(settings_path, ("SessionStart", "PreToolUse"), "setup")
 
@@ -3545,7 +3784,7 @@ def cmd_setup(args):
         _write_atomic(str(state_path), serialize(empty_state(str(target))))
         report.append(("created", state_path))
 
-    report += _setup_vault(target / VAULT_DIR)
+    report += _setup_vault(target)
 
     if old_md is None:
         claude_md.write_text(new_md, encoding="utf-8")
@@ -3561,14 +3800,12 @@ def cmd_setup(args):
     return 0
 
 
-def _kanban_base(name, assignee):
+def _kanban_base(name, assignee, templates):
     return f"""```base
 filters:
   and:
-    - or:
-        - file.hasTag("task")
-        - file.hasTag("project")
-    - '!file.inFolder("_templates")'
+    - file.hasTag("supervised")
+    - '!file.inFolder("{templates}")'
     - 'assignee == "{assignee}"'
 formulas:
   title: link(file.name, title)
@@ -3585,27 +3822,15 @@ views:
 """
 
 
-SUPERVISOR_NOTE = f"## ユーザーの番\n\n{_kanban_base('ユーザー', 'user')}\n## エージェントの番\n\n{_kanban_base('エージェント', 'agent')}"
-ART_SECTION_NOTE = ("<!-- state_tool が書く行です。表示テキストは直せますが、メタデータ(sv-art)のある行に書き足した文字は、"
-                    "成果物のグループを置き換えるときに行ごと消えます。 -->")
+def supervisor_note(templates):
+    return (f"## ユーザーの番\n\n{_kanban_base('ユーザー', 'user', templates)}\n"
+            f"## エージェントの番\n\n{_kanban_base('エージェント', 'agent', templates)}")
 
 
-def note_template(kind):
-    """A core Templates template for a task or project note: backlog / user, uid from the creation time."""
-    text = new_note_text("UIDX", "TITLEX", kind, "backlog", "user", "2000-01-01T00:00:00")
-    text = text.replace('"UIDX"', '"{{date:YYYYMMDD}}_{{time:HHmmss}}"').replace('"TITLEX"', '"{{title}}"')
-    text = text.replace("2000-01-01 00:00:00", "{{date:YYYY-MM-DD}} {{time:HH:mm:ss}}")
-    return text.replace(f"## {ART_SECTION}\n\n", f"## {ART_SECTION}\n\n{ART_SECTION_NOTE}\n\n")
-
-
-def _setup_vault(vault):
-    """Create the vault files that are missing; never overwrite one."""
-    files = (
-        (vault / DASHBOARD_NOTE, SUPERVISOR_NOTE),
-        (vault / "_templates" / "task.md", note_template("task")),
-        (vault / "_templates" / "project.md", note_template("project")),
-        (vault / ".obsidian" / "templates.json", json.dumps({"folder": "_templates"}) + "\n"),
-    )
+def _setup_vault(supervisor_dir):
+    """Create the dashboard note when it is missing; never overwrite it. Templates are built with the user (section 3)."""
+    vault, dashboard, templates = vault_locations(supervisor_dir)
+    files = ((Path(vault) / dashboard, supervisor_note(templates)),)
     report = []
     for path, text in files:
         if path.exists():
@@ -3751,7 +3976,7 @@ def _follow_ups_v2(args, state, state_path, candidate, rules, closed, manual):
         raise StateError("--notes is required with a schema_version 2 state")
     _check_candidate_path(args.notes, state_path)
     raw_ops = _ops_arg(args.notes) if os.path.exists(args.notes) else {}
-    texts, uids = _index_vault(_vault_path(state_path))
+    _, texts, uids = _vault_index(state_path)
     notes = _notes_by_uid(texts, uids)
     view_cur = join_view(state, notes)
     ops = _numbered_ops(raw_ops, candidate, notes, view_cur)
@@ -3799,8 +4024,9 @@ def _locations_for(claude_md):
             errors.append(f"{key} {root} is inside the supervisor directory; workers would inherit its CLAUDE.md")
     if _inside_git(roots["work_root"][0]):
         errors.append(f"work_root {roots['work_root'][0]} is inside a git repository")
-    if _cwds_overlap(roots["clone_root"][0], roots["work_root"][0]):
-        errors.append(f"clone_root {roots['clone_root'][0]} and work_root {roots['work_root'][0]} are nested")
+    for x, y in (("clone_root", "work_root"), ("clone_root", "worktree_root"), ("work_root", "worktree_root")):
+        if _cwds_overlap(roots[x][0], roots[y][0]):
+            errors.append(f"{x} {roots[x][0]} and {y} {roots[y][0]} are nested")
     if errors:
         raise StateError(errors)
     return roots, sup
@@ -3869,6 +4095,253 @@ def cmd_prepare_dir(args):
     return 0
 
 
+REPORT_TOOL = "--allowedTools=Bash(hc send sv:*)"
+
+
+def _session_cwd(worker):
+    """Where Claude runs: a git worker in its worktree, a non-git worker in its directory."""
+    return worker.get("worktree_path") if worker.get("kind") == "git" else worker.get("cwd")
+
+
+def _herdr_target(state, ident):
+    """(kind, session, cwd, label) for a worker id or a manager handle m-p-NNNN."""
+    for w in state.get("workers", []):
+        if w.get("id") == ident:
+            return "worker", w, _session_cwd(w), f"task={w.get('task_id')}"
+    for p in _projects(state):
+        if manager_handle(p.get("id")) == ident:
+            return "manager", p.get("manager") or {}, p.get("dir"), f"project={p.get('id')}"
+    raise StateError(f"{ident} is neither a worker id nor a manager handle (m-p-NNNN)")
+
+
+def launch_argv(state, ident, prompt, herdr):
+    """The `hc run` argv that starts the herdr worker or manager `ident`. herdr: parsed `## Herdr` values."""
+    kind, session, cwd, label = _herdr_target(state, ident)
+    if session.get("runtime") != "herdr" or session.get("handle") != ident:
+        raise StateError(f"{ident} must have runtime 'herdr' and handle {ident!r} in the state before launch")
+    sid = session.get("session_id")
+    if not (isinstance(sid, str) and UUID_RE.match(sid)):
+        raise StateError(f"{ident} has no uuid session_id: set a uuid4 in the candidate and commit it before launch")
+    if not cwd or not os.path.isabs(cwd):
+        where = "worktree_path (run prepare-worktree first)" if session.get("kind") == "git" else "cwd"
+        raise StateError(f"{ident} has no absolute {where}")
+    if not prompt.strip():
+        raise StateError("the prompt is empty")
+    if kind == "worker":
+        limit = herdr.get("max_workers", DEFAULT_MAX_WORKERS)
+        running = [w["id"] for w in state.get("workers", [])
+                   if w.get("runtime") == "herdr" and w.get("id") != ident and w.get("intended_state") == "running"
+                   and w.get("observed_state") not in ("archived", "missing")]
+        if len(running) >= limit:
+            raise StateError(f"max_workers {limit} reached ({', '.join(running)}); start {ident} after one finishes")
+    argv = ["hc", "run", "--bg", "--json", "--name", ident, "--cwd", cwd, "--label", f"sv={kind}", "--label", label,
+            "--outlive-parent"]
+    if herdr.get("worker_path"):
+        argv += ["env", f"PATH={herdr['worker_path']}"]
+    argv += ["claude", "--session-id", sid]
+    if session.get("model"):
+        argv += ["--model", session["model"]]
+    # The prompt goes last: a variadic option right before it would take it as a value.
+    argv += ["--permission-mode", "auto", "-n", session.get("title") or ident, REPORT_TOOL, prompt]
+    return argv
+
+
+def cmd_launch_plan(args):
+    state = _read_json(args.state)
+    text = Path(args.claude_md).read_text(encoding="utf-8") if os.path.exists(args.claude_md) else ""
+    herdr, errors = parse_herdr(text)
+    if errors:
+        raise StateError(errors)
+    prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+    print(json.dumps({"argv": launch_argv(state, args.worker, prompt, herdr)}, ensure_ascii=False))
+    return 0
+
+
+def _herdr_sessions(state):
+    """(handle, session) of every herdr worker and manager in the state."""
+    out = [(w.get("handle"), w) for w in state.get("workers", []) if w.get("runtime") == "herdr"]
+    out += [(manager_handle(p.get("id")), p.get("manager") or {}) for p in _projects(state)
+            if (p.get("manager") or {}).get("runtime") == "herdr"]
+    return out
+
+
+def observe_hc(state, terminals):
+    """Observed facts of each herdr worker and manager from `hc ls --all --json` terminals, matched by name."""
+    by_name = {t.get("name"): t for t in terminals if t.get("name")}
+    out = []
+    for handle, session in _herdr_sessions(state):
+        t = by_name.get(handle)
+        # `hc ls` gives status as a word; `hc get` gives {app, state, msg}.
+        status = (t or {}).get("status")
+        state_word = status.get("state") if isinstance(status, dict) else status
+        status = status if isinstance(status, dict) else {}
+        if t is None:
+            observed = "missing"
+        elif t.get("state") == "finished":
+            observed = "archived" if session.get("intended_state") == "archived" else "missing"
+        elif state_word == "working":
+            observed = "running"
+        elif state_word == "blocked":
+            observed = "needs_input"
+        else:
+            observed = "idle"
+        out.append({"id": handle, "address": (t or {}).get("address"), "observed_state": observed,
+                    "status_state": state_word, "turn": (t or {}).get("turn"),
+                    "blocked_msg": status.get("msg") if state_word == "blocked" else None,
+                    "exit_code": (t or {}).get("exit_code"), "reason": (t or {}).get("reason"),
+                    "parent": (t or {}).get("parent")})
+    return out
+
+
+def _hc_json(runner, argv):
+    proc = runner(argv)
+    if proc.returncode != 0:
+        raise StateError(f"{' '.join(argv)} exited with {proc.returncode}: {(proc.stderr or proc.stdout).strip()}")
+    return json.loads(proc.stdout)
+
+
+def _run_hc(argv):
+    return subprocess.run(argv, capture_output=True, text=True)
+
+
+def last_assistant_message(lines):
+    """{message_ref, text} of the last assistant message with text in a Claude Code transcript (jsonl lines), or None.
+    One message is stored as several entries sharing message.id; their text parts are joined in order."""
+    entries = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("type") == "assistant" and not entry.get("isSidechain"):
+            message = entry.get("message") or {}
+            texts = [c.get("text") for c in message.get("content") or []
+                     if isinstance(c, dict) and c.get("type") == "text" and c.get("text")]
+            entries.append((message.get("id"), entry.get("uuid"), texts))
+    with_text = [e for e in entries if e[2]]
+    if not with_text:
+        return None
+    message_id, ref, _ = with_text[-1]
+    parts = [t for mid, _, texts in with_text if mid == message_id for t in texts] if message_id else with_text[-1][2]
+    return {"message_ref": ref, "text": "\n".join(parts)}
+
+
+def transcript_dir_name(cwd):
+    """Claude Code's folder name for a working directory: every character outside [A-Za-z0-9] of the NFD form becomes '-'."""
+    return re.sub(r"[^A-Za-z0-9]", "-", unicodedata.normalize("NFD", cwd))
+
+
+def _transcript_path(cwd, session_id):
+    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    direct = root / transcript_dir_name(cwd) / f"{session_id}.jsonl"
+    if direct.is_file():
+        return direct
+    found = sorted(root.glob(f"*/{session_id}.jsonl"))
+    if not found:
+        raise StateError(f"no transcript {session_id}.jsonl under {root}; read the screen with hc read instead")
+    return found[0]
+
+
+def cmd_last_message(args):
+    state = _read_json(args.state)
+    _, session, cwd, _ = _herdr_target(state, args.id)
+    sid = session.get("session_id")
+    if session.get("runtime") != "herdr" or not (isinstance(sid, str) and UUID_RE.match(sid)):
+        raise StateError(f"{args.id} is not a herdr session with a uuid session_id")
+    path = _transcript_path(cwd or "", sid)
+    with open(path, encoding="utf-8") as f:
+        found = last_assistant_message(f)
+    if found is None:
+        raise StateError(f"{path} has no assistant message with text yet")
+    _write_atomic(args.out, found["text"])
+    print(json.dumps({"message_ref": found["message_ref"], "path": str(path)}, ensure_ascii=False))
+    return 0
+
+
+def manager_rows_from_hc(manager, handle, terminals):
+    """manager-reconcile rows from `hc ls --all --json` terminals: the manager's own row (by terminal name) and a
+    row for each live terminal it started, so its agents show up as foreign sessions."""
+    sid = manager.get("session_id")
+    rows = []
+    own = next((t for t in terminals if t.get("name") == handle), None)
+    if own is not None and sid is not None:
+        status = own.get("status")
+        word = status.get("state") if isinstance(status, dict) else status
+        rows.append({"session_id": sid, "running": word == "working", "archived": own.get("state") == "finished",
+                     "blocked": word == "blocked"})
+        rows += [{"session_id": t.get("name") or t.get("address"), "started_by": sid, "running": True}
+                 for t in terminals if t.get("parent") == own.get("address") and t.get("state") == "live"]
+    return rows
+
+
+def cmd_observe_hc(args):
+    state = _read_json(args.state)
+    if args.from_file:
+        data = _read_json(args.from_file)
+    else:
+        data = _hc_json(_run_hc, ["hc", "ls", "--all", "--json"])
+    print(json.dumps(observe_hc(state, data.get("terminals", [])), ensure_ascii=False))
+    return 0
+
+
+WORKTREE_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,59}$")
+
+
+def _git_run(argv):
+    proc = subprocess.run(argv, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise StateError(f"{' '.join(argv)} exited with {proc.returncode}: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def cmd_prepare_worktree(args):
+    # Besides prepare-dir, the only write outside the supervisor directory: a worktree under worktree_root.
+    roots, sup = _locations_for(args.claude_md)
+    root = roots["worktree_root"][0]
+    repo = _git_output(["git", "-C", _real(args.repo), "rev-parse", "--show-toplevel"])
+    if repo is None:
+        raise StateError(f"--repo {args.repo} is not a git repository")
+    if _git_output(["git", "check-ref-format", "--branch", args.branch]) is None:
+        raise StateError(f"--branch {args.branch!r} is not a valid branch name")
+    slug = args.slug or args.branch.rsplit("/", 1)[-1]
+    if not WORKTREE_SLUG_RE.match(slug):
+        raise StateError(f"slug {slug!r} must be letters, digits, '.', '_' or '-', up to 60 characters")
+    dest = os.path.join(root, os.path.basename(repo), slug)
+    _check_dest(dest, root, sup)
+    common = _real(_git_run(["git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"]))
+    if os.path.exists(dest):
+        dest_common = _git_output(["git", "-C", dest, "rev-parse", "--path-format=absolute", "--git-common-dir"])
+        branch = _git_output(["git", "-C", dest, "symbolic-ref", "--short", "HEAD"])
+        if dest_common is None or _real(dest_common) != common or branch != args.branch:
+            raise StateError(f"{dest} exists and is not a worktree of {repo} on {args.branch}")
+        status = "exists"
+    else:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        _git_run(["git", "-C", repo, "worktree", "add", "-b", args.branch, dest, args.base])
+        status = "created"
+    head = _git_run(["git", "-C", dest, "rev-parse", "HEAD"])
+    print(json.dumps({"status": status, "path": dest, "repo": repo, "branch": args.branch, "base": args.base, "head": head}))
+    return 0
+
+
+def cmd_remove_worktree(args):
+    roots, _ = _locations_for(args.claude_md)
+    root = roots["worktree_root"][0]
+    path = _real(args.path)
+    if not _under(path, root) or path == root:
+        raise StateError(f"{path} is not under worktree_root {root}")
+    top = _git_output(["git", "-C", path, "rev-parse", "--show-toplevel"])
+    if top is None or _real(top) != path:
+        raise StateError(f"{path} is not the top of a git worktree")
+    if _git_run(["git", "-C", path, "status", "--porcelain"]):
+        raise StateError(f"{path} has uncommitted changes; leave it for the user")
+    branch = _git_output(["git", "-C", path, "symbolic-ref", "--short", "HEAD"])
+    common = _git_run(["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"])
+    _git_run(["git", "-C", os.path.dirname(common), "worktree", "remove", path])
+    print(json.dumps({"status": "removed", "path": path, "branch": branch}))
+    return 0
+
+
 def _prepare_project_dir(name, root, sup):
     if not PROJECT_NAME_RE.match(name):
         raise StateError(f"--project {name!r} must match P-<number>-<slug> (lowercase letters, digits and '-', up to 40 characters)")
@@ -3901,7 +4374,7 @@ def cmd_plan_actions(args):
         raise StateError(result["error"])
     view = _load_view(args.state)
     project_uid = (_project(view, args.project) or {}).get("uid")
-    titles = proposal_titles(_index_vault(_vault_path(args.state))[0], project_uid) if project_uid else ()
+    titles = proposal_titles(_vault_index(args.state)[1], project_uid) if project_uid else ()
     print(json.dumps(plan_actions(view, args.project, result["report"], args.running, titles), ensure_ascii=False))
     return 0
 
@@ -3918,10 +4391,9 @@ def cmd_waits(args):
 
 def cmd_manager_reconcile(args):
     project = _project(_load_view(args.state), args.project)
-    rows = _read_json(args.rows)
-    if isinstance(rows, dict):
-        rows = rows.get("sessions", rows.get("rows", []))
-    events = _read_json(args.events) if args.events else None
+    data = _read_json(args.from_file) if args.from_file else _hc_json(_run_hc, ["hc", "ls", "--all", "--json"])
+    rows = manager_rows_from_hc(project["manager"], manager_handle(project["id"]), data.get("terminals", []))
+    events = {"last_message_ref": args.last_message_ref, "pending_approval": any(r.get("blocked") for r in rows)}
     print(json.dumps(manager_reconcile(project["manager"], rows, events), ensure_ascii=False))
     return 0
 
@@ -4000,12 +4472,8 @@ def notes_scan(state, texts, uids, vault=None):
     for rel, text in texts.items():
         props, body_text, _ = parse_frontmatter(text)
         uid = props.get("uid") if isinstance(props.get("uid"), str) and props.get("uid") else None
-        tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]
-        if "project" in tags:
-            kind = "project"
-        elif "task" in tags:
-            kind = "task"
-        else:
+        kind = note_kind(props)
+        if kind is None:
             continue
         if uid in managed:
             continue
@@ -4061,15 +4529,76 @@ def _former_follow_up(uid, rel, kind, props, body, cur):
 def cmd_notes_scan(args):
     state = _read_json(args.state)
     _require_v2(state, args.state)
-    vault = _vault_path(args.state)
-    texts, uids = _index_vault(vault)
+    vault, texts, uids = _vault_index(args.state)
     print(json.dumps(notes_scan(state, texts, uids, vault), ensure_ascii=False))
     return 0
 
 
+def _notes_signature(scan):
+    return sorted(json.dumps([e.get("uid"), e.get("event"), e.get("ack")], sort_keys=True) for e in scan.get("events", []))
+
+
+def watch_messages(scan, terminals, notify_address, memo):
+    """Messages for the supervisor from one watch tick. memo carries what was already sent between ticks.
+
+    Notes: one message when the scan's events changed and are not empty. Sessions: one message per newly blocked or
+    finished herdr terminal whose parent is not the current supervisor terminal (hc tells its own children's parent).
+    """
+    messages = []
+    sig = _notes_signature(scan)
+    if sig and sig != memo.get("notes"):
+        uids = sorted({e.get("uid") for e in scan.get("events", []) if e.get("uid")})
+        messages.append("notes: " + " ".join(uids))
+    memo["notes"] = sig
+    forwarded = memo.setdefault("sessions", {})
+    for t in terminals:
+        name = t.get("name") or ""
+        if not re.match(r"^(w-\d+|m-p-\d+)$", name):
+            continue
+        status = t.get("status")
+        word = status.get("state") if isinstance(status, dict) else status
+        change = "finished" if t.get("state") == "finished" else ("blocked" if word == "blocked" else None)
+        key = f"{t.get('address')}:{change}"
+        if change is None:
+            forwarded.pop(name, None)
+            continue
+        if forwarded.get(name) == key:
+            continue
+        forwarded[name] = key
+        if t.get("parent") != notify_address:
+            messages.append(f"worker: {name} {change} (hc read {t.get('address')})")
+    return messages
+
+
+def watch_tick(state_path, notify, runner, memo):
+    """One tick of watch-vault: scan notes, read hc, send the messages. Writes nothing. Returns the messages sent."""
+    state = _read_json(state_path)
+    _require_v2(state, state_path)
+    vault, texts, uids = _vault_index(state_path)
+    scan = notes_scan(state, texts, uids, vault)
+    terminals = _hc_json(runner, ["hc", "ls", "--all", "--json"]).get("terminals", [])
+    target = _hc_json(runner, ["hc", "get", notify, "--json"]).get("address")
+    messages = watch_messages(scan, terminals, target, memo)
+    for text in messages:
+        _hc_json(runner, ["hc", "send", notify, text])
+    return messages
+
+
+def cmd_watch_vault(args, runner=None, sleep=time.sleep):
+    runner = runner or _run_hc
+    memo = {}
+    while True:
+        try:
+            watch_tick(args.state, args.notify, runner, memo)
+        except (StateError, OSError, ValueError) as e:
+            print(f"warning: {e}", file=sys.stderr)
+        if args.once:
+            return 0
+        sleep(args.interval)
+
+
 def cmd_note_show(args):
-    vault = _vault_path(args.state)
-    texts, uids = _index_vault(vault)
+    vault, texts, uids = _vault_index(args.state)
     if args.uid not in uids:
         raise StateError(f"note {args.uid} not found in {vault}")
     rel = uids[args.uid][0]
@@ -4087,7 +4616,7 @@ def cmd_note_show(args):
 def cmd_new_note(args):
     state = _read_json(args.state)
     _require_v2(state, args.state)
-    _, uids = _index_vault(_vault_path(args.state))
+    _, _, uids = _vault_index(args.state)
     taken = set(uids) | {i.get("uid") for k in ("tasks", "projects", "archived") for i in state.get(k, [])}
     if args.count < 1:
         raise StateError("--count must be 1 or more")
@@ -4098,6 +4627,66 @@ def cmd_new_note(args):
             notes.append({"uid": uid, "path": _new_note_path(uid), "kind": args.kind})
         t += timedelta(seconds=1)
     print(json.dumps(notes[0] if args.count == 1 else notes))
+    return 0
+
+
+def template_errors(text, kind):
+    """What a task / project note template lacks for notes made from it to be picked up (section 3)."""
+    props, body, fm_errors = parse_frontmatter(text)
+    errors = [f"frontmatter: {e}" for e in fm_errors]
+    tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]
+    missing = [t for t in NOTE_TAGS[kind] if t not in tags]
+    if missing:
+        errors.append(f"tags must include {list(NOTE_TAGS[kind])}; missing {missing}")
+    if kind == "task" and "project" in tags:
+        errors.append("a task template must not have the project tag")
+    if kind == "task" and "task" in tags:
+        errors.append("a task template must not have the task tag (daily notes would list supervised tasks)")
+    for key, want in (("status", "backlog"), ("assignee", "user")):
+        if props.get(key) != want:
+            errors.append(f"{key} must be {want}, got {props.get(key)!r}")
+    if "概要" not in parse_sections(body):
+        errors.append("the body must have a '## 概要' section")
+    return errors
+
+
+def cmd_check_template(args):
+    errors = template_errors(Path(args.file).read_text(encoding="utf-8"), args.kind)
+    if errors:
+        raise StateError(errors)
+    print(f"ok: {args.kind} template {args.file}")
+    return 0
+
+
+def retagged(tags):
+    """The tags of a note in the supervised form, or None when it is not a task / project note or is already in it."""
+    tags = tags if isinstance(tags, list) else ([tags] if tags else [])
+    if "project" in tags:
+        kind = "project"
+    elif "task" in tags or SUPERVISED_TAG in tags:
+        kind = "task"
+    else:
+        return None
+    want = list(NOTE_TAGS[kind])
+    new = want + [t for t in tags if t not in want and not (kind == "task" and t == "task")]
+    return None if new == tags else new
+
+
+def cmd_retag_notes(args):
+    sup = os.path.dirname(os.path.abspath(args.state))
+    vault, texts, _ = _vault_index(args.state)
+    if os.path.realpath(vault) != os.path.realpath(os.path.join(sup, VAULT_DIR)):
+        raise StateError(f"retag-notes rewrites every task and project note, so it runs only on {os.path.join(sup, VAULT_DIR)}, "
+                         f"not on {vault}")
+    changed = []
+    for rel, text in texts.items():
+        new = retagged(parse_frontmatter(text)[0].get("tags"))
+        if new is None:
+            continue
+        if not args.dry_run:
+            _write_note(os.path.join(vault, rel), set_props(text, {"tags": new}))
+        changed.append({"path": rel, "tags": new})
+    print(json.dumps({"dry_run": bool(args.dry_run), "notes": changed}, ensure_ascii=False))
     return 0
 
 
@@ -4126,7 +4715,7 @@ def cmd_export_v1(args):
         raise StateError("--out must not be the state file")
     state = _read_json(args.state)
     _require_v2(state, args.state)
-    texts, uids = _index_vault(_vault_path(args.state))
+    _, texts, uids = _vault_index(args.state)
     out = export_v1(state, _notes_by_uid(texts, uids))
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     _write_atomic(args.out, serialize(out))
@@ -4177,6 +4766,16 @@ def build_parser():
     p.add_argument("--count", type=int, default=1, help="reserve this many distinct uids (prints a list when above 1)")
     p.set_defaults(func=cmd_new_note)
 
+    p = sub.add_parser("check-template", help="check that a note template has what notes need to be picked up (writes nothing)")
+    p.add_argument("--kind", required=True, choices=("task", "project"))
+    p.add_argument("--file", required=True)
+    p.set_defaults(func=cmd_check_template)
+
+    p = sub.add_parser("retag-notes", help="give the task and project notes of <dir>/vault the supervised tags (tags only)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--dry-run", action="store_true", help="print the notes it would change and write nothing")
+    p.set_defaults(func=cmd_retag_notes)
+
     p = sub.add_parser("digest", help="print the SessionStart summary (always exits 0)")
     p.add_argument("--state", required=True)
     p.set_defaults(func=cmd_digest)
@@ -4212,11 +4811,11 @@ def build_parser():
     p.add_argument("--review-minutes", type=int, default=REVIEW_WAIT_MINUTES)
     p.set_defaults(func=cmd_waits)
 
-    p = sub.add_parser("manager-reconcile", help="judge a project manager session from list rows and its latest events (JSON)")
+    p = sub.add_parser("manager-reconcile", help="judge a project manager session from its hc terminal and its latest message (JSON)")
     p.add_argument("--state", required=True)
     p.add_argument("--project", required=True)
-    p.add_argument("--rows", required=True, help="JSON file with the list rows (include_archived)")
-    p.add_argument("--events", help='JSON file {"last_message_ref": ..., "pending_approval": bool} summarizing the latest events')
+    p.add_argument("--from", dest="from_file", help="read `hc ls --all --json` output from this file instead of running hc")
+    p.add_argument("--last-message-ref", help="message_ref printed by last-message for the manager; omit while it is running")
     p.set_defaults(func=cmd_manager_reconcile)
 
     p = sub.add_parser("guard", help="PreToolUse hook: exit 3 with a reason on stderr when the call is blocked, else 0")
@@ -4242,11 +4841,49 @@ def build_parser():
     p = sub.add_parser("prepare-dir", help="show the ## Locations roots, or clone a repository / create a work directory under them")
     p.add_argument("--claude-md", required=True)
     mode = p.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--show", action="store_true", help="print clone_root and work_root as absolute paths (read-only)")
+    mode.add_argument("--show", action="store_true", help="print clone_root, work_root and worktree_root as absolute paths (read-only)")
     mode.add_argument("--work", metavar="NAME", help="create work_root/NAME (NAME is T-NNNN-<slug>)")
     mode.add_argument("--clone", metavar="URL", help="clone URL into clone_root/<host>/<owner>/<repo>")
     mode.add_argument("--project", metavar="NAME", help="create work_root/NAME with the manager guard hook (NAME is P-NNNN-<slug>)")
     p.set_defaults(func=cmd_prepare_dir)
+
+    p = sub.add_parser("prepare-worktree", help="add a worker worktree under worktree_root/<repo>/<slug> on a new branch")
+    p.add_argument("--claude-md", required=True)
+    p.add_argument("--repo", required=True, help="the repository (its main checkout or any worktree)")
+    p.add_argument("--branch", required=True, help="the new branch, e.g. claude/t0123-readme-fix")
+    p.add_argument("--base", required=True, help="the ref the branch starts from")
+    p.add_argument("--slug", help="the directory name (default: the branch's last path segment)")
+    p.set_defaults(func=cmd_prepare_worktree)
+
+    p = sub.add_parser("remove-worktree", help="remove a clean worker worktree under worktree_root (the branch stays)")
+    p.add_argument("--claude-md", required=True)
+    p.add_argument("--path", required=True)
+    p.set_defaults(func=cmd_remove_worktree)
+
+    p = sub.add_parser("launch-plan", help="print the hc run argv that starts a herdr worker or manager (reads only)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--claude-md", required=True)
+    p.add_argument("--worker", required=True, help="a worker id (w-0123) or a manager handle (m-p-0006)")
+    p.add_argument("--prompt-file", required=True)
+    p.set_defaults(func=cmd_launch_plan)
+
+    p = sub.add_parser("last-message", help="write the last assistant message of a herdr worker or manager from its transcript")
+    p.add_argument("--state", required=True)
+    p.add_argument("--id", required=True, help="worker id (w-NNNN) or manager handle (m-p-NNNN)")
+    p.add_argument("--out", required=True)
+    p.set_defaults(func=cmd_last_message)
+
+    p = sub.add_parser("observe-hc", help="map hc terminals to observed states of herdr workers and managers (reads only)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--from", dest="from_file", help="read `hc ls --all --json` output from this file instead of running hc")
+    p.set_defaults(func=cmd_observe_hc)
+
+    p = sub.add_parser("watch-vault", help="loop: tell the supervisor terminal about note changes and blocked / finished sessions")
+    p.add_argument("--state", required=True)
+    p.add_argument("--notify", default="sv", help="the supervisor terminal (default: sv)")
+    p.add_argument("--interval", type=float, default=10, help="seconds between ticks (default: 10)")
+    p.add_argument("--once", action="store_true", help="run one tick and exit")
+    p.set_defaults(func=cmd_watch_vault)
 
     p = sub.add_parser("check-cwd", help="print busy or free for a non-git cwd")
     p.add_argument("--state", required=True)

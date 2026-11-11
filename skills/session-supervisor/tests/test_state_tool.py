@@ -1538,7 +1538,8 @@ class SetupTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def setup_dir(self, target):
-        return subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
+        env = dict(os.environ, HOME=str(self.root / "home"))
+        return subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True, env=env)
 
     def files(self, target):
         return sorted(str(p.relative_to(target)) for p in target.rglob("*") if p.is_file())
@@ -1551,8 +1552,7 @@ class SetupTest(unittest.TestCase):
         proc = self.setup_dir(target)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.files(target), [".claude/settings.json", ".supervisor/state_tool.py", "CLAUDE.md", "state.json",
-                                              "vault/.obsidian/templates.json", "vault/Supervisor.md",
-                                              "vault/_templates/project.md", "vault/_templates/task.md"])
+                                              "vault/Supervisor.md"])
         entries = self.hooks(target)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["matcher"], "startup|resume|clear|compact")
@@ -1698,9 +1698,10 @@ class SetupTest(unittest.TestCase):
         target = self.root / "sup"
         self.assertEqual(self.setup_dir(target).returncode, 0)
         text = (target / "CLAUDE.md").read_text(encoding="utf-8")
-        self.assertEqual(st.parse_locations(text), ({"clone_root": "~/src", "work_root": str(self.root / "sup-work")}, []))
-        self.assertIn("prepare-dir` is the only command that writes outside this directory", text)
-        self.assertIn("The one allowed exception is `state_tool.py prepare-dir`", text)
+        self.assertEqual(st.parse_locations(text), ({"clone_root": "~/src", "work_root": str(self.root / "sup-work"), "worktree_root": "~/.claude-worktrees"}, []))
+        self.assertIn("prepare-dir` and `prepare-worktree` are the only commands that write outside", text)
+        self.assertEqual(st.parse_herdr(text), ({"max_workers": 8}, []))
+        self.assertIn("The allowed exceptions are `state_tool.py prepare-dir`, `prepare-worktree`, and `remove-worktree`", text)
 
     def test_appends_locations_to_existing_claude_md(self):
         target = self.root / "sup"
@@ -1711,7 +1712,7 @@ class SetupTest(unittest.TestCase):
         self.assertIn(f"updated: {target / 'CLAUDE.md'}", proc.stdout)
         text = (target / "CLAUDE.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith(body + "\n## Locations\n"), text)
-        self.assertEqual(st.parse_locations(text)[0], {"clone_root": "~/src", "work_root": str(self.root / "sup-work")})
+        self.assertEqual(st.parse_locations(text)[0], {"clone_root": "~/src", "work_root": str(self.root / "sup-work"), "worktree_root": "~/.claude-worktrees"})
 
     def test_keeps_custom_values_and_adds_only_missing_keys(self):
         target = self.root / "sup"
@@ -1720,11 +1721,13 @@ class SetupTest(unittest.TestCase):
         (target / "CLAUDE.md").write_text(body, encoding="utf-8")
         self.assertEqual(self.setup_dir(target).returncode, 0)
         text = (target / "CLAUDE.md").read_text(encoding="utf-8")
-        self.assertEqual(text, f"# Mine\n\n## Locations\n\n- clone_root: /code\n- work_root: {self.root / 'sup-work'}\n\n## Follow-ups\n")
-        (target / "CLAUDE.md").write_text("## Locations\n- work_root: ~/work\n- clone_root: ~/code\n", encoding="utf-8")
+        self.assertTrue(text.startswith(f"# Mine\n\n## Locations\n\n- clone_root: /code\n- work_root: {self.root / 'sup-work'}\n"
+                                        "- worktree_root: ~/.claude-worktrees\n\n## Follow-ups\n"), text)
+        mine = "## Locations\n- work_root: ~/work\n- clone_root: ~/code\n- worktree_root: ~/trees\n\n## Herdr\n- max_workers: 3\n"
+        (target / "CLAUDE.md").write_text(mine, encoding="utf-8")
         proc = self.setup_dir(target)
         self.assertIn(f"exists: {target / 'CLAUDE.md'}", proc.stdout)
-        self.assertEqual((target / "CLAUDE.md").read_text(encoding="utf-8"), "## Locations\n- work_root: ~/work\n- clone_root: ~/code\n")
+        self.assertEqual((target / "CLAUDE.md").read_text(encoding="utf-8"), mine)
 
     def test_second_run_keeps_claude_md_bytes(self):
         target = self.root / "sup"
@@ -1777,7 +1780,7 @@ class LocationsTest(unittest.TestCase):
 
     def test_defaults(self):
         self.assertEqual(st.default_locations("/Users/me/supervisor/"),
-                         {"clone_root": "~/src", "work_root": "/Users/me/supervisor-work"})
+                         {"clone_root": "~/src", "work_root": "/Users/me/supervisor-work", "worktree_root": "~/.claude-worktrees"})
 
     def test_add_missing_locations_is_idempotent(self):
         once = st.add_missing_locations(st.CLAUDE_MD, "/x/sup")
@@ -1841,13 +1844,18 @@ class PrepareDirTest(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
     def test_show_expands_and_marks_defaults(self):
-        self.assertEqual(self.run_cli("--show"), (0, f"clone_root: {self.clones}\nwork_root: {self.work}\n", ""))
+        trees = st._real("~/.claude-worktrees")
+        self.assertEqual(self.run_cli("--show"),
+                         (0, f"clone_root: {self.clones}\nwork_root: {self.work}\nworktree_root: {trees} (default)\n", ""))
         home = self.root / "home"
         with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            trees = home / ".claude-worktrees"
             self.write_locations("- clone_root: ~/code\n")
-            self.assertEqual(self.run_cli("--show")[1], f"clone_root: {home / 'code'}\nwork_root: {self.root / 'sup-work'} (default)\n")
+            self.assertEqual(self.run_cli("--show")[1], f"clone_root: {home / 'code'}\nwork_root: {self.root / 'sup-work'} (default)\n"
+                             f"worktree_root: {trees} (default)\n")
             self.md.write_text("# Supervisor\n", encoding="utf-8")
-            self.assertEqual(self.run_cli("--show")[1], f"clone_root: {home / 'src'} (default)\nwork_root: {self.root / 'sup-work'} (default)\n")
+            self.assertEqual(self.run_cli("--show")[1], f"clone_root: {home / 'src'} (default)\nwork_root: {self.root / 'sup-work'} (default)\n"
+                             f"worktree_root: {trees} (default)\n")
             self.md.unlink()
             self.assertEqual(self.run_cli("--show")[0], 0)
 
@@ -2973,9 +2981,9 @@ class ProjectCliTest(unittest.TestCase):
             self.assertEqual(proc.returncode, 0)
             self.assertIn("| w-0020 |", run("roster", "--state", str(path), "--project", "P-0001").stdout)
             self.assertEqual(json.loads(run("waits", "--state", str(path), "--now", NOW).stdout), [])
-            rows = Path(d) / "rows.json"
-            rows.write_text(json.dumps([]), encoding="utf-8")
-            proc = run("manager-reconcile", "--state", str(path), "--project", "P-0001", "--rows", str(rows))
+            hc_ls = Path(d) / "hc-ls.json"
+            hc_ls.write_text(json.dumps({"terminals": []}), encoding="utf-8")
+            proc = run("manager-reconcile", "--state", str(path), "--project", "P-0001", "--from", str(hc_ls))
             self.assertEqual(json.loads(proc.stdout), [{"decision": "missing", "session_id": "sess_mgr_P-0001"}])
             self.assertEqual(run("roster", "--state", str(path), "--project", "P-0009").returncode, 1)
 
@@ -3481,7 +3489,7 @@ class NoteTemplateTest(unittest.TestCase):
                                 "typo を直してください。\n\n- README.md", parent="20261101_090000")
         self.assertTrue(text.startswith('---\nuid: "20261110_090000"\ntitle: "README の typo を直す"\npara: "Project"\n'
                                         "aliases: []\ncreated_at: 2026-11-10 09:00:00\narchived_at: null\n"
-                                        'tags: ["task"]\n'))
+                                        'tags: ["supervised"]\n'))
         props, body, errors = st.parse_frontmatter(text)
         self.assertEqual(errors, [])
         self.assertEqual(list(props), [k for k in st.NOTE_KEYS if k not in ("task_id", "project_id", "follows")])
@@ -3494,7 +3502,7 @@ class NoteTemplateTest(unittest.TestCase):
     def test_project_note_and_optional_links(self):
         text = st.new_note_text("20261110_090001", "Nature MCP", "project", "backlog", "user", NOTE_NOW)
         props = st.parse_frontmatter(text)[0]
-        self.assertEqual(props["tags"], ["project"])
+        self.assertEqual(props["tags"], ["supervised", "project", "task"])
         self.assertNotIn("parent", props)
         self.assertNotIn("follows", props)
         follows = st.parse_frontmatter(st.new_note_text("u", "t", "task", "backlog", "agent", NOTE_NOW, follows="20261101_000000"))[0]
@@ -4377,7 +4385,7 @@ class NoteCommitTest(unittest.TestCase):
         self.assertEqual(self.env.scan()["events"], [])
 
     def test_uidless_note_gets_its_uid_at_pickup(self):
-        text = "---\ntitle: 思いつき\ntags:\n  - task\nstatus: backlog\nassignee: agent\n---\n## 概要\n\nやって\n"
+        text = "---\ntitle: 思いつき\ntags:\n  - supervised\nstatus: backlog\nassignee: agent\n---\n## 概要\n\nやって\n"
         self.env.put(None, text, rel="Untitled.md")
         event = self.env.scan()["events"][0]
         uid = event["proposed_uid"]
@@ -4444,7 +4452,7 @@ class NoteCommitTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         props = st.parse_frontmatter(self.env.text(U1))[0]
         self.assertEqual((props["status"], props["assignee"]), ("done", "user"))
-        self.assertRegex(props["completed_at"], r"^\d{4}-\d{2}-\d{2}$")
+        self.assertRegex(props["completed_at"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
         stub = self.env.load()["archived"][0]
         self.assertEqual((stub["uid"], stub["note_seen"]["status"]), (U1, "done"))
         self.assertEqual(self.env.scan()["events"], [])
@@ -4574,8 +4582,10 @@ class NotesScanCliTest(unittest.TestCase):
 
     def test_unmanaged_notes(self):
         self.env.put(None, "---\ntitle: メモ\ntags: [idea]\nstatus: backlog\nassignee: agent\n---\n", rel="memo.md")
-        self.env.put(None, "---\ntitle: 自分の\ntags: [task]\nstatus: new\nassignee: user\n---\n", rel="mine.md")
-        bad = "---\nuid: \"20261110_100000\"\ntitle: x\ntags: [task]\nstatus: \"in progress\"\nassignee: agent\n---\n"
+        self.env.put(None, "---\ntitle: 自分の\ntags: [supervised]\nstatus: new\nassignee: user\n---\n", rel="mine.md")
+        # The user's own task notes are never picked up, whatever their status and assignee.
+        self.env.put(None, "---\ntitle: 私用\ntags: [task]\nstatus: backlog\nassignee: agent\n---\n## 概要\n", rel="own.md")
+        bad = "---\nuid: \"20261110_100000\"\ntitle: x\ntags: [supervised]\nstatus: \"in progress\"\nassignee: agent\n---\n"
         self.env.put(None, bad, rel="bad.md")
         events = self.env.scan()["events"]
         self.assertEqual([(e["path"], e["event"], e["row"]) for e in events], [("bad.md", "invalid", 3)])
@@ -4687,16 +4697,8 @@ class SetupVaultTest(unittest.TestCase):
             self.assertIn("""'assignee == "user"'""", dashboard)
             self.assertIn("""'assignee == "agent"'""", dashboard)
             self.assertIn("groupOrder: [backlog, in progress, pending, done, archived]", (vault / "Supervisor.md").read_text(encoding="utf-8"))
-            self.assertEqual(json.loads((vault / ".obsidian" / "templates.json").read_text(encoding="utf-8")), {"folder": "_templates"})
-            for kind in ("task", "project"):
-                template = (vault / "_templates" / f"{kind}.md").read_text(encoding="utf-8")
-                self.assertIn("created_at: {{date:YYYY-MM-DD}} {{time:HH:mm:ss}}\n", template)
-                template = template.replace("{{date:YYYY-MM-DD}} {{time:HH:mm:ss}}", "2026-11-10 09:00:00")
-                props, body, errors = st.parse_frontmatter(template)
-                self.assertEqual(errors, [])
-                self.assertEqual((props["uid"], props["tags"], props["status"], props["assignee"]),
-                                 ("{{date:YYYYMMDD}}_{{time:HHmmss}}", [kind], "backlog", "user"))
-                self.assertEqual(list(st.parse_sections(body)), list(st.NOTE_SECTIONS))
+            self.assertIn('file.hasTag("supervised")', dashboard)
+            self.assertFalse((vault / "_templates").exists() or (vault / ".obsidian").exists())
             self.assertIn("vault/", (target / "CLAUDE.md").read_text(encoding="utf-8"))
             (vault / "Supervisor.md").write_text("mine\n", encoding="utf-8")
             proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
@@ -5049,6 +5051,530 @@ class VerifyFixesTest(unittest.TestCase):
         self.assertEqual(self.env.commit()[0], 0)
         log = note_section(self.env.text(U1), "ログ")
         self.assertEqual((log.count("最初の記録"), log.count("二回目の記録")), (1, 1))
+
+
+SID = "0f8fad5b-d9cb-469f-a165-70867728950e"
+
+
+def herdr_worker(state, task_id="T-0030", worker_id="w-0030", **kw):
+    git_task(state, task_id, worker_id)
+    w = find(state["workers"], worker_id)
+    w.update(runtime="herdr", session_id=SID, handle=worker_id, title=f"{task_id}|{worker_id} fix it",
+             worktree_path="/trees/a/fix", model="sonnet", **kw)
+    return w
+
+
+class FakeHc:
+    """Records hc argv and answers ls / get / send from canned data."""
+
+    def __init__(self, terminals=(), sv_address="t1"):
+        self.terminals, self.sv_address, self.calls = list(terminals), sv_address, []
+
+    def __call__(self, argv):
+        self.calls.append(argv)
+        out = {"ls": {"terminals": self.terminals}, "get": {"address": self.sv_address}}.get(argv[1], {"started": True})
+        return subprocess.CompletedProcess(argv, 0, json.dumps(out), "")
+
+    def sent(self):
+        return [c[-1] for c in self.calls if c[1] == "send"]
+
+
+class HerdrSettingsTest(unittest.TestCase):
+    def test_parse_and_defaults(self):
+        self.assertEqual(st.parse_herdr("## Herdr\n- max_workers: 3\n- worker_path: /a:/b\n"),
+                         ({"max_workers": 3, "worker_path": "/a:/b"}, []))
+        self.assertEqual(st.parse_herdr("# T\n"), ({}, []))
+        for bad in ("- max_workers: 0\n", "- max_workers: x\n", "- worker_path:\n", "- color: red\n"):
+            with self.subTest(bad=bad):
+                self.assertTrue(st.parse_herdr("## Herdr\n" + bad)[1])
+        self.assertEqual(st.default_herdr("/usr/bin", None), {"max_workers": 8})
+        self.assertEqual(st.default_herdr("/usr/bin", "/s"), {"max_workers": 8, "worker_path": "/s:/usr/bin"})
+        self.assertEqual(st.default_herdr("/s:/usr/bin", "/s"), {"max_workers": 8})
+
+    def test_add_missing_herdr_keeps_values_and_is_idempotent(self):
+        once = st.add_missing_herdr("# T\n", "/usr/bin", "/s")
+        self.assertEqual(st.parse_herdr(once), ({"max_workers": 8, "worker_path": "/s:/usr/bin"}, []))
+        self.assertEqual(st.add_missing_herdr(once, "/usr/bin", "/s"), once)
+        mine = "## Herdr\n- max_workers: 2\n"
+        self.assertEqual(st.parse_herdr(st.add_missing_herdr(mine, "/usr/bin", None))[0], {"max_workers": 2})
+
+
+class HerdrSchemaTest(unittest.TestCase):
+    def test_herdr_worker_is_valid(self):
+        state = fixture_state()
+        herdr_worker(state)
+        self.assertEqual(st.validate(state), [])
+        find(state["workers"], "w-0030")["session_id"] = None
+        self.assertEqual(st.validate(state), [])
+
+    def test_herdr_worker_needs_uuid_and_matching_handle(self):
+        for change, needle in (({"session_id": "local_abc"}, "uuid"), ({"handle": "x"}, "handle"),
+                               ({"runtime": "tmux"}, "runtime")):
+            with self.subTest(change=change):
+                state = fixture_state()
+                herdr_worker(state).update(change)
+                self.assertTrue(any(needle in e for e in st.validate(state)), st.validate(state))
+
+    def test_herdr_manager_handle(self):
+        state = fixture_state()
+        add_project(state)
+        state["projects"][0]["manager"].update(runtime="herdr", session_id=SID, handle="m-p-0001")
+        self.assertEqual(st.validate(state), [])
+        state["projects"][0]["manager"]["handle"] = "m-P-0001"
+        self.assertTrue(any("handle" in e for e in st.validate(state)))
+
+
+class LaunchPlanTest(unittest.TestCase):
+    def test_worker_argv(self):
+        state = fixture_state()
+        herdr_worker(state)
+        argv = st.launch_argv(state, "w-0030", "Fix it.", {"worker_path": "/s:/usr/bin"})
+        self.assertEqual(argv, [
+            "hc", "run", "--bg", "--json", "--name", "w-0030", "--cwd", "/trees/a/fix", "--label", "sv=worker",
+            "--label", "task=T-0030", "--outlive-parent", "env", "PATH=/s:/usr/bin", "claude", "--session-id", SID,
+            "--model", "sonnet", "--permission-mode", "auto", "-n", "T-0030|w-0030 fix it",
+            "--allowedTools=Bash(hc send sv:*)", "Fix it."])
+        self.assertEqual(argv[-1], "Fix it.")
+
+    def test_git_worker_runs_in_its_worktree_and_non_git_in_its_cwd(self):
+        state = fixture_state()
+        w = herdr_worker(state)
+        self.assertNotEqual(w["cwd"], "/trees/a/fix")
+        argv = st.launch_argv(state, "w-0030", "Fix it.", {})
+        self.assertEqual(argv[argv.index("--cwd") + 1], "/trees/a/fix")
+        w["worktree_path"] = None
+        with self.assertRaisesRegex(st.StateError, "worktree_path"):
+            st.launch_argv(state, "w-0030", "Fix it.", {})
+        w.update(kind="non-git", cwd="/work/T-0030-docs")
+        argv = st.launch_argv(state, "w-0030", "Fix it.", {})
+        self.assertEqual(argv[argv.index("--cwd") + 1], "/work/T-0030-docs")
+
+    def test_manager_argv(self):
+        state = fixture_state()
+        add_project(state)
+        state["projects"][0]["manager"].update(runtime="herdr", session_id=SID, handle="m-p-0001")
+        argv = st.launch_argv(state, "m-p-0001", "Review.", {})
+        self.assertIn("sv=manager", argv)
+        self.assertIn("project=P-0001", argv)
+        self.assertEqual(argv[argv.index("--cwd") + 1], PROJECT_DIR)
+        self.assertNotIn("env", argv)
+
+    def test_refusals(self):
+        state = fixture_state()
+        w = herdr_worker(state)
+        w["session_id"] = None
+        with self.assertRaisesRegex(st.StateError, "uuid4"):
+            st.launch_argv(state, "w-0030", "x", {})
+        w["session_id"] = SID
+        with self.assertRaisesRegex(st.StateError, "empty"):
+            st.launch_argv(state, "w-0030", "  ", {})
+        with self.assertRaisesRegex(st.StateError, "neither"):
+            st.launch_argv(state, "w-9999", "x", {})
+        herdr_worker(state, "T-0031", "w-0031", intended_state="running", observed_state="running")
+        herdr_worker(state, "T-0032", "w-0032", intended_state="running", observed_state="missing")
+        with self.assertRaisesRegex(st.StateError, "max_workers 1 reached \\(w-0031\\)"):
+            st.launch_argv(state, "w-0030", "x", {"max_workers": 1})
+        self.assertTrue(st.launch_argv(state, "w-0030", "x", {"max_workers": 2}))
+
+    def test_cli(self):
+        env = VaultEnv(self)
+        state = fixture_state()
+        herdr_worker(state)
+        env.state_path.write_text(st.serialize(state), encoding="utf-8")
+        (env.dir / "CLAUDE.md").write_text("## Herdr\n- max_workers: 4\n", encoding="utf-8")
+        (env.dir / "prompt.md").write_text("Fix it.\nThen report.", encoding="utf-8")
+        code, out, err = env.run("launch-plan", "--state", str(env.state_path), "--claude-md", str(env.dir / "CLAUDE.md"),
+                                 "--worker", "w-0030", "--prompt-file", str(env.dir / "prompt.md"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["argv"][-1], "Fix it.\nThen report.")
+
+
+class HerdrTranscriptTest(unittest.TestCase):
+    def test_last_assistant_message_joins_the_last_message_parts(self):
+        with open(FIXTURES / "transcript_small.jsonl", encoding="utf-8") as f:
+            got = st.last_assistant_message(f)
+        self.assertEqual(got, {"message_ref": "a6",
+                               "text": "Done.\n```supervisor-report\ntask: T-0030\n```\nTrailing part."})
+        self.assertIsNone(st.last_assistant_message(['{"type": "assistant", "message": {"content": []}}']))
+
+    def test_dir_name_matches_claude_code(self):
+        self.assertEqual(st.transcript_dir_name("/private/tmp/claude-501/x_y.z"), "-private-tmp-claude-501-x-y-z")
+        # macOS keeps paths in NFD, so a voiced kana counts as two characters.
+        self.assertEqual(st.transcript_dir_name("/a/ドライブ"), "-a-" + "-" * 6)
+
+    def test_cli_reads_the_worktree_transcript_and_fails_without_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = fixture_state()
+            herdr_worker(state)
+            path = Path(d) / "state.json"
+            path.write_text(json.dumps(state), encoding="utf-8")
+            out = Path(d) / "last-message.txt"
+            env = dict(os.environ, CLAUDE_CONFIG_DIR=str(Path(d) / "cfg"))
+            run = lambda: subprocess.run([sys.executable, str(SCRIPT), "last-message", "--state", str(path),
+                                          "--id", "w-0030", "--out", str(out)], capture_output=True, text=True, env=env)
+            proc = run()
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("hc read", proc.stderr)
+            folder = Path(d) / "cfg" / "projects" / st.transcript_dir_name("/trees/a/fix")
+            folder.mkdir(parents=True)
+            shutil.copy(FIXTURES / "transcript_small.jsonl", folder / f"{SID}.jsonl")
+            proc = run()
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(json.loads(proc.stdout)["message_ref"], "a6")
+            self.assertTrue(out.read_text(encoding="utf-8").startswith("Done."))
+
+
+class ManagerHcRowsTest(unittest.TestCase):
+    def manager(self, **kw):
+        return dict({"session_id": SID, "intended_state": "running", "observed_state": "idle", "last_report": None}, **kw)
+
+    def test_blocked_manager_and_its_agents(self):
+        terminals = [
+            {"address": "t5", "name": "m-p-0001", "state": "live", "status": {"state": "blocked", "msg": "approve"}},
+            {"address": "t6", "name": "helper", "parent": "t5", "state": "live", "status": "working"},
+            {"address": "t7", "name": "old", "parent": "t5", "state": "finished"},
+        ]
+        rows = st.manager_rows_from_hc(self.manager(), "m-p-0001", terminals)
+        decisions = st.manager_reconcile(self.manager(), rows, {"last_message_ref": "a9", "pending_approval": True})
+        self.assertIn({"decision": "foreign_session", "session_id": "helper"}, decisions)
+        self.assertIn({"decision": "pending_approval", "session_id": SID}, decisions)
+        self.assertIn({"decision": "handle_turn", "message_ref": "a9"}, decisions)
+        self.assertNotIn("old", [d.get("session_id") for d in decisions])
+
+    def test_finished_and_missing_manager(self):
+        finished = [{"address": "t5", "name": "m-p-0001", "state": "finished"}]
+        rows = st.manager_rows_from_hc(self.manager(), "m-p-0001", finished)
+        self.assertEqual(st.manager_reconcile(self.manager(), rows), [{"decision": "external_archive", "session_id": SID}])
+        rows = st.manager_rows_from_hc(self.manager(intended_state="archived"), "m-p-0001", finished)
+        self.assertEqual(st.manager_reconcile(self.manager(intended_state="archived"), rows),
+                         [{"decision": "update", "observed_state": "archived"}])
+        self.assertEqual(st.manager_reconcile(self.manager(), st.manager_rows_from_hc(self.manager(), "m-p-0001", [])),
+                         [{"decision": "missing", "session_id": SID}])
+
+
+class ObserveHcTest(unittest.TestCase):
+    def test_mapping(self):
+        state = fixture_state()
+        for i, intended in enumerate(("running",) * 5 + ("archived",)):
+            herdr_worker(state, f"T-004{i}", f"w-004{i}", intended_state=intended, observed_state="idle")
+        terminals = [
+            {"address": "t1", "name": "w-0040", "state": "live", "status": "working", "turn": 2},
+            {"address": "t2", "name": "w-0041", "state": "live", "status": {"app": "claude-code", "state": "blocked",
+                                                                           "kind": "permission", "msg": "approve Bash: ls"}},
+            {"address": "t3", "name": "w-0042", "state": "live", "status": None},
+            {"address": "t4", "name": "w-0043", "state": "finished", "exit_code": 129, "reason": "killed"},
+            {"address": "t6", "name": "w-0045", "state": "finished", "exit_code": 129, "reason": "killed"},
+            {"address": "t9", "name": None, "state": "live", "status": "done"},
+        ]
+        got = {o["id"]: o for o in st.observe_hc(state, terminals)}
+        self.assertEqual({k: v["observed_state"] for k, v in got.items()},
+                         {"w-0040": "running", "w-0041": "needs_input", "w-0042": "idle", "w-0043": "missing",
+                          "w-0044": "missing", "w-0045": "archived"})
+        self.assertEqual(got["w-0041"]["blocked_msg"], "approve Bash: ls")
+        self.assertEqual((got["w-0043"]["exit_code"], got["w-0043"]["reason"]), (129, "killed"))
+        self.assertNotIn("w-0030", got)
+
+    def test_app_workers_are_ignored_and_cli_reads_a_file(self):
+        env = VaultEnv(self)
+        state = fixture_state()
+        herdr_worker(state)
+        env.state_path.write_text(st.serialize(state), encoding="utf-8")
+        (env.dir / "ls.json").write_text(json.dumps({"terminals": [{"address": "t5", "name": "w-0030", "state": "live",
+                                                                    "status": "done"}]}), encoding="utf-8")
+        code, out, err = env.run("observe-hc", "--state", str(env.state_path), "--from", str(env.dir / "ls.json"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual([(o["id"], o["observed_state"]) for o in json.loads(out)], [("w-0030", "idle")])
+
+
+class WatchVaultTest(unittest.TestCase):
+    def test_messages_dedupe_and_parent_rule(self):
+        scan = {"events": [{"uid": "u1", "event": "pickup", "ack": None}]}
+        memo = {}
+        terminals = [
+            {"address": "t5", "name": "w-0001", "state": "live", "status": "blocked", "parent": "t9"},
+            {"address": "t6", "name": "w-0002", "state": "finished", "parent": "t1"},
+            {"address": "t7", "name": "build", "state": "finished", "parent": "t9"},
+        ]
+        self.assertEqual(st.watch_messages(scan, terminals, "t1", memo),
+                         ["notes: u1", "worker: w-0001 blocked (hc read t5)"])
+        self.assertEqual(st.watch_messages(scan, terminals, "t1", memo), [])
+        terminals[0]["status"] = "working"
+        self.assertEqual(st.watch_messages({"events": []}, terminals, "t1", memo), [])
+        terminals[0]["status"] = "blocked"
+        self.assertEqual(st.watch_messages(scan, terminals, "t1", memo), ["notes: u1", "worker: w-0001 blocked (hc read t5)"])
+
+    def test_tick_scans_notes_and_sends(self):
+        env = VaultEnv(self)
+        env.save()
+        env.put("20261111_090000", st.new_note_text("20261111_090000", "Fix README", "task", "backlog", "agent", NOTE_NOW,
+                                                    request="Fix the README typo."))
+        hc = FakeHc([{"address": "t4", "name": "w-0009", "state": "finished", "parent": "t2"}])
+        memo = {}
+        sent = st.watch_tick(str(env.state_path), "sv", hc, memo)
+        self.assertEqual(sent, ["notes: 20261111_090000", "worker: w-0009 finished (hc read t4)"])
+        self.assertEqual(hc.sent(), sent)
+        self.assertEqual([c[:3] for c in hc.calls if c[1] == "send"], [["hc", "send", "sv"]] * 2)
+        self.assertEqual(st.watch_tick(str(env.state_path), "sv", hc, memo), [])
+
+    def test_cli_once_writes_nothing(self):
+        env = VaultEnv(self)
+        env.save()
+        before = env.state_path.read_bytes()
+        hc = FakeHc()
+        args = st.build_parser().parse_args(["watch-vault", "--state", str(env.state_path), "--once"])
+        self.assertEqual(st.cmd_watch_vault(args, runner=hc), 0)
+        self.assertEqual(env.state_path.read_bytes(), before)
+        self.assertEqual(hc.sent(), [])
+
+
+class HcGuardTest(unittest.TestCase):
+    BLOCK = [
+        "hc keys w-0001 enter",
+        "hc exec 'ls'",
+        "hc attach sv",
+        "hc server stop",
+        "hc update",
+        "hc machine add vps",
+        "hc file read /etc/hosts",
+        "hc put w-0001 x.txt",
+        "hc connect",
+        "sh -c 'hc keys w-0001 down enter'",
+        "python3 -c \"import subprocess; subprocess.run(['hc', 'keys', 'w-0001', 'enter'])\"",
+        "hc run --bg --name w-0001 claude 'x'",
+        "hc kill t1",
+        "hc rm build",
+        "hc send --force w-0001 yes",
+    ]
+    ALLOW = [
+        "hc run --bg --json --name w-0001 --cwd /t --label sv=worker --label task=T-0001 --outlive-parent claude 'x'",
+        "hc run --bg --name sv-watch --label=sv=watch python3 state_tool.py watch-vault --state s.json",
+        "hc kill w-0001",
+        "hc rm m-p-0006",
+        "hc kill sv-watch",
+        "hc send w-0001 'continue'",
+        "hc ls --all --json",
+        "hc get w-0001 --json",
+        "hc read --lines 50 w-0001",
+        "hc events --label sv=worker",
+    ]
+
+    def test_block(self):
+        for command in self.BLOCK:
+            with self.subTest(command=command):
+                self.assertTrue(st.bash_violations(command))
+
+    def test_allow(self):
+        for command in self.ALLOW:
+            with self.subTest(command=command):
+                self.assertEqual(st.bash_violations(command), [])
+
+
+def git(*argv, cwd):
+    subprocess.run(["git", *argv], cwd=cwd, check=True, capture_output=True,
+                   env=dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1"))
+
+
+class WorktreeTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.sup = self.root / "sup"
+        self.sup.mkdir()
+        self.trees = self.root / "trees"
+        self.md = self.sup / "CLAUDE.md"
+        self.md.write_text(f"## Locations\n- clone_root: {self.root / 'src'}\n- work_root: {self.root / 'work'}\n"
+                           f"- worktree_root: {self.trees}\n", encoding="utf-8")
+        self.repo = self.root / "src" / "repo-a"
+        self.repo.mkdir(parents=True)
+        git("init", "-q", "-b", "main", cwd=self.repo)
+        (self.repo / "a.txt").write_text("hello\n", encoding="utf-8")
+        git("add", "a.txt", cwd=self.repo)
+        git("-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init",
+            cwd=self.repo)
+        patcher = mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = st.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def prepare(self, branch="claude/t0001-fix", *extra):
+        return self.run_cli("prepare-worktree", "--claude-md", str(self.md), "--repo", str(self.repo), "--branch", branch,
+                            "--base", "main", *extra)
+
+    def test_prepare_then_exists_then_remove(self):
+        code, out, err = self.prepare()
+        self.assertEqual(code, 0, err)
+        got = json.loads(out)
+        dest = self.trees / "repo-a" / "t0001-fix"
+        self.assertEqual((got["status"], got["path"], got["branch"]), ("created", str(dest), "claude/t0001-fix"))
+        self.assertTrue((dest / "a.txt").exists())
+        self.assertEqual(json.loads(self.prepare()[1])["status"], "exists")
+        (dest / "b.txt").write_text("x", encoding="utf-8")
+        code, _, err = self.run_cli("remove-worktree", "--claude-md", str(self.md), "--path", str(dest))
+        self.assertEqual(code, 1)
+        self.assertIn("uncommitted", err)
+        (dest / "b.txt").unlink()
+        code, out, err = self.run_cli("remove-worktree", "--claude-md", str(self.md), "--path", str(dest))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["branch"], "claude/t0001-fix")
+        self.assertFalse(dest.exists())
+        branches = subprocess.run(["git", "-C", str(self.repo), "branch", "--list", "claude/t0001-fix"],
+                                  capture_output=True, text=True).stdout
+        self.assertIn("claude/t0001-fix", branches)
+
+    def test_prepare_refusals(self):
+        self.assertEqual(self.prepare("bad..branch")[0], 1)
+        self.assertEqual(self.prepare("claude/x", "--slug", "../escape")[0], 1)
+        (self.trees / "repo-a" / "taken").mkdir(parents=True)
+        code, _, err = self.prepare("claude/taken")
+        self.assertEqual(code, 1)
+        self.assertIn("is not a worktree", err)
+        code, _, err = self.run_cli("prepare-worktree", "--claude-md", str(self.md), "--repo", str(self.root),
+                                    "--branch", "claude/y", "--base", "main")
+        self.assertEqual(code, 1)
+        self.assertIn("not a git repository", err)
+
+    def test_remove_only_under_worktree_root(self):
+        code, _, err = self.run_cli("remove-worktree", "--claude-md", str(self.md), "--path", str(self.repo))
+        self.assertEqual(code, 1)
+        self.assertIn("not under worktree_root", err)
+
+    def test_worktree_root_must_not_nest(self):
+        self.md.write_text(f"## Locations\n- clone_root: {self.root / 'src'}\n- worktree_root: {self.root / 'src' / 't'}\n",
+                           encoding="utf-8")
+        code, _, err = self.prepare()
+        self.assertEqual(code, 1)
+        self.assertIn("nested", err)
+
+
+class ObsidianVaultTest(unittest.TestCase):
+    """The vault, dashboard and template folder from ## Locations, note props from ## Note props, supervised tags."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.sup = self.root / "sup"
+        self.sup.mkdir()
+
+    def claude_md(self, text):
+        (self.sup / "CLAUDE.md").write_text(text, encoding="utf-8")
+
+    def test_vault_keys_are_optional_and_checked(self):
+        self.assertEqual(st.vault_locations(str(self.sup)), (str(self.sup / "vault"), "Supervisor.md", "_templates"))
+        self.claude_md(f"## Locations\n- vault: {self.root}/memo\n- dashboard: _sv/Board.md\n- templates: _plugin/type\n")
+        self.assertEqual(st.vault_locations(str(self.sup)), (str(self.root / "memo"), "_sv/Board.md", "_plugin/type"))
+        for bad in ("- dashboard: /abs.md", "- dashboard: board", "- templates: ../x", "- vault: memo"):
+            self.assertTrue(st.parse_locations(f"## Locations\n{bad}\n")[1], bad)
+        self.claude_md(f"## Locations\n- vault: {self.root}/src/memo\n- clone_root: {self.root}/src\n")
+        with self.assertRaisesRegex(st.StateError, "nested"):
+            st.vault_locations(str(self.sup))
+
+    def test_setup_creates_only_the_dashboard_in_the_configured_vault(self):
+        memo = self.root / "memo"
+        self.claude_md(f"## Locations\n- vault: {memo}\n- dashboard: _sv/Board.md\n- templates: _plugin/type\n")
+        proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(self.sup)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        board = (memo / "_sv" / "Board.md").read_text(encoding="utf-8")
+        self.assertIn('file.hasTag("supervised")', board)
+        self.assertIn("""'!file.inFolder("_plugin/type")'""", board)
+        self.assertEqual(sorted(p.relative_to(memo).as_posix() for p in memo.rglob("*")), ["_sv", "_sv/Board.md"])
+        self.assertFalse((self.sup / "vault").exists())
+
+    def test_index_skips_the_dashboard_and_the_template_folder(self):
+        vault = self.root / "memo"
+        for rel in ("_sv/Board.md", "_plugin/type/supervised-task.md", "2026/11/20261111_090000.md"):
+            (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+            (vault / rel).write_text('---\nuid: "20261111_090000"\n---\n', encoding="utf-8")
+        texts, _ = st._index_vault(str(vault), "_sv/Board.md", "_plugin/type")
+        self.assertEqual(list(texts), ["2026/11/20261111_090000.md"])
+
+    def test_guard_protects_the_configured_vault(self):
+        memo = self.root / "memo"
+        memo.mkdir()
+        self.claude_md(f"## Locations\n- vault: {memo}\n")
+        found = st.path_violation(str(memo / "a.md"), str(self.sup), str(self.sup), str(self.root / "config"), [str(self.root)])
+        self.assertIn("vault notes are written only by state_tool commit", found)
+
+    def test_note_props(self):
+        props, errors = st.parse_note_props("## Note props\n- done: para=Archive, completed_at={now}, archived_at={now}\n"
+                                            "- archived: para=Archive, archived_at={now}\n- now_format: YYYY-MM-DDTHH:mm:ss\n")
+        self.assertEqual(errors, [])
+        now = "2026-11-11T10:20:30+09:00"
+        self.assertEqual(st._date_props("done", now, props),
+                         {"para": "Archive", "completed_at": "2026-11-11T10:20:30", "archived_at": "2026-11-11T10:20:30"})
+        self.assertEqual(st._date_props("in progress", now, props), {})
+        self.assertEqual(st._reset_props({"para": "Archive", "completed_at": "x", "archived_at": None}, props),
+                         {"para": "Project", "completed_at": None})
+        self.assertEqual(st._date_props("done", now), {"completed_at": "2026-11-11 10:20:30"})
+        for bad in ("- done: status=done", "- done: para", "- now_format: %Y", "- when: x"):
+            self.assertTrue(st.parse_note_props(f"## Note props\n{bad}\n")[1], bad)
+
+    def test_commit_writes_the_configured_props_and_resets_them(self):
+        env = VaultEnv(self)
+        env.add_task("T-0020", "w-0020", U1)
+        env.save()
+        (env.dir / "CLAUDE.md").write_text("## Note props\n- archived: para=Archive, archived_at={now}\n"
+                                           "- now_format: YYYY-MM-DDTHH:mm:ss\n", encoding="utf-8")
+        cand = env.load()
+        find(cand["tasks"], "T-0020")["cancel"] = {"at": NOW, "reason": "不要"}
+        find(cand["workers"], "w-0020").update(intended_state="archived", observed_state="archived")
+        code, out, err = env.commit(cand)
+        self.assertEqual(code, 0, err)
+        props = st.parse_frontmatter(env.text(U1))[0]
+        self.assertEqual((props["status"], props["para"]), ("archived", "Archive"))
+        self.assertRegex(props["archived_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+
+    def test_supervised_tags(self):
+        self.assertEqual(st.note_kind({"tags": ["task"]}), None)
+        self.assertEqual(st.note_kind({"tags": ["supervised"]}), "task")
+        self.assertEqual(st.note_kind({"tags": ["supervised", "project", "task"]}), "project")
+        self.assertEqual(st.retagged(["task", "oss"]), ["supervised", "oss"])
+        self.assertEqual(st.retagged(["project"]), ["supervised", "project", "task"])
+        self.assertIsNone(st.retagged(["supervised", "oss"]))
+        self.assertIsNone(st.retagged(["doc"]))
+
+    def test_retag_notes_only_on_the_supervisor_vault(self):
+        env = VaultEnv(self)
+        env.save()
+        env.put(None, '---\ntitle: a\ntags: ["task"]\nstatus: backlog\n---\n', rel="a.md")
+        env.put(None, '---\ntitle: g\ntags: ["doc"]\n---\n', rel="guide.md")
+        code, out, err = env.run("retag-notes", "--state", str(env.state_path), "--dry-run")
+        self.assertEqual((code, json.loads(out)["notes"]), (0, [{"path": "a.md", "tags": ["supervised"]}]), err)
+        self.assertIn('tags: ["task"]', (env.vault / "a.md").read_text(encoding="utf-8"))
+        self.assertEqual(env.run("retag-notes", "--state", str(env.state_path))[0], 0)
+        self.assertEqual(st.parse_frontmatter((env.vault / "a.md").read_text(encoding="utf-8"))[0]["tags"], ["supervised"])
+        self.assertEqual(json.loads(env.run("retag-notes", "--state", str(env.state_path))[1])["notes"], [])
+        (env.dir / "CLAUDE.md").write_text(f"## Locations\n- vault: {env.dir}/elsewhere\n", encoding="utf-8")
+        code, out, err = env.run("retag-notes", "--state", str(env.state_path))
+        self.assertEqual(code, 1)
+        self.assertIn("runs only on", err)
+
+    def test_check_template(self):
+        good = '---\ntitle: ""\ntags: ["supervised", "nature/sre"]\nstatus: backlog\nassignee: user\n---\n## 概要\n\n## ログ\n'
+        self.assertEqual(st.template_errors(good, "task"), [])
+        self.assertEqual(len(st.template_errors(good, "project")), 1)
+        bad = '---\ntags: ["task"]\nstatus: backlog\nassignee: agent\n---\n## メモ\n'
+        self.assertEqual(len(st.template_errors(bad, "task")), 4)
+
+
+class CancelWithoutWorkersTest(unittest.TestCase):
+    def test_cancel_of_a_task_waiting_for_where_to_work(self):
+        cur = json.loads((FIXTURES / "state_valid.json").read_text(encoding="utf-8"))
+        cur["tasks"].append({"id": "T-0099", "title": "x", "request": "r", "push_consent": None, "status": "needs_user",
+                             "next_action": "", "user_actions": [{"id": "UA-0099", "description": "where?", "since": NOW,
+                                                                  "needs_answer": True}],
+                             "artifacts": [], "worker_ids": [], "created_at": NOW})
+        cand = copy.deepcopy(cur)
+        find(cand["tasks"], "T-0099").update(cancel={"at": NOW, "reason": "不要"}, user_actions=[])
+        new = st.next_state(cur, cand, NOW)
+        self.assertNotIn("T-0099", [t["id"] for t in new["tasks"]])
+        self.assertTrue(new["archived"][0]["cancelled"])
 
 
 if __name__ == "__main__":

@@ -8,9 +8,10 @@ Most of this document describes the **v1 domain view**: the v1-shaped object `jo
 
 Field names are agent-neutral:
 
-- `session_id`: the session identifier issued by the runtime (the value the start capability returns).
-- `handle`: the `[a-z0-9-]` name (24 characters or fewer) given to the session at start, e.g. `t0003-w0004`.
-- `branch` / `worktree_path`: decided by the app (it adds a prefix and a suffix to the requested slug). Fill them from the get capability after start; never guess them.
+- `runtime`: `"herdr"` on workers and managers started in Herdr (SKILL.md 6.2). Any other value is an error. Without it, the session was started in the Claude desktop app by an earlier version (SKILL.md section 7).
+- `session_id`: for `runtime: "herdr"`, the Claude Code conversation uuid that the supervisor chooses (a lowercase uuid4, set and committed before the start; `launch-plan` passes it as `claude --session-id`), or `null` before it is set. It locates the session's transcript for its latest message. For a desktop-app session, the id the app returned.
+- `handle`: for `runtime: "herdr"`, the `hc` terminal name and equal to the id: `w-NNNN` for a worker, `m-p-NNNN` for the manager of `P-NNNN` (lowercase, since `hc` names allow only `a-z 0-9 - _`). `validate` checks it. For a desktop-app session, the start-time name, e.g. `t0003-w0004`.
+- `branch` / `worktree_path`: printed by `state_tool.py prepare-worktree` (SKILL.md 6.2 step 2); copy them from its output, never guess them.
 - `task.id`: `T-NNNN`. `worker.id`: `w-NNNN`. `user_actions[].id`: `UA-NNNN`. Allocate the next number after the highest one in the current `tasks` / `workers` / `user_actions`; for task ids also count the `archived` stubs, which keep their task id (a revived task reuses its stub's id, see archived[]). Stubs keep no worker or user-action ids, so those numbers may be reused after a task is archived; uniqueness is checked only within the current state. User-action numbers are allocated across the user actions of `tasks` and `projects` together, so a task and a project never share one, and never reused: the next number is above both the highest open one and `supervisor.last_ua_number` (which covers user actions already acked in the notes).
 - `project.id`: `P-NNNN`, allocated as `supervisor.last_project_number + 1`; the counter is raised in the same candidate and never reused, even after the project is removed.
 - `review.id`: `R-NNNN`, allocated per project as `projects[].last_review_number + 1`; the counter is raised in the same candidate, and a review id is unique within its project (two projects may both have `R-0001`).
@@ -174,7 +175,9 @@ In the view, an open user action also carries `detector` (for `auto=<detector>` 
 
 `commit --notes <ops.json>` (ops `{uid: [op, ...]}`) re-applies the previous commit's unconfirmed note writes once, checks that every ack copied into `note_seen` still matches its note, fills missing user-action ids and artifact numbers, applies the ops in memory, runs `next_state` on the views, derives note props (for the tasks archived in this commit from the candidate's task), writes `state.json` with `note_journal`, and only then writes the notes. Its output adds `notes_written`, `notes_deferred`, `notes_failed`, and `note_problems`. A `state.json` still at `schema_version: 1` keeps the v1 commit until it is migrated.
 
-Subcommands that read the vault: `notes-scan --state` (the user's changes as events, 3.4 (2); writes nothing), `note-show --state --uid` (props, sections, user actions, slots, artifacts), `new-note --state --kind task|project` (reserves `{uid, path}`; writes nothing), `migrate-v2 --state [--dry-run]` (v1 → notes and a v2 state), and `export-v1 --state --out` (the v1 form for rollback). `digest`, `check-cwd`, `plan-actions`, `roster`, `waits`, and `manager-reconcile` read a v2 state through `join_view`. A task's `proposal` may be stored as `{from, message_ref}` (a proposal note: `message_ref` is `note:<uid>`); the view fills `title` and `text` from the note. `push_consent.source` is `chat` or `note` (SKILL.md 6.3 step 7).
+The vault is `vault` of `## Locations` in `<dir>/CLAUDE.md` (default `<dir>/vault`); its `dashboard` note and `templates` folder are never read as notes. A task note is tagged `supervised`, a project note `supervised`, `project`, `task` (`note_kind`).
+
+Subcommands that read the vault: `notes-scan --state` (the user's changes as events, 3.4 (2); writes nothing), `note-show --state --uid` (props, sections, user actions, slots, artifacts), `new-note --state --kind task|project` (reserves `{uid, path}`; writes nothing), `migrate-v2 --state [--dry-run]` (v1 → notes and a v2 state), `export-v1 --state --out` (the v1 form for rollback), and `retag-notes --state [--dry-run]` (gives the task and project notes of `<dir>/vault` the tags above; tags only). `check-template --kind --file` checks a note template (SKILL.md section 3, Vault interview). `digest`, `check-cwd`, `plan-actions`, `roster`, `waits`, and `manager-reconcile` read a v2 state through `join_view`. A task's `proposal` may be stored as `{from, message_ref}` (a proposal note: `message_ref` is `note:<uid>`); the view fills `title` and `text` from the note. `push_consent.source` is `chat` or `note` (SKILL.md 6.3 step 7).
 
 `_storage_errors(state_v2, notes)` checks what the view cannot see: `schema_version` is 2; no key that belongs to the note is stored; every task, project, and stub has a `uid`, and every live task and project's note exists (a stub's note may be gone); no two live tasks or projects share a uid; `held` lists workers of its task; a revived task has `art_from`; and the shapes of the runtime fields above.
 
@@ -185,9 +188,20 @@ Subcommands that read the vault: `notes-scan --state` (the user's changes as eve
 | Field | Meaning |
 | :--- | :--- |
 | `dir` | Absolute path of the supervisor directory (non-git). |
-| `session_ids` | Every session that has acted as this supervisor. Add your own id during the Capability check. Used to match `started_by`. |
+| `session_ids` | Desktop-app sessions that acted as this supervisor in earlier versions. Kept for the digest; a supervisor on Herdr adds nothing (it is the terminal `sv`). |
 | `archive_consent` | `null`, or `{text, at}` holding the user's verbatim answer to the one-time archive question. Required before a worker that is neither observed `archived` nor `missing` may become `intended_state: archived`. |
 | `last_project_number` | Optional integer >= 0 (absent counts as 0): the highest project number ever allocated. Never decreases. |
+
+### Settings in `<dir>/CLAUDE.md`
+
+Not part of `state.json`; `setup` writes the missing keys and `prepare-dir --show` prints the roots.
+
+| Section | Key | Meaning |
+| :--- | :--- | :--- |
+| `## Locations` | `clone_root`, `work_root` | Where `prepare-dir` clones repositories and creates work and project directories (SKILL.md section 3). |
+| `## Locations` | `worktree_root` | Default `~/.claude-worktrees`. Where `prepare-worktree` adds worker worktrees, `<worktree_root>/<repo name>/<slug>`; `remove-worktree` removes only paths under it. Not nested with the other roots, not inside `<dir>`. |
+| `## Herdr` | `max_workers` | Positive integer, default 8. `launch-plan` refuses a worker when this many other herdr workers are intended `running` and not observed `archived` or `missing`. Managers do not count. |
+| `## Herdr` | `worker_path` | Optional non-empty string. The PATH for workers and managers (`env PATH=<worker_path> claude ...` in the `launch-plan` argv). |
 
 ### projects[]
 
@@ -208,11 +222,11 @@ Optional (absent counts as an empty list). A project groups tasks under one proj
 
 | Field | Meaning |
 | :--- | :--- |
-| `session_id`, `started_by`, `handle`, `title` | As for workers. `handle` is `pNNNN-manager`, `title` is `P-NNNN <name>` (also the sidebar title). |
+| `runtime`, `session_id`, `started_by`, `handle`, `title` | As for workers. `handle` is `m-p-NNNN` (`pNNNN-manager` for a desktop-app manager of an earlier version), `title` is `P-NNNN <name>`. |
 | `intended_state`, `observed_state`, `observed_at` | Same ranges as for workers. The manager becomes `intended_state: archived` only when the project has `close` or the manager is observed `archived` or `missing`. |
 | `model` | Optional, as for workers. |
 | `last_report` | `null`, `{message_ref, status, summary, at}` with `status` `idle` or `needs_input`, or `{message_ref, status: "unparsed", error, at}`. `message_ref` makes the manager's turn-end handling idempotent (SKILL.md 6.11). |
-| `previous_session_ids[]` | Session ids of earlier managers of this project. Their turns and reports are ignored. |
+| `previous_session_ids[]` | Session ids (conversation uuids) of earlier managers of this project. Their turns and reports are ignored. A replacement reuses the handle `m-p-NNNN`. |
 | `replacements` | Integer >= 0: how many times the manager was replaced (SKILL.md 6.12). |
 
 ### tasks[]
@@ -235,21 +249,22 @@ Optional (absent counts as an empty list). A project groups tasks under one proj
 | `redos[]` | Optional, project tasks only. `{text, at, from, review_id?}` entries, oldest first: redo work returned by the project manager (a `reject` verdict or a `redo` plan, SKILL.md 6.11). They are the manager's words, not the user's, so they are kept apart from `followups`. Carried into the `archived` stub when non-empty. |
 | `no_result[]` | Optional. `{worker_id, summary, at}` entries (all non-empty strings), one per worker of the task whose `done` was verified as No result (SKILL.md 6.3 step 5): `summary` is that report's `summary` copied as is, `at` the time the supervisor recorded it. The named worker is exempt from the delivery artifact and push-decision requirements (see Invariants). It may also name a held investigation worker (one with a read user action), recorded at verification before the archive. Carried into the `archived` stub when non-empty; task cards do not show it. |
 | `investigation` | Optional, `true` when present. Set at intake (SKILL.md 6.1) when the request only asks for investigation; never changed while the task lives. Its workers (except push-only workers) are held, not archived, after a verified `done` until the user has read the result (SKILL.md 6.3 step 6). Copied into the `archived` stub and back on revival. |
-| `findings[]` | Optional, investigation tasks only. `{worker_id, session_id, title, summary, message_ref, at}` entries (all non-empty strings), at most one per worker, replaced on every verified `done` of that worker (SKILL.md 6.3 step 6): `session_id` is the worker's observed session id, `title` its sidebar title when recorded (`<prefix> <workers[].title>`, SKILL.md 6.2.2; after a retitle the old one shows until the next verification), `summary` the verified report's `summary` (`No summary reported; read the session.` when empty), `message_ref` that report's `message_ref`. Concatenated into the `archived` stub like `no_result`. |
-| `derived_from` | Optional. `{task_id, context}` (non-empty strings) on a task created from a change request to an investigation task (SKILL.md 6.7): `task_id` is the investigation task, `context` its `request` and each `findings` `summary` with its sidebar title, copied when the task is created. Worker briefs are rebuilt from it alone, so `task_id` is not checked against `tasks` or `archived`. Not copied into the `archived` stub. |
+| `findings[]` | Optional, investigation tasks only. `{worker_id, session_id, title, summary, message_ref, at}` entries (all non-empty strings), at most one per worker, replaced on every verified `done` of that worker (SKILL.md 6.3 step 6): `session_id` is the worker's session id, `title` the name used in replies when recorded (`w-NNNN (T-NNNN <workers[].title>)`, SKILL.md 6.3 step 6), `summary` the verified report's `summary` (`No summary reported; read the session.` when empty), `message_ref` that report's `message_ref`. Concatenated into the `archived` stub like `no_result`. |
+| `derived_from` | Optional. `{task_id, context}` (non-empty strings) on a task created from a change request to an investigation task (SKILL.md 6.7): `task_id` is the investigation task, `context` its `request` and each `findings` `summary` with its `title`, copied when the task is created. Worker briefs are rebuilt from it alone, so `task_id` is not checked against `tasks` or `archived`. Not copied into the `archived` stub. |
 
 ### workers[]
 
 | Field | Meaning |
 | :--- | :--- |
 | `id`, `task_id` | Worker id and owning task. |
-| `session_id`, `started_by` | Runtime session id and the supervisor session that started it (`null` while pending). |
-| `handle`, `title` | Start-time name (`[a-z0-9-]`, 24 characters or fewer) and display title (52 characters or fewer, always set; the session's sidebar title is `<task id>|<worker id> <title>`, or `<project id>|<task id>|<worker id> <title>` for a project task, SKILL.md 6.2.2). |
-| `cwd` | Repo root (git) or target directory (non-git), absolute. |
+| `runtime` | Optional, `"herdr"` (see Identifiers). |
+| `session_id`, `started_by` | Session id (see Identifiers) and the starter (`"sv"` on Herdr; a supervisor session id for a desktop-app session). `null` while not set. |
+| `handle`, `title` | The `hc` terminal name (equal to the id on Herdr, see Identifiers) and display title (52 characters or fewer, always set; passed as the Claude session name `-n`, SKILL.md 6.2.2). |
+| `cwd` | Repo root (git) or target directory (non-git), absolute. A git worker runs in its `worktree_path`. |
 | `kind` | `git` or `non-git`. |
 | `delivery` | `push_pr`, `commit`, or `files` (see Value ranges). |
-| `branch`, `base_branch`, `worktree_path` | git only, filled after start. `branch` and `worktree_path` come from get; `base_branch` is get's `sourceBranch`, else the remote default branch (`refs/remotes/origin/HEAD`, e.g. `origin/main`), observed by a subagent. A push-only worker (SKILL.md 6.3 step 7) keeps `branch` = the pushed branch instead of the app branch from get, and copies the original worker's `base_branch`; a replacement worker (`replaced_by`, SKILL.md 6.8) likewise inherits the old worker's `base_branch` and does not use get's `sourceBranch`; one started from an archived stub (or from the fallback when the stub expired or lacks a `commit` artifact) uses the observed remote default branch, never get's `sourceBranch` (the pushed branch). |
-| `model` | Optional: `opus`, `sonnet`, or `haiku`, the family named in the `model` that get returned after the start (SKILL.md 6.2.1), not the family the supervisor chose. Absent while `pending` and when get named none of the three. |
+| `branch`, `base_branch`, `worktree_path` | git only, set before the start (SKILL.md 6.2 step 3). `branch` and `worktree_path` come from `prepare-worktree`; `base_branch` is the `--base` passed to it (`source_branch`, else the remote default branch `refs/remotes/origin/HEAD`, e.g. `origin/main`, observed by a subagent). A push-only worker (SKILL.md 6.3 step 7) keeps `branch` = the pushed branch instead of the new branch of its worktree, and copies the original worker's `base_branch`; a replacement worker (`replaced_by`, SKILL.md 6.8) likewise inherits the old worker's `base_branch`; one started from an archived stub (or from the fallback when the stub expired or lacks a `commit` artifact) uses the observed remote default branch, never the `--base` (the pushed branch). |
+| `model` | Optional: the model passed to `claude --model` (SKILL.md 6.2.1): `opus`, `sonnet`, `haiku`, or a model id the user gave. Set before the start. |
 | `intended_state` | What the supervisor wants. |
 | `observed_state`, `observed_at` | What the supervisor last observed, and when. |
 | `last_report` | Last processed report (see last_report). |
@@ -314,7 +329,7 @@ Revival (SKILL.md 6.7 (c)):
 
 ## last_report
 
-`null`, or one of two shapes. `message_ref` is required in both: it is the identifier of the latest message the report was read from (the message UUID or cursor that the event-reading capability returns).
+`null`, or one of two shapes. `message_ref` is required in both: it is the identifier of the latest message the report was read from (the uuid of the last assistant entry of the session's transcript, or `hc:<handle>:<turn>` when it was read with `hc read`, SKILL.md section 2).
 
 - Parsed: `{message_ref, status, summary, next_action, read_confirmed?}`, where `status` is the report block's value. `awaiting_manager` is allowed only for workers of project tasks, and then `awaiting_since` is set. `read_confirmed` is copied from the report when present: a boolean, `true` only with `status` `done` (the user said in the worker session that they read an investigation result). Keeping it here lets a deferred verification or a pending review still see the mark.
 - Parse failure: `{message_ref, status: "unparsed", error, at}`.
@@ -353,6 +368,8 @@ A project with `confirmed`, no `close`, and no live task left gets `close = {at,
 | task derived `needs_user` / project with open user actions | `in progress` / `user` |
 | otherwise | `in progress` / `agent` |
 
+When the written `status` becomes `done` or `archived`, `commit` also writes the properties of that line of `## Note props` in `<dir>/CLAUDE.md` (default: `completed_at` / `archived_at` with the time as `YYYY-MM-DD HH:mm:ss`); a `{now}` value is written only when the property is empty. When it becomes anything else, every property named in `## Note props` is reset (`para` to `Project`, `aliases` to `[]`, the others to null).
+
 Props are written only when the note's current values equal the candidate's `note_seen`; otherwise the note is reported in `notes_deferred` and handled by the next scan. Stubs get no `status` / `assignee`.
 
 Every commit also writes `task_id` and `project_id` (`id_props`) to each note of a task, stub, or project whose values differ, so the kanban shows them: a task note gets its `T-` id and its project's `P-` id (none outside a project), a project note only its `P-` id. A live task wins over its stub. These are not user values: `notes-scan` ignores them, and `migrate-v2` writes them too.
@@ -363,7 +380,7 @@ Every commit also writes `task_id` and `project_id` (`id_props`) to each note of
 
 | # | Seen | Now | Condition | Event |
 | :--- | :--- | :--- | :--- | :--- |
-| 1 | unmanaged | backlog/agent | | `pickup` |
+| 1 | unmanaged (tagged `supervised`; other unmanaged notes are ignored) | backlog/agent | | `pickup` |
 | 2 | unmanaged | assignee not agent | | `none` |
 | 3 | unmanaged | agent with another status | | `invalid` |
 | 4 | managed | unknown status / assignee, pending/agent, unreadable frontmatter, duplicate uid | | `invalid` |
