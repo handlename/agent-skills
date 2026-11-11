@@ -104,6 +104,8 @@ ART_COMMENT_RE = re.compile(r"<!--[ \t]*sv-art[ \t]+(.*?)[ \t]*-->")
 
 LOCATIONS_HEADING = "## Locations"
 LOCATION_KEYS = ("clone_root", "work_root", "worktree_root")
+# Optional keys that setup never adds: the vault (absolute or ~) and, relative to it, the dashboard note and template folder.
+VAULT_REL_KEYS = ("dashboard", "templates")
 LOCATIONS_NOTE = ("`python3 .supervisor/state_tool.py prepare-dir` and `prepare-worktree` are the only commands that write outside "
                   "this directory: they clone repositories into `clone_root/<host>/<owner>/<repo>`, create work directories "
                   "and project directories (with a guard hook) under `work_root`, and add worker worktrees under "
@@ -466,7 +468,11 @@ def bash_violations(command):
 
 def path_violation(path, cwd, supervisor_dir, config_dir, tmp_dirs):
     full = _real(os.path.join(_real(cwd), os.path.expanduser(path)))
-    if _under(full, os.path.join(supervisor_dir, "vault")):
+    try:
+        vault = vault_locations(supervisor_dir)[0]
+    except (StateError, OSError):
+        vault = os.path.join(supervisor_dir, VAULT_DIR)
+    if _under(full, vault):
         return f"{full} (vault notes are written only by state_tool commit)"
     if _under(full, supervisor_dir):
         if any(_under(full, os.path.join(supervisor_dir, rel)) for rel in GUARD_PROTECTED):
@@ -920,7 +926,9 @@ def validate(state, relief=None):
         if task.get("status") is not None and task.get("status") not in TASK_STATUSES:
             errors.append(f"{prefix}: invalid status {task.get('status')!r}")
         # A task waiting for the user's answer to where it should run has no worker yet.
-        if not task.get("worker_ids") and not any(ua.get("needs_answer") for ua in task.get("user_actions", [])):
+        # A cancelled one may have none left: commit archives it.
+        if (not task.get("worker_ids") and not task.get("cancel")
+                and not any(ua.get("needs_answer") for ua in task.get("user_actions", []))):
             errors.append(f"{prefix}: worker_ids must not be empty")
         for wid in task.get("worker_ids", []):
             w = workers_by_id.get(wid)
@@ -1590,10 +1598,18 @@ def parse_locations(text):
         if not m:
             continue
         key, value = m.group(1), m.group(2).strip()
-        if key not in LOCATION_KEYS:
-            errors.append(f"CLAUDE.md:{i + 1}: unknown key {key!r} (use {list(LOCATION_KEYS)})")
+        if key not in LOCATION_KEYS + VAULT_REL_KEYS + ("vault",):
+            errors.append(f"CLAUDE.md:{i + 1}: unknown key {key!r} (use {list(LOCATION_KEYS + ('vault',) + VAULT_REL_KEYS)})")
         elif key in values:
             errors.append(f"CLAUDE.md:{i + 1}: duplicate key {key!r}")
+        elif key in VAULT_REL_KEYS:
+            parts = value.split("/")
+            if not value or value.startswith(("/", "~")) or any(p in ("", ".", "..") for p in parts) or \
+                    (key == "dashboard") != value.endswith(".md"):
+                errors.append(f"CLAUDE.md:{i + 1}: {key} must be a path relative to the vault without '..'"
+                              f"{' ending in .md' if key == 'dashboard' else ''}, got {value!r}")
+            else:
+                values[key] = value
         elif not (os.path.isabs(value) or value == "~" or value.startswith("~/")):
             errors.append(f"CLAUDE.md:{i + 1}: {key} must be an absolute path or start with ~, got {value!r}")
         else:
@@ -1823,6 +1839,19 @@ def set_props(text, changes):
     return "".join(out)
 
 
+SUPERVISED_TAG = "supervised"
+# A project note also carries `task` so that daily notes listing `task` notes show the project, not its tasks.
+NOTE_TAGS = {"task": (SUPERVISED_TAG,), "project": (SUPERVISED_TAG, "project", "task")}
+
+
+def note_kind(props):
+    """task / project for a note with the supervised tag, else None (the user's own notes are never picked up)."""
+    tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]
+    if SUPERVISED_TAG not in tags:
+        return None
+    return "project" if "project" in tags else "task"
+
+
 def new_note_text(uid, title, kind, status, assignee, now, request="", parent=None, follows=None):
     """Text of a new task or project note in the create-task format. parent and follows are note uids."""
     if kind not in ("task", "project"):
@@ -1831,7 +1860,7 @@ def new_note_text(uid, title, kind, status, assignee, now, request="", parent=No
         raise StateError(f"invalid status/assignee {status!r}/{assignee!r}")
     values = {
         "uid": uid, "title": title, "para": "Project", "aliases": [], "created_at": f"{now[:10]} {now[11:19]}",
-        "archived_at": None, "tags": [kind], "start_date": None, "due_date": None, "pending_until": None,
+        "archived_at": None, "tags": list(NOTE_TAGS[kind]), "start_date": None, "due_date": None, "pending_until": None,
         "completed_at": None, "status": status, "assignee": assignee,
         "parent": f"[[{parent}]]" if parent else None, "follows": f"[[{follows}]]" if follows else None,
     }
@@ -3080,8 +3109,7 @@ def proposal_titles(texts, project_uid):
     titles = set()
     for text in texts.values():
         props = parse_frontmatter(text)[0]
-        tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]
-        if ("task" in tags and (props.get("status"), props.get("assignee")) == ("backlog", "user")
+        if (note_kind(props) == "task" and (props.get("status"), props.get("assignee")) == ("backlog", "user")
                 and project_uid in _parent_uids(props.get("parent")) and isinstance(props.get("title"), str)):
             titles.add(props["title"])
     return titles
@@ -3264,28 +3292,56 @@ def cmd_commit(args):
 
 
 VAULT_DIR = "vault"
-VAULT_SKIP = ("_templates",)
 DASHBOARD_NOTE = "Supervisor.md"
+TEMPLATES_DIR = "_templates"
+
+
+def vault_locations(supervisor_dir):
+    """(vault, dashboard, templates) from `## Locations`: the vault's absolute path, and the dashboard note and the
+    template folder relative to it. Without `vault` the vault is <dir>/vault."""
+    sup = os.path.abspath(supervisor_dir)
+    claude_md = os.path.join(sup, "CLAUDE.md")
+    text = Path(claude_md).read_text(encoding="utf-8") if os.path.exists(claude_md) else ""
+    values, errors = parse_locations(text)
+    if errors:
+        raise StateError(errors)
+    vault = os.path.join(sup, VAULT_DIR)
+    if "vault" in values:
+        vault = _real(values["vault"])
+        defaults = default_locations(sup)
+        for key in LOCATION_KEYS:
+            root = _real(values.get(key, defaults[key]))
+            if _cwds_overlap(vault, root):
+                raise StateError(f"vault {vault} and {key} {root} are nested")
+    return vault, values.get("dashboard", DASHBOARD_NOTE), values.get("templates", TEMPLATES_DIR)
 
 
 def _vault_path(state_path):
-    return os.path.join(os.path.dirname(os.path.abspath(state_path)), VAULT_DIR)
+    return vault_locations(os.path.dirname(os.path.abspath(state_path)))[0]
+
+
+def _vault_index(state_path):
+    """(vault, texts, uids) of the vault configured for this supervisor directory."""
+    vault, dashboard, templates = vault_locations(os.path.dirname(os.path.abspath(state_path)))
+    return (vault, *_index_vault(vault, dashboard, templates))
 
 
 def _new_note_path(uid):
     return f"{uid[:4]}/{uid[4:6]}/{uid}.md"
 
 
-def _index_vault(vault):
-    """({relpath: text}, {uid: [relpath, ...]}) of the vault's notes, without _templates/, hidden folders and Supervisor.md."""
+def _index_vault(vault, dashboard=DASHBOARD_NOTE, templates=TEMPLATES_DIR):
+    """({relpath: text}, {uid: [relpath, ...]}) of the vault's notes, without the template folder, hidden folders and
+    the dashboard note."""
     texts, uids = {}, {}
     if not os.path.isdir(vault):
         return texts, uids
     for root, dirs, files in os.walk(vault):
-        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and not (root == vault and d in VAULT_SKIP))
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".")
+                         and Path(os.path.relpath(os.path.join(root, d), vault)).as_posix() != templates)
         for name in sorted(files):
             rel = Path(os.path.relpath(os.path.join(root, name), vault)).as_posix()
-            if not name.endswith(".md") or rel == DASHBOARD_NOTE:
+            if not name.endswith(".md") or rel == dashboard:
                 continue
             try:
                 text = Path(root, name).read_text(encoding="utf-8")
@@ -3313,7 +3369,7 @@ def _load_view(state_path):
     if not isinstance(state, dict) or state.get("schema_version") != SCHEMA_VERSION:
         return state
     try:
-        texts, uids = _index_vault(_vault_path(state_path))
+        _, texts, uids = _vault_index(state_path)
     except OSError:
         texts, uids = {}, {}
     return join_view(state, _notes_by_uid(texts, uids))
@@ -3387,24 +3443,90 @@ def _numbered_ops(raw_ops, candidate, base, view_cur):
     return number_note_ops(raw_ops, next_ua, art_last)
 
 
-def _date_props(status, now):
-    if status == "done":
-        return {"completed_at": now[:10]}
-    if status == "archived":
-        return {"archived_at": f"{now[:10]} {now[11:19]}"}
-    return {}
+NOTE_PROPS_HEADING = "## Note props"
+# Properties the supervisor may set when a note reaches done / archived; the ones it owns or the user delegates with
+# (status, assignee, tags, ids, links) are not among them.
+NOTE_PROP_KEYS = ("para", "aliases", "archived_at", "start_date", "due_date", "pending_until", "completed_at")
+NOTE_PROP_RESET = {"para": "Project", "aliases": []}
+NOW_TOKENS = (("YYYY", "%Y"), ("MM", "%m"), ("DD", "%d"), ("HH", "%H"), ("mm", "%M"), ("ss", "%S"))
+DEFAULT_NOTE_PROPS = {"done": {"completed_at": "{now}"}, "archived": {"archived_at": "{now}"}, "now_format": "YYYY-MM-DD HH:mm:ss"}
+
+
+def parse_note_props(text):
+    """Parse `## Note props` of CLAUDE.md: `- done: k=v, ...`, `- archived: k=v, ...`, `- now_format: <format>`.
+    Returns (props, errors); a missing line keeps its default. `{now}` is the time in now_format; `k=` writes null."""
+    lines = _strip_ignored(text.splitlines())
+    heads = _section_heads(lines, NOTE_PROPS_HEADING)
+    props = {key: (dict(value) if isinstance(value, dict) else value) for key, value in DEFAULT_NOTE_PROPS.items()}
+    if not heads:
+        return props, []
+    if len(heads) > 1:
+        return props, [f"CLAUDE.md:{i + 1}: duplicate '{NOTE_PROPS_HEADING}' heading" for i in heads[1:]]
+    errors, seen = [], set()
+    for i in range(heads[0] + 1, _section_end(lines, heads[0])):
+        m = re.match(r"^- ([A-Za-z_]+):(.*)$", lines[i].rstrip())
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2).strip()
+        where = f"CLAUDE.md:{i + 1}"
+        if key not in DEFAULT_NOTE_PROPS:
+            errors.append(f"{where}: unknown key {key!r} (use {list(DEFAULT_NOTE_PROPS)})")
+        elif key in seen:
+            errors.append(f"{where}: duplicate key {key!r}")
+        elif key == "now_format":
+            if not any(token in value for token, _ in NOW_TOKENS) or "%" in value:
+                errors.append(f"{where}: now_format must use YYYY, MM, DD, HH, mm, ss, got {value!r}")
+            else:
+                props[key] = value
+        else:
+            pairs = {}
+            for part in filter(None, (p.strip() for p in value.split(","))):
+                name, eq, val = part.partition("=")
+                name, val = name.strip(), val.strip()
+                if not eq or name not in NOTE_PROP_KEYS or name in pairs:
+                    errors.append(f"{where}: {part!r} must be <key>=<value> once per key, with a key in {list(NOTE_PROP_KEYS)}")
+                else:
+                    pairs[name] = val or None
+            props[key] = pairs
+        seen.add(key)
+    return props, errors
+
+
+def _note_props_for(state_path):
+    claude_md = os.path.join(os.path.dirname(os.path.abspath(state_path)), "CLAUDE.md")
+    props, errors = parse_note_props(Path(claude_md).read_text(encoding="utf-8") if os.path.exists(claude_md) else "")
+    if errors:
+        raise StateError(errors)
+    return props
+
+
+def _format_now(now, fmt):
+    for token, code in NOW_TOKENS:
+        fmt = fmt.replace(token, code)
+    return datetime.fromisoformat(now).strftime(fmt)
+
+
+def _date_props(status, now, conf=DEFAULT_NOTE_PROPS):
+    """The properties a note gets when it reaches done / archived (`## Note props`)."""
+    return {k: (_format_now(now, conf["now_format"]) if v == "{now}" else v) for k, v in conf.get(status, {}).items()}
+
+
+def _reset_props(props, conf):
+    """Back to the values of a new note for every property `## Note props` sets, when a note leaves done / archived."""
+    keys = set(conf.get("done", {})) | set(conf.get("archived", {}))
+    return {k: NOTE_PROP_RESET.get(k) for k in sorted(keys) if props.get(k) not in (None, "", NOTE_PROP_RESET.get(k))}
 
 
 def _commit_v2(args, current):
     now = _now()
-    vault = _vault_path(args.state)
+    note_conf = _note_props_for(args.state)
+    vault, texts, uids = _vault_index(args.state)
     candidate = _read_json(args.candidate)
     if not isinstance(candidate, dict):
         raise StateError("candidate must be a JSON object")
     raw_ops = _ops_arg(args.notes)
     rev = current["rev"] + 1
     warnings = []
-    texts, uids = _index_vault(vault)
     # 1. Re-apply the last commit's note writes that did not happen.
     carried = _replay_journal(current, vault, texts, uids, warnings)
     pending = {e["uid"]: e for e in carried}
@@ -3478,10 +3600,13 @@ def _commit_v2(args, current):
         changes = {}
         if derived[0] != cur_pair[0]:
             changes["status"] = derived[0]
-            if derived[0] not in ("done", "archived") and parse_frontmatter(after[uid])[0].get("completed_at"):
-                changes["completed_at"] = None
-        # The date is set when the note reaches done / archived, also when the user moved it there first.
-        changes.update({k: v for k, v in _date_props(derived[0], now).items() if not parse_frontmatter(after[uid])[0].get(k)})
+            if derived[0] not in ("done", "archived"):
+                changes.update(_reset_props(parse_frontmatter(after[uid])[0], note_conf))
+        # A time is set when the note reaches done / archived, also when the user moved it there first; a fixed value
+        # (e.g. para) is always written.
+        fm = parse_frontmatter(after[uid])[0]
+        changes.update({k: v for k, v in _date_props(derived[0], now, note_conf).items()
+                        if fm.get(k) != v and not (note_conf[derived[0]].get(k) == "{now}" and fm.get(k))})
         if derived[1] and derived[1] != cur_pair[1]:
             changes["assignee"] = derived[1]
         if changes:
@@ -3607,7 +3732,7 @@ This directory belongs to the session-supervisor skill. It is not a project.
 - The supervisor runs in the Herdr terminal `sv`, with `sv-watch` (`state_tool.py watch-vault`) beside it. It starts sessions only by running the argv of `state_tool.py launch-plan`, and never deletes branches.
 - The supervisor only operates sessions, changes state through commit, and talks to the user. Workers edit, commit, push, and open PRs; observer subagents run read-only checks and investigations, write results under .supervisor/observations/, and return the path.
 - A PreToolUse hook (state_tool.py guard) blocks edits outside this directory and mutating git / jj / gh commands. The allowed exceptions are `state_tool.py prepare-dir`, `prepare-worktree`, and `remove-worktree`, which write only under the `## Locations` roots. To disable it, remove its entry from .claude/settings.json by hand; the supervisor asks before restoring a missing entry.
-- `vault/` is an Obsidian vault with one note per task and project: the note holds the meaning (title, `## 概要`, status, assignee, `## ユーザーアクション`, `## 成果物`). Only `python3 .supervisor/state_tool.py commit --notes <ops.json>` writes it (the guard blocks edits); read changes with `notes-scan` and a note with `note-show`. `vault/Supervisor.md` is the kanban dashboard: moving a card changes the note's status. Delegate a task by setting a note to `backlog` / `agent`.
+- The Obsidian vault (`vault` in `## Locations`, default `vault/`) has one note per task and project, tagged `supervised`: the note holds the meaning (title, `## 概要`, status, assignee, `## ユーザーアクション`, `## 成果物`). Only `python3 .supervisor/state_tool.py commit --notes <ops.json>` writes it (the guard blocks edits); read changes with `notes-scan` and a note with `note-show`. The `dashboard` note (default `vault/Supervisor.md`) is the kanban: moving a card changes the note's status. Delegate a task by setting a note tagged `supervised` to `backlog` / `agent`.
 - `## Follow-ups` (optional) turns each newly verified PR into a user action such as "Review org/repo#42". Format: references/follow-ups-format.md in the session-supervisor skill. Check it with `python3 .supervisor/state_tool.py validate-follow-ups --claude-md CLAUDE.md`.
 
 <!-- Example: remove the comment markers to enable it.
@@ -3659,7 +3784,7 @@ def cmd_setup(args):
         _write_atomic(str(state_path), serialize(empty_state(str(target))))
         report.append(("created", state_path))
 
-    report += _setup_vault(target / VAULT_DIR)
+    report += _setup_vault(target)
 
     if old_md is None:
         claude_md.write_text(new_md, encoding="utf-8")
@@ -3675,14 +3800,12 @@ def cmd_setup(args):
     return 0
 
 
-def _kanban_base(name, assignee):
+def _kanban_base(name, assignee, templates):
     return f"""```base
 filters:
   and:
-    - or:
-        - file.hasTag("task")
-        - file.hasTag("project")
-    - '!file.inFolder("_templates")'
+    - file.hasTag("supervised")
+    - '!file.inFolder("{templates}")'
     - 'assignee == "{assignee}"'
 formulas:
   title: link(file.name, title)
@@ -3699,27 +3822,15 @@ views:
 """
 
 
-SUPERVISOR_NOTE = f"## ユーザーの番\n\n{_kanban_base('ユーザー', 'user')}\n## エージェントの番\n\n{_kanban_base('エージェント', 'agent')}"
-ART_SECTION_NOTE = ("<!-- state_tool が書く行です。表示テキストは直せますが、メタデータ(sv-art)のある行に書き足した文字は、"
-                    "成果物のグループを置き換えるときに行ごと消えます。 -->")
+def supervisor_note(templates):
+    return (f"## ユーザーの番\n\n{_kanban_base('ユーザー', 'user', templates)}\n"
+            f"## エージェントの番\n\n{_kanban_base('エージェント', 'agent', templates)}")
 
 
-def note_template(kind):
-    """A core Templates template for a task or project note: backlog / user, uid from the creation time."""
-    text = new_note_text("UIDX", "TITLEX", kind, "backlog", "user", "2000-01-01T00:00:00")
-    text = text.replace('"UIDX"', '"{{date:YYYYMMDD}}_{{time:HHmmss}}"').replace('"TITLEX"', '"{{title}}"')
-    text = text.replace("2000-01-01 00:00:00", "{{date:YYYY-MM-DD}} {{time:HH:mm:ss}}")
-    return text.replace(f"## {ART_SECTION}\n\n", f"## {ART_SECTION}\n\n{ART_SECTION_NOTE}\n\n")
-
-
-def _setup_vault(vault):
-    """Create the vault files that are missing; never overwrite one."""
-    files = (
-        (vault / DASHBOARD_NOTE, SUPERVISOR_NOTE),
-        (vault / "_templates" / "task.md", note_template("task")),
-        (vault / "_templates" / "project.md", note_template("project")),
-        (vault / ".obsidian" / "templates.json", json.dumps({"folder": "_templates"}) + "\n"),
-    )
+def _setup_vault(supervisor_dir):
+    """Create the dashboard note when it is missing; never overwrite it. Templates are built with the user (section 3)."""
+    vault, dashboard, templates = vault_locations(supervisor_dir)
+    files = ((Path(vault) / dashboard, supervisor_note(templates)),)
     report = []
     for path, text in files:
         if path.exists():
@@ -3865,7 +3976,7 @@ def _follow_ups_v2(args, state, state_path, candidate, rules, closed, manual):
         raise StateError("--notes is required with a schema_version 2 state")
     _check_candidate_path(args.notes, state_path)
     raw_ops = _ops_arg(args.notes) if os.path.exists(args.notes) else {}
-    texts, uids = _index_vault(_vault_path(state_path))
+    _, texts, uids = _vault_index(state_path)
     notes = _notes_by_uid(texts, uids)
     view_cur = join_view(state, notes)
     ops = _numbered_ops(raw_ops, candidate, notes, view_cur)
@@ -4263,7 +4374,7 @@ def cmd_plan_actions(args):
         raise StateError(result["error"])
     view = _load_view(args.state)
     project_uid = (_project(view, args.project) or {}).get("uid")
-    titles = proposal_titles(_index_vault(_vault_path(args.state))[0], project_uid) if project_uid else ()
+    titles = proposal_titles(_vault_index(args.state)[1], project_uid) if project_uid else ()
     print(json.dumps(plan_actions(view, args.project, result["report"], args.running, titles), ensure_ascii=False))
     return 0
 
@@ -4361,12 +4472,8 @@ def notes_scan(state, texts, uids, vault=None):
     for rel, text in texts.items():
         props, body_text, _ = parse_frontmatter(text)
         uid = props.get("uid") if isinstance(props.get("uid"), str) and props.get("uid") else None
-        tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]
-        if "project" in tags:
-            kind = "project"
-        elif "task" in tags:
-            kind = "task"
-        else:
+        kind = note_kind(props)
+        if kind is None:
             continue
         if uid in managed:
             continue
@@ -4422,8 +4529,7 @@ def _former_follow_up(uid, rel, kind, props, body, cur):
 def cmd_notes_scan(args):
     state = _read_json(args.state)
     _require_v2(state, args.state)
-    vault = _vault_path(args.state)
-    texts, uids = _index_vault(vault)
+    vault, texts, uids = _vault_index(args.state)
     print(json.dumps(notes_scan(state, texts, uids, vault), ensure_ascii=False))
     return 0
 
@@ -4468,8 +4574,7 @@ def watch_tick(state_path, notify, runner, memo):
     """One tick of watch-vault: scan notes, read hc, send the messages. Writes nothing. Returns the messages sent."""
     state = _read_json(state_path)
     _require_v2(state, state_path)
-    vault = _vault_path(state_path)
-    texts, uids = _index_vault(vault)
+    vault, texts, uids = _vault_index(state_path)
     scan = notes_scan(state, texts, uids, vault)
     terminals = _hc_json(runner, ["hc", "ls", "--all", "--json"]).get("terminals", [])
     target = _hc_json(runner, ["hc", "get", notify, "--json"]).get("address")
@@ -4493,8 +4598,7 @@ def cmd_watch_vault(args, runner=None, sleep=time.sleep):
 
 
 def cmd_note_show(args):
-    vault = _vault_path(args.state)
-    texts, uids = _index_vault(vault)
+    vault, texts, uids = _vault_index(args.state)
     if args.uid not in uids:
         raise StateError(f"note {args.uid} not found in {vault}")
     rel = uids[args.uid][0]
@@ -4512,7 +4616,7 @@ def cmd_note_show(args):
 def cmd_new_note(args):
     state = _read_json(args.state)
     _require_v2(state, args.state)
-    _, uids = _index_vault(_vault_path(args.state))
+    _, _, uids = _vault_index(args.state)
     taken = set(uids) | {i.get("uid") for k in ("tasks", "projects", "archived") for i in state.get(k, [])}
     if args.count < 1:
         raise StateError("--count must be 1 or more")
@@ -4523,6 +4627,66 @@ def cmd_new_note(args):
             notes.append({"uid": uid, "path": _new_note_path(uid), "kind": args.kind})
         t += timedelta(seconds=1)
     print(json.dumps(notes[0] if args.count == 1 else notes))
+    return 0
+
+
+def template_errors(text, kind):
+    """What a task / project note template lacks for notes made from it to be picked up (section 3)."""
+    props, body, fm_errors = parse_frontmatter(text)
+    errors = [f"frontmatter: {e}" for e in fm_errors]
+    tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]
+    missing = [t for t in NOTE_TAGS[kind] if t not in tags]
+    if missing:
+        errors.append(f"tags must include {list(NOTE_TAGS[kind])}; missing {missing}")
+    if kind == "task" and "project" in tags:
+        errors.append("a task template must not have the project tag")
+    if kind == "task" and "task" in tags:
+        errors.append("a task template must not have the task tag (daily notes would list supervised tasks)")
+    for key, want in (("status", "backlog"), ("assignee", "user")):
+        if props.get(key) != want:
+            errors.append(f"{key} must be {want}, got {props.get(key)!r}")
+    if "概要" not in parse_sections(body):
+        errors.append("the body must have a '## 概要' section")
+    return errors
+
+
+def cmd_check_template(args):
+    errors = template_errors(Path(args.file).read_text(encoding="utf-8"), args.kind)
+    if errors:
+        raise StateError(errors)
+    print(f"ok: {args.kind} template {args.file}")
+    return 0
+
+
+def retagged(tags):
+    """The tags of a note in the supervised form, or None when it is not a task / project note or is already in it."""
+    tags = tags if isinstance(tags, list) else ([tags] if tags else [])
+    if "project" in tags:
+        kind = "project"
+    elif "task" in tags or SUPERVISED_TAG in tags:
+        kind = "task"
+    else:
+        return None
+    want = list(NOTE_TAGS[kind])
+    new = want + [t for t in tags if t not in want and not (kind == "task" and t == "task")]
+    return None if new == tags else new
+
+
+def cmd_retag_notes(args):
+    sup = os.path.dirname(os.path.abspath(args.state))
+    vault, texts, _ = _vault_index(args.state)
+    if os.path.realpath(vault) != os.path.realpath(os.path.join(sup, VAULT_DIR)):
+        raise StateError(f"retag-notes rewrites every task and project note, so it runs only on {os.path.join(sup, VAULT_DIR)}, "
+                         f"not on {vault}")
+    changed = []
+    for rel, text in texts.items():
+        new = retagged(parse_frontmatter(text)[0].get("tags"))
+        if new is None:
+            continue
+        if not args.dry_run:
+            _write_note(os.path.join(vault, rel), set_props(text, {"tags": new}))
+        changed.append({"path": rel, "tags": new})
+    print(json.dumps({"dry_run": bool(args.dry_run), "notes": changed}, ensure_ascii=False))
     return 0
 
 
@@ -4551,7 +4715,7 @@ def cmd_export_v1(args):
         raise StateError("--out must not be the state file")
     state = _read_json(args.state)
     _require_v2(state, args.state)
-    texts, uids = _index_vault(_vault_path(args.state))
+    _, texts, uids = _vault_index(args.state)
     out = export_v1(state, _notes_by_uid(texts, uids))
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     _write_atomic(args.out, serialize(out))
@@ -4601,6 +4765,16 @@ def build_parser():
     p.add_argument("--kind", required=True, choices=("task", "project"))
     p.add_argument("--count", type=int, default=1, help="reserve this many distinct uids (prints a list when above 1)")
     p.set_defaults(func=cmd_new_note)
+
+    p = sub.add_parser("check-template", help="check that a note template has what notes need to be picked up (writes nothing)")
+    p.add_argument("--kind", required=True, choices=("task", "project"))
+    p.add_argument("--file", required=True)
+    p.set_defaults(func=cmd_check_template)
+
+    p = sub.add_parser("retag-notes", help="give the task and project notes of <dir>/vault the supervised tags (tags only)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--dry-run", action="store_true", help="print the notes it would change and write nothing")
+    p.set_defaults(func=cmd_retag_notes)
 
     p = sub.add_parser("digest", help="print the SessionStart summary (always exits 0)")
     p.add_argument("--state", required=True)

@@ -1552,8 +1552,7 @@ class SetupTest(unittest.TestCase):
         proc = self.setup_dir(target)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.files(target), [".claude/settings.json", ".supervisor/state_tool.py", "CLAUDE.md", "state.json",
-                                              "vault/.obsidian/templates.json", "vault/Supervisor.md",
-                                              "vault/_templates/project.md", "vault/_templates/task.md"])
+                                              "vault/Supervisor.md"])
         entries = self.hooks(target)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["matcher"], "startup|resume|clear|compact")
@@ -3490,7 +3489,7 @@ class NoteTemplateTest(unittest.TestCase):
                                 "typo を直してください。\n\n- README.md", parent="20261101_090000")
         self.assertTrue(text.startswith('---\nuid: "20261110_090000"\ntitle: "README の typo を直す"\npara: "Project"\n'
                                         "aliases: []\ncreated_at: 2026-11-10 09:00:00\narchived_at: null\n"
-                                        'tags: ["task"]\n'))
+                                        'tags: ["supervised"]\n'))
         props, body, errors = st.parse_frontmatter(text)
         self.assertEqual(errors, [])
         self.assertEqual(list(props), [k for k in st.NOTE_KEYS if k not in ("task_id", "project_id", "follows")])
@@ -3503,7 +3502,7 @@ class NoteTemplateTest(unittest.TestCase):
     def test_project_note_and_optional_links(self):
         text = st.new_note_text("20261110_090001", "Nature MCP", "project", "backlog", "user", NOTE_NOW)
         props = st.parse_frontmatter(text)[0]
-        self.assertEqual(props["tags"], ["project"])
+        self.assertEqual(props["tags"], ["supervised", "project", "task"])
         self.assertNotIn("parent", props)
         self.assertNotIn("follows", props)
         follows = st.parse_frontmatter(st.new_note_text("u", "t", "task", "backlog", "agent", NOTE_NOW, follows="20261101_000000"))[0]
@@ -4386,7 +4385,7 @@ class NoteCommitTest(unittest.TestCase):
         self.assertEqual(self.env.scan()["events"], [])
 
     def test_uidless_note_gets_its_uid_at_pickup(self):
-        text = "---\ntitle: 思いつき\ntags:\n  - task\nstatus: backlog\nassignee: agent\n---\n## 概要\n\nやって\n"
+        text = "---\ntitle: 思いつき\ntags:\n  - supervised\nstatus: backlog\nassignee: agent\n---\n## 概要\n\nやって\n"
         self.env.put(None, text, rel="Untitled.md")
         event = self.env.scan()["events"][0]
         uid = event["proposed_uid"]
@@ -4453,7 +4452,7 @@ class NoteCommitTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         props = st.parse_frontmatter(self.env.text(U1))[0]
         self.assertEqual((props["status"], props["assignee"]), ("done", "user"))
-        self.assertRegex(props["completed_at"], r"^\d{4}-\d{2}-\d{2}$")
+        self.assertRegex(props["completed_at"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
         stub = self.env.load()["archived"][0]
         self.assertEqual((stub["uid"], stub["note_seen"]["status"]), (U1, "done"))
         self.assertEqual(self.env.scan()["events"], [])
@@ -4583,8 +4582,10 @@ class NotesScanCliTest(unittest.TestCase):
 
     def test_unmanaged_notes(self):
         self.env.put(None, "---\ntitle: メモ\ntags: [idea]\nstatus: backlog\nassignee: agent\n---\n", rel="memo.md")
-        self.env.put(None, "---\ntitle: 自分の\ntags: [task]\nstatus: new\nassignee: user\n---\n", rel="mine.md")
-        bad = "---\nuid: \"20261110_100000\"\ntitle: x\ntags: [task]\nstatus: \"in progress\"\nassignee: agent\n---\n"
+        self.env.put(None, "---\ntitle: 自分の\ntags: [supervised]\nstatus: new\nassignee: user\n---\n", rel="mine.md")
+        # The user's own task notes are never picked up, whatever their status and assignee.
+        self.env.put(None, "---\ntitle: 私用\ntags: [task]\nstatus: backlog\nassignee: agent\n---\n## 概要\n", rel="own.md")
+        bad = "---\nuid: \"20261110_100000\"\ntitle: x\ntags: [supervised]\nstatus: \"in progress\"\nassignee: agent\n---\n"
         self.env.put(None, bad, rel="bad.md")
         events = self.env.scan()["events"]
         self.assertEqual([(e["path"], e["event"], e["row"]) for e in events], [("bad.md", "invalid", 3)])
@@ -4696,16 +4697,8 @@ class SetupVaultTest(unittest.TestCase):
             self.assertIn("""'assignee == "user"'""", dashboard)
             self.assertIn("""'assignee == "agent"'""", dashboard)
             self.assertIn("groupOrder: [backlog, in progress, pending, done, archived]", (vault / "Supervisor.md").read_text(encoding="utf-8"))
-            self.assertEqual(json.loads((vault / ".obsidian" / "templates.json").read_text(encoding="utf-8")), {"folder": "_templates"})
-            for kind in ("task", "project"):
-                template = (vault / "_templates" / f"{kind}.md").read_text(encoding="utf-8")
-                self.assertIn("created_at: {{date:YYYY-MM-DD}} {{time:HH:mm:ss}}\n", template)
-                template = template.replace("{{date:YYYY-MM-DD}} {{time:HH:mm:ss}}", "2026-11-10 09:00:00")
-                props, body, errors = st.parse_frontmatter(template)
-                self.assertEqual(errors, [])
-                self.assertEqual((props["uid"], props["tags"], props["status"], props["assignee"]),
-                                 ("{{date:YYYYMMDD}}_{{time:HHmmss}}", [kind], "backlog", "user"))
-                self.assertEqual(list(st.parse_sections(body)), list(st.NOTE_SECTIONS))
+            self.assertIn('file.hasTag("supervised")', dashboard)
+            self.assertFalse((vault / "_templates").exists() or (vault / ".obsidian").exists())
             self.assertIn("vault/", (target / "CLAUDE.md").read_text(encoding="utf-8"))
             (vault / "Supervisor.md").write_text("mine\n", encoding="utf-8")
             proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
@@ -5457,6 +5450,131 @@ class WorktreeTest(unittest.TestCase):
         code, _, err = self.prepare()
         self.assertEqual(code, 1)
         self.assertIn("nested", err)
+
+
+class ObsidianVaultTest(unittest.TestCase):
+    """The vault, dashboard and template folder from ## Locations, note props from ## Note props, supervised tags."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.sup = self.root / "sup"
+        self.sup.mkdir()
+
+    def claude_md(self, text):
+        (self.sup / "CLAUDE.md").write_text(text, encoding="utf-8")
+
+    def test_vault_keys_are_optional_and_checked(self):
+        self.assertEqual(st.vault_locations(str(self.sup)), (str(self.sup / "vault"), "Supervisor.md", "_templates"))
+        self.claude_md(f"## Locations\n- vault: {self.root}/memo\n- dashboard: _sv/Board.md\n- templates: _plugin/type\n")
+        self.assertEqual(st.vault_locations(str(self.sup)), (str(self.root / "memo"), "_sv/Board.md", "_plugin/type"))
+        for bad in ("- dashboard: /abs.md", "- dashboard: board", "- templates: ../x", "- vault: memo"):
+            self.assertTrue(st.parse_locations(f"## Locations\n{bad}\n")[1], bad)
+        self.claude_md(f"## Locations\n- vault: {self.root}/src/memo\n- clone_root: {self.root}/src\n")
+        with self.assertRaisesRegex(st.StateError, "nested"):
+            st.vault_locations(str(self.sup))
+
+    def test_setup_creates_only_the_dashboard_in_the_configured_vault(self):
+        memo = self.root / "memo"
+        self.claude_md(f"## Locations\n- vault: {memo}\n- dashboard: _sv/Board.md\n- templates: _plugin/type\n")
+        proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(self.sup)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        board = (memo / "_sv" / "Board.md").read_text(encoding="utf-8")
+        self.assertIn('file.hasTag("supervised")', board)
+        self.assertIn("""'!file.inFolder("_plugin/type")'""", board)
+        self.assertEqual(sorted(p.relative_to(memo).as_posix() for p in memo.rglob("*")), ["_sv", "_sv/Board.md"])
+        self.assertFalse((self.sup / "vault").exists())
+
+    def test_index_skips_the_dashboard_and_the_template_folder(self):
+        vault = self.root / "memo"
+        for rel in ("_sv/Board.md", "_plugin/type/supervised-task.md", "2026/11/20261111_090000.md"):
+            (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+            (vault / rel).write_text('---\nuid: "20261111_090000"\n---\n', encoding="utf-8")
+        texts, _ = st._index_vault(str(vault), "_sv/Board.md", "_plugin/type")
+        self.assertEqual(list(texts), ["2026/11/20261111_090000.md"])
+
+    def test_guard_protects_the_configured_vault(self):
+        memo = self.root / "memo"
+        memo.mkdir()
+        self.claude_md(f"## Locations\n- vault: {memo}\n")
+        found = st.path_violation(str(memo / "a.md"), str(self.sup), str(self.sup), str(self.root / "config"), [str(self.root)])
+        self.assertIn("vault notes are written only by state_tool commit", found)
+
+    def test_note_props(self):
+        props, errors = st.parse_note_props("## Note props\n- done: para=Archive, completed_at={now}, archived_at={now}\n"
+                                            "- archived: para=Archive, archived_at={now}\n- now_format: YYYY-MM-DDTHH:mm:ss\n")
+        self.assertEqual(errors, [])
+        now = "2026-11-11T10:20:30+09:00"
+        self.assertEqual(st._date_props("done", now, props),
+                         {"para": "Archive", "completed_at": "2026-11-11T10:20:30", "archived_at": "2026-11-11T10:20:30"})
+        self.assertEqual(st._date_props("in progress", now, props), {})
+        self.assertEqual(st._reset_props({"para": "Archive", "completed_at": "x", "archived_at": None}, props),
+                         {"para": "Project", "completed_at": None})
+        self.assertEqual(st._date_props("done", now), {"completed_at": "2026-11-11 10:20:30"})
+        for bad in ("- done: status=done", "- done: para", "- now_format: %Y", "- when: x"):
+            self.assertTrue(st.parse_note_props(f"## Note props\n{bad}\n")[1], bad)
+
+    def test_commit_writes_the_configured_props_and_resets_them(self):
+        env = VaultEnv(self)
+        env.add_task("T-0020", "w-0020", U1)
+        env.save()
+        (env.dir / "CLAUDE.md").write_text("## Note props\n- archived: para=Archive, archived_at={now}\n"
+                                           "- now_format: YYYY-MM-DDTHH:mm:ss\n", encoding="utf-8")
+        cand = env.load()
+        find(cand["tasks"], "T-0020")["cancel"] = {"at": NOW, "reason": "不要"}
+        find(cand["workers"], "w-0020").update(intended_state="archived", observed_state="archived")
+        code, out, err = env.commit(cand)
+        self.assertEqual(code, 0, err)
+        props = st.parse_frontmatter(env.text(U1))[0]
+        self.assertEqual((props["status"], props["para"]), ("archived", "Archive"))
+        self.assertRegex(props["archived_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+
+    def test_supervised_tags(self):
+        self.assertEqual(st.note_kind({"tags": ["task"]}), None)
+        self.assertEqual(st.note_kind({"tags": ["supervised"]}), "task")
+        self.assertEqual(st.note_kind({"tags": ["supervised", "project", "task"]}), "project")
+        self.assertEqual(st.retagged(["task", "oss"]), ["supervised", "oss"])
+        self.assertEqual(st.retagged(["project"]), ["supervised", "project", "task"])
+        self.assertIsNone(st.retagged(["supervised", "oss"]))
+        self.assertIsNone(st.retagged(["doc"]))
+
+    def test_retag_notes_only_on_the_supervisor_vault(self):
+        env = VaultEnv(self)
+        env.save()
+        env.put(None, '---\ntitle: a\ntags: ["task"]\nstatus: backlog\n---\n', rel="a.md")
+        env.put(None, '---\ntitle: g\ntags: ["doc"]\n---\n', rel="guide.md")
+        code, out, err = env.run("retag-notes", "--state", str(env.state_path), "--dry-run")
+        self.assertEqual((code, json.loads(out)["notes"]), (0, [{"path": "a.md", "tags": ["supervised"]}]), err)
+        self.assertIn('tags: ["task"]', (env.vault / "a.md").read_text(encoding="utf-8"))
+        self.assertEqual(env.run("retag-notes", "--state", str(env.state_path))[0], 0)
+        self.assertEqual(st.parse_frontmatter((env.vault / "a.md").read_text(encoding="utf-8"))[0]["tags"], ["supervised"])
+        self.assertEqual(json.loads(env.run("retag-notes", "--state", str(env.state_path))[1])["notes"], [])
+        (env.dir / "CLAUDE.md").write_text(f"## Locations\n- vault: {env.dir}/elsewhere\n", encoding="utf-8")
+        code, out, err = env.run("retag-notes", "--state", str(env.state_path))
+        self.assertEqual(code, 1)
+        self.assertIn("runs only on", err)
+
+    def test_check_template(self):
+        good = '---\ntitle: ""\ntags: ["supervised", "nature/sre"]\nstatus: backlog\nassignee: user\n---\n## 概要\n\n## ログ\n'
+        self.assertEqual(st.template_errors(good, "task"), [])
+        self.assertEqual(len(st.template_errors(good, "project")), 1)
+        bad = '---\ntags: ["task"]\nstatus: backlog\nassignee: agent\n---\n## メモ\n'
+        self.assertEqual(len(st.template_errors(bad, "task")), 4)
+
+
+class CancelWithoutWorkersTest(unittest.TestCase):
+    def test_cancel_of_a_task_waiting_for_where_to_work(self):
+        cur = json.loads((FIXTURES / "state_valid.json").read_text(encoding="utf-8"))
+        cur["tasks"].append({"id": "T-0099", "title": "x", "request": "r", "push_consent": None, "status": "needs_user",
+                             "next_action": "", "user_actions": [{"id": "UA-0099", "description": "where?", "since": NOW,
+                                                                  "needs_answer": True}],
+                             "artifacts": [], "worker_ids": [], "created_at": NOW})
+        cand = copy.deepcopy(cur)
+        find(cand["tasks"], "T-0099").update(cancel={"at": NOW, "reason": "不要"}, user_actions=[])
+        new = st.next_state(cur, cand, NOW)
+        self.assertNotIn("T-0099", [t["id"] for t in new["tasks"]])
+        self.assertTrue(new["archived"][0]["cancelled"])
 
 
 if __name__ == "__main__":

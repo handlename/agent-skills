@@ -175,7 +175,9 @@ In the view, an open user action also carries `detector` (for `auto=<detector>` 
 
 `commit --notes <ops.json>` (ops `{uid: [op, ...]}`) re-applies the previous commit's unconfirmed note writes once, checks that every ack copied into `note_seen` still matches its note, fills missing user-action ids and artifact numbers, applies the ops in memory, runs `next_state` on the views, derives note props (for the tasks archived in this commit from the candidate's task), writes `state.json` with `note_journal`, and only then writes the notes. Its output adds `notes_written`, `notes_deferred`, `notes_failed`, and `note_problems`. A `state.json` still at `schema_version: 1` keeps the v1 commit until it is migrated.
 
-Subcommands that read the vault: `notes-scan --state` (the user's changes as events, 3.4 (2); writes nothing), `note-show --state --uid` (props, sections, user actions, slots, artifacts), `new-note --state --kind task|project` (reserves `{uid, path}`; writes nothing), `migrate-v2 --state [--dry-run]` (v1 → notes and a v2 state), and `export-v1 --state --out` (the v1 form for rollback). `digest`, `check-cwd`, `plan-actions`, `roster`, `waits`, and `manager-reconcile` read a v2 state through `join_view`. A task's `proposal` may be stored as `{from, message_ref}` (a proposal note: `message_ref` is `note:<uid>`); the view fills `title` and `text` from the note. `push_consent.source` is `chat` or `note` (SKILL.md 6.3 step 7).
+The vault is `vault` of `## Locations` in `<dir>/CLAUDE.md` (default `<dir>/vault`); its `dashboard` note and `templates` folder are never read as notes. A task note is tagged `supervised`, a project note `supervised`, `project`, `task` (`note_kind`).
+
+Subcommands that read the vault: `notes-scan --state` (the user's changes as events, 3.4 (2); writes nothing), `note-show --state --uid` (props, sections, user actions, slots, artifacts), `new-note --state --kind task|project` (reserves `{uid, path}`; writes nothing), `migrate-v2 --state [--dry-run]` (v1 → notes and a v2 state), `export-v1 --state --out` (the v1 form for rollback), and `retag-notes --state [--dry-run]` (gives the task and project notes of `<dir>/vault` the tags above; tags only). `check-template --kind --file` checks a note template (SKILL.md section 3, Vault interview). `digest`, `check-cwd`, `plan-actions`, `roster`, `waits`, and `manager-reconcile` read a v2 state through `join_view`. A task's `proposal` may be stored as `{from, message_ref}` (a proposal note: `message_ref` is `note:<uid>`); the view fills `title` and `text` from the note. `push_consent.source` is `chat` or `note` (SKILL.md 6.3 step 7).
 
 `_storage_errors(state_v2, notes)` checks what the view cannot see: `schema_version` is 2; no key that belongs to the note is stored; every task, project, and stub has a `uid`, and every live task and project's note exists (a stub's note may be gone); no two live tasks or projects share a uid; `held` lists workers of its task; a revived task has `art_from`; and the shapes of the runtime fields above.
 
@@ -366,6 +368,8 @@ A project with `confirmed`, no `close`, and no live task left gets `close = {at,
 | task derived `needs_user` / project with open user actions | `in progress` / `user` |
 | otherwise | `in progress` / `agent` |
 
+When the written `status` becomes `done` or `archived`, `commit` also writes the properties of that line of `## Note props` in `<dir>/CLAUDE.md` (default: `completed_at` / `archived_at` with the time as `YYYY-MM-DD HH:mm:ss`); a `{now}` value is written only when the property is empty. When it becomes anything else, every property named in `## Note props` is reset (`para` to `Project`, `aliases` to `[]`, the others to null).
+
 Props are written only when the note's current values equal the candidate's `note_seen`; otherwise the note is reported in `notes_deferred` and handled by the next scan. Stubs get no `status` / `assignee`.
 
 Every commit also writes `task_id` and `project_id` (`id_props`) to each note of a task, stub, or project whose values differ, so the kanban shows them: a task note gets its `T-` id and its project's `P-` id (none outside a project), a project note only its `P-` id. A live task wins over its stub. These are not user values: `notes-scan` ignores them, and `migrate-v2` writes them too.
@@ -376,7 +380,7 @@ Every commit also writes `task_id` and `project_id` (`id_props`) to each note of
 
 | # | Seen | Now | Condition | Event |
 | :--- | :--- | :--- | :--- | :--- |
-| 1 | unmanaged | backlog/agent | | `pickup` |
+| 1 | unmanaged (tagged `supervised`; other unmanaged notes are ignored) | backlog/agent | | `pickup` |
 | 2 | unmanaged | assignee not agent | | `none` |
 | 3 | unmanaged | agent with another status | | `invalid` |
 | 4 | managed | unknown status / assignee, pending/agent, unreadable frontmatter, duplicate uid | | `invalid` |

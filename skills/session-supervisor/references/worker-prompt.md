@@ -120,6 +120,18 @@ The user sent a follow-up request in the supervisor session. Verbatim:
 Treat this as the work for your next turns, scoped to {worker.cwd}. Your earlier instructions and the rules of your background still apply, and the earlier requests are context, not work to redo. Like any message in this session, this request overrides those rules where it asks for what they forbid (for example, to push). Keep committing on your current branch. End the turn with a `supervisor-report` block as before.
 ````
 
+## Answer message
+
+Sent with `hc send w-NNNN` when the user answers the worker's question (its guidance, SKILL.md 6.3 step 4) in the task note or in the supervisor session. One message carries every answer of that turn.
+
+````markdown
+The user answered your questions in the {task note (Obsidian) | supervisor session}. Verbatim:
+> {question 1}: {answer 1}
+> {question 2}: {answer 2}
+
+Continue with these answers. Your earlier instructions and the rules of your background still apply. End the turn with a `supervisor-report` block as before.
+````
+
 ## Pause message
 
 Sent to a running worker when the user pauses its task from the note (SKILL.md 6.13 `pause`). The worker resumes on the Follow-up message, which carries the user's resume instructions (the slot's sub-items) or 「続けてください」.
