@@ -57,8 +57,9 @@ REPORT_ARTIFACT_KEYS = ("branch", "commit", "pr", "ci")
 
 REPORT_RE = re.compile(r"```supervisor-report[ \t]*\r?\n(.*?)\r?\n[ \t]*```", re.S)
 UA_ID_RE = re.compile(r"^(?:UA|AA)-(\d+)$")
-HUB_WAIT_PREFIX = "Hub wait {wid} ("
-REVIEW_WAIT_PREFIX = "Review wait {wid} ("
+# Reserved user action prefixes, in English and in Japanese (a note's actions are written in its language, note_lang).
+HUB_WAIT_PREFIXES = ("Hub wait {wid} (", "マネージャーの回答待ち {wid} (")
+REVIEW_WAIT_PREFIXES = ("Review wait {wid} (", "レビュー待ち {wid} (")
 READ_ACTION_PREFIX = "Read the result of "
 FINDING_KEYS = ("worker_id", "session_id", "title", "summary", "message_ref", "at")
 
@@ -1258,8 +1259,22 @@ def _consent_message_errors(current, candidate):
     return errors
 
 
-def waiting_start_description(task_id):
-    return f"Waiting task {task_id} can start now: send any message to the supervisor to start it."
+WAITING_START = {"en": "Waiting task {task_id} can start now: send any message to the supervisor to start it.",
+                 "ja": "待機中のタスク {task_id} を開始できます: supervisor に何かメッセージを送ると開始します。"}
+
+
+def note_lang(text):
+    """ja when the text has Japanese characters, otherwise en: the language of the user actions of a note (section 5)."""
+    return "ja" if re.search(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]", text or "") else "en"
+
+
+def waiting_start_description(task_id, lang="en"):
+    return WAITING_START[lang].format(task_id=task_id)
+
+
+def _is_waiting_start(ua, task_id):
+    return ua.get("detector") == "start_possible" or ua.get("description") in {
+        waiting_start_description(task_id, lang) for lang in WAITING_START}
 
 
 def _startable_workers(state, task, workers_by_id):
@@ -1283,14 +1298,14 @@ def _sync_waiting_start_actions(current, state, now):
     next_num = _next_ua_number(state)
     workers_by_id = {w["id"]: w for w in state["workers"]}
     for task in state["tasks"]:
-        desc = waiting_start_description(task["id"])
         startable = _startable_workers(state, task, workers_by_id)
         actions = task.setdefault("user_actions", [])
         if not startable:
-            task["user_actions"] = [ua for ua in actions if ua["description"] != desc]
+            task["user_actions"] = [ua for ua in actions if not _is_waiting_start(ua, task["id"])]
             continue
         freed = any(cwd_busy(current, w["cwd"]) for w in startable)
-        if freed and not any(ua["description"] == desc for ua in actions):
+        if freed and not any(_is_waiting_start(ua, task["id"]) for ua in actions):
+            desc = waiting_start_description(task["id"], note_lang(task.get("request")))
             actions.append({"id": f"UA-{next_num:04d}", "description": desc, "since": now})
             next_num += 1
 
@@ -2617,7 +2632,7 @@ def join_view(state, notes):
 def _ua_add_op(owner_id, ua):
     follow_up = ua.get("follow_up") or {}
     detector = ua.get("detector")
-    if detector is None and ua["description"] == waiting_start_description(owner_id):
+    if detector is None and _is_waiting_start(ua, owner_id):
         detector = "start_possible"
     if detector is None and follow_up.get("done") == "pr_closed":
         detector = "pr_closed"
@@ -3414,12 +3429,13 @@ def waits(state, now, hub_minutes=HUB_WAIT_MINUTES, review_minutes=REVIEW_WAIT_M
         base = {"worker_id": w["id"], "task_id": task["id"], "project_id": task["project_id"]}
         report = w.get("last_report") or {}
         if (report.get("status") == "awaiting_manager" and w.get("observed_state") in ("idle", "needs_input")
-                and not any(d.startswith(HUB_WAIT_PREFIX.format(wid=w["id"])) for d in descs)):
+                and not any(d.startswith(p.format(wid=w["id"])) for p in HUB_WAIT_PREFIXES for d in descs)):
             since = _parse_time(w.get("awaiting_since"))
             if since and (now_t - since).total_seconds() > hub_minutes * 60:
                 found.append(dict(base, kind="hub", since=w["awaiting_since"]))
         review = w.get("review") or {}
-        if review.get("state") == "requested" and not any(d.startswith(REVIEW_WAIT_PREFIX.format(wid=w["id"])) for d in descs):
+        if review.get("state") == "requested" and not any(
+                d.startswith(p.format(wid=w["id"])) for p in REVIEW_WAIT_PREFIXES for d in descs):
             since = _parse_time(review.get("at"))
             if since and (now_t - since).total_seconds() > review_minutes * 60:
                 found.append(dict(base, kind="review", review_id=review["id"], since=review["at"]))
@@ -4771,6 +4787,7 @@ def notes_scan(state, texts, uids, vault=None):
             event["warning_key"], event["warning_sha"] = uid or rel, sha
         sections = parse_sections(body_text)
         event.update(title=props.get("title"), request=sections.get("概要", "").strip(),
+                     lang=note_lang(sections.get("概要", "")),
                      parent=props.get("parent"), project_id=parent_project_id(state, props.get("parent")),
                      proposed_by=props.get("proposed_by"), follows=props.get("follows"),
                      user_actions=[_ua_summary(u) for u in parse_user_actions(sections.get(UA_SECTION, ""))])
@@ -4978,7 +4995,8 @@ def cmd_note_show(args):
     uas = parse_user_actions(sections.get(UA_SECTION, ""))
     items, problems = parse_artifacts(sections.get(ART_SECTION, ""))
     print(json.dumps({"uid": args.uid, "path": rel, "props": props, "frontmatter_errors": errors, "sections": sections,
-                      "request": _request_text(sections.get("概要")), "user_actions": [_ua_summary(u) for u in uas],
+                      "request": _request_text(sections.get("概要")), "lang": note_lang(_request_text(sections.get("概要"))),
+                      "user_actions": [_ua_summary(u) for u in uas],
                       "requests": [_ua_summary(u) for u in uas if u["kind"] == "req" and ua_open(u)],
                       "artifacts": items, "artifact_problems": problems}, ensure_ascii=False))
     return 0

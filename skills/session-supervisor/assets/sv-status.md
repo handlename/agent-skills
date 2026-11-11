@@ -51,7 +51,8 @@ if (!tags.includes("supervised")) {
   const when = {
     held_only: managed && !body.some((line) => /^### \[UA-\d+\] @user /.test(line)),
     unheld: managed && body.some((line) => /^### \[UA-\d+\] @user /.test(line)),
-    done_proposed: managed && body.some((line) => line.startsWith("### [UA-") && line.includes("@user プロジェクトの完了を確認してください")),
+    done_proposed: managed && body.some((line) => line.startsWith("### [UA-")
+      && (line.includes("@user プロジェクトの完了を確認してください") || line.includes("@user Confirm that the project is done"))),
   };
   const moves = close < 0 ? [] : MOVES.filter((m) => m.kind === kind && m.from.includes(now)
     && (m.managed === undefined || m.managed === managed) && (m.when === undefined || when[m.when]));

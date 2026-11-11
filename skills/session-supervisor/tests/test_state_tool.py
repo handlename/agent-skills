@@ -348,9 +348,34 @@ class NextStateTest(unittest.TestCase):
         self.assertEqual(len(task["user_actions"]), 1)
         ua = task["user_actions"][0]
         self.assertEqual(ua["id"], "UA-0004")
-        self.assertIn("send any message", ua["description"])
+        self.assertEqual(ua["description"], st.waiting_start_description("T-0004", "ja"))
         again = st.next_state(new, copy.deepcopy(new), NOW)
         self.assertEqual(len(find(again["tasks"], "T-0004")["user_actions"]), 1)
+        find(self.current["tasks"], "T-0004")["request"] = "Fix the release notes"
+        cand = self.candidate()
+        find(cand["workers"], "w-0006")["observed_state"] = "archived"
+        ua = find(st.next_state(self.current, cand, NOW)["tasks"], "T-0004")["user_actions"][0]
+        self.assertIn("send any message", ua["description"])
+
+    def test_note_lang_and_reserved_prefixes_in_both_languages(self):
+        self.assertEqual([st.note_lang(t) for t in ("README を直して", "Fix the README", "", None, "漢字")],
+                         ["ja", "en", "en", "en", "ja"])
+        for lang in st.WAITING_START:
+            self.assertEqual(st._ua_add_op("T-0004", {"id": "UA-0001", "description": st.waiting_start_description("T-0004", lang)})
+                             ["ua"]["detector"], "start_possible")
+        state = fixture_state()
+        add_project(state)
+        task = find(state["tasks"], "T-0003")
+        task["project_id"] = "P-0001"
+        worker = find(state["workers"], "w-0004")
+        worker.update(observed_state="idle", awaiting_since="2026-10-17T09:00:00+09:00",
+                      last_report={"message_ref": "m1", "status": "awaiting_manager", "summary": "s", "next_action": "", "at": NOW},
+                      review={"id": "R-0001", "state": "requested", "at": "2026-10-15T09:00:00+09:00"})
+        kinds = lambda: sorted(e["kind"] for e in st.waits(state, NOW))
+        self.assertEqual(kinds(), ["hub", "review"])
+        task["user_actions"] = [{"id": "UA-0101", "description": "マネージャーの回答待ち w-0004 (T-0003 x)", "since": NOW},
+                                {"id": "UA-0102", "description": "レビュー待ち w-0004 (T-0003 x)", "since": NOW}]
+        self.assertEqual(kinds(), [])
 
     def test_waiting_start_action_cleared_on_start_and_task_archives(self):
         # Start the waiting worker after the auto action, then finish it.
@@ -4677,6 +4702,7 @@ class NoteCommitTest(unittest.TestCase):
         self.env.put(U3, text)
         events = self.env.scan()["events"]
         self.assertEqual([(e["event"], e["uid"], e["request"]) for e in events], [("pickup", U3, "やって")])
+        self.assertEqual(events[0]["lang"], "ja")
         cand = self.env.load()
         git_task(cand, "T-0022", "w-0022")
         find(cand["workers"], "w-0022").update(cwd="/repo/c")
@@ -4978,6 +5004,7 @@ class NotesScanCliTest(unittest.TestCase):
         shown = json.loads(out)
         self.assertEqual((shown["path"], shown["props"]["uid"], shown["sections"]["概要"].strip(), shown["request"]),
                          (st._new_note_path(U1), U1, "fix the LICENSE year", "fix the LICENSE year"))
+        self.assertEqual(shown["lang"], "en")
         self.assertEqual([(u["id"], u["description"], u["body"]) for u in shown["requests"]], [(None, "追加", "本文")])
 
     def test_events_carry_unnumbered_requests(self):

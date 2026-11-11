@@ -1,6 +1,6 @@
 # Manager Prompt
 
-The project manager session (`projects[].manager`, SKILL.md 6.10) has a two-part brief: `prompt` (the role and the current roster) and `background` (the rules). Both are always written, `prompt` first, then a blank line, then `background`, into the prompt file that `launch-plan --worker m-p-NNNN` passes as the first message (SKILL.md 6.10 step 3). Fill every `{...}` field from `state.json` and the `roster` output before starting; never start a manager with an unfilled field.
+The project manager session (`projects[].manager`, SKILL.md 6.10) has a two-part brief: `prompt` (the role and the current roster) and `background` (the rules). Both are always written, `prompt` first, then a blank line, then `background`, into the prompt file that `launch-plan --worker m-p-NNNN` passes as the first message (SKILL.md 6.10 step 3). Fill every `{...}` field from `state.json` and the `roster` output before starting; never start a manager with an unfilled field. `{project.lang_name}` is `Japanese` or `English`, from the `lang` of `note-show` for the project note (SKILL.md section 1).
 
 The roster is the Markdown that `state_tool.py roster --state "<dir>/state.json" --project P-NNNN` prints: a worker table and an open-review table (`requested` reviews only), or `(no workers)`. The manager never reads `state.json`; it learns about workers only from the roster and from the messages below.
 
@@ -53,6 +53,7 @@ Plans:
 
 Questions:
 - When a question for the user remains open, end the turn with `status` `needs_input` and put each question in `questions` as one line. Never wait for an answer inside a turn.
+- Write `questions`, `summary`, the `done` summary, and the titles and texts of new task proposals in {project.lang_name}, the language of the project note: the supervisor copies them into the user's notes.
 
 Report format: end the last message of every turn with one fenced block whose language tag is `project-report`, containing a single JSON object, also when `reviews` and `plans` are empty:
 
