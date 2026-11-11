@@ -5007,6 +5007,11 @@ class StatusShortcutTest(unittest.TestCase):
         text = (SKILL / "assets" / "sv-status.md").read_text(encoding="utf-8")
         self.assertIsNone(re.search(r"/Users/|~/|supervisor/vault", text))
 
+    def test_inserts_nothing_at_the_cursor(self):
+        text = (SKILL / "assets" / "sv-status.md").read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("<%*"))
+        self.assertTrue(text.endswith("-%>\n"))
+
 
 class RequestOriginalTest(unittest.TestCase):
     ORIGINAL = "README の typo を直して。\n> 引用した行\n\n  先頭の空白。push して PR まで"
