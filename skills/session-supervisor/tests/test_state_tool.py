@@ -200,6 +200,43 @@ class NextStateTest(unittest.TestCase):
         new = st.next_state(self.current, cand, NOW)
         self.assertEqual(find(new["tasks"], "T-0020")["status"], "needs_user")
 
+    def kept_candidate(self):
+        git_task(self.current, "T-0020", "w-0020")
+        cand = self.candidate()
+        commit_artifacts(cand, "T-0020")
+        find(cand["workers"], "w-0020")["last_report"] = {"message_ref": "m1", "status": "done", "summary": "s",
+                                                           "next_action": "", "at": NOW}
+        find(cand["tasks"], "T-0020")["kept"] = ["w-0020"]
+        return cand
+
+    def test_kept_worker_counts_as_finished_and_archives_after_its_push_decision(self):
+        cand = self.kept_candidate()
+        self.assertRejected(cand, "keeping a commit delivery worker requires a push-decision")
+        push_decision(cand, "T-0020")
+        task = find(cand["tasks"], "T-0020")
+        self.assertEqual(st.derive_status(dict(task, user_actions=[]), {w["id"]: w for w in cand["workers"]}), "done")
+        new = st.next_state(self.current, cand, NOW)
+        self.assertEqual(find(new["tasks"], "T-0020")["status"], "needs_user")
+        self.assertEqual(find(new["workers"], "w-0020")["intended_state"], "running")
+        cand = copy.deepcopy(new)
+        find(cand["tasks"], "T-0020")["user_actions"] = [{"id": "UA-0101", "description": "completion", "since": NOW}]
+        new = st.next_state(new, cand, NOW)
+        cand = copy.deepcopy(new)
+        find(cand["tasks"], "T-0020").pop("kept")
+        find(cand["workers"], "w-0020")["intended_state"] = "archived"
+        new = st.next_state(new, cand, NOW)
+        self.assertEqual(find(new["workers"], "w-0020")["intended_state"], "archived")
+
+    def test_kept_worker_needs_a_live_recorded_done(self):
+        base = self.kept_candidate()
+        push_decision(base, "T-0020")
+        for change in (lambda c: find(c["workers"], "w-0020")["last_report"].update(status="needs_input"),
+                       lambda c: find(c["tasks"], "T-0020").update(artifacts=[]),
+                       lambda c: find(c["workers"], "w-0020").update(observed_state="missing")):
+            cand = copy.deepcopy(base)
+            change(cand)
+            self.assertRejected(cand, "kept w-0020 needs a live")
+
     def pushed_candidate(self):
         git_task(self.current, "T-0020", "w-0020")
         cand = self.candidate()
@@ -4732,6 +4769,19 @@ class NoteCommitTest(unittest.TestCase):
         events = self.env.scan()["events"]
         self.assertEqual([(e["uid"], e["event"], e["row"]) for e in events], [(U1, "confirm", 13)])
 
+    def test_kept_task_gets_the_completion_ask_and_done_user_confirms(self):
+        cand = self.env.load()
+        find(cand["workers"], "w-0020")["last_report"] = {"message_ref": "m1", "status": "done", "summary": "s",
+                                                           "next_action": "", "at": NOW}
+        find(cand["tasks"], "T-0020").update(kept=["w-0020"], no_result=[{"worker_id": "w-0020", "summary": "s", "at": NOW}])
+        code, _, err = self.env.commit(cand)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(st._pair(self.env.values(U1)), ("in progress", "user"))
+        self.assertIn(st.COMPLETION_ASK["en"], self.env.text(U1))
+        self.env.put(U1, self.env.text(U1).replace('status: "in progress"', 'status: "done"'))
+        events = self.env.scan()["events"]
+        self.assertEqual([(e["uid"], e["event"], e["row"]) for e in events], [(U1, "confirm", 13)])
+
     def test_commit_writes_the_id_props_once(self):
         self.env.put(U1, "\n".join(l for l in self.env.text(U1).split("\n") if not l.startswith("task_id:")))
         code, out, err = self.env.commit()
@@ -5788,6 +5838,8 @@ class LaunchPlanTest(unittest.TestCase):
         herdr_worker(state, "T-0032", "w-0032", intended_state="running", observed_state="missing")
         with self.assertRaisesRegex(st.StateError, "max_workers 1 reached \\(w-0031\\)"):
             st.launch_argv(state, "w-0030", "x", {"max_workers": 1})
+        find(state["tasks"], "T-0031")["kept"] = ["w-0031"]
+        self.assertTrue(st.launch_argv(state, "w-0030", "x", {"max_workers": 1}))
         self.assertTrue(st.launch_argv(state, "w-0030", "x", {"max_workers": 2}))
 
     def test_cli(self):

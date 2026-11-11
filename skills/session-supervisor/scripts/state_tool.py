@@ -561,7 +561,9 @@ def derive_status(task, workers_by_id):
     # An archive the supervisor did not request must be verified before the task can finish.
     if task.get("user_actions") or any(_archived_externally(w) for w in workers):
         return "needs_user"
-    observed = ["archived" if _finished(w) else w.get("observed_state") for w in workers]
+    # A kept worker's verified result is recorded; its session only waits for follow-ups, so it counts as finished.
+    kept = set(task.get("kept", []))
+    observed = ["archived" if _finished(w) or w["id"] in kept else w.get("observed_state") for w in workers]
     if any(o in ACTIVE_OBSERVED for o in observed):
         return "running"
     if any(o == "none" for o in observed):
@@ -570,7 +572,7 @@ def derive_status(task, workers_by_id):
     # without one verified archive the task needs a replacement or a cancel. An investigation
     # worker that went missing while held has its verified findings, so it counts as finished.
     finding_ids = {f.get("worker_id") for f in task.get("findings", [])}
-    if not any((w.get("observed_state") == "archived"
+    if not any((w.get("observed_state") == "archived" or w["id"] in kept
                 or (w.get("observed_state") == "missing" and w.get("intended_state") == "archived" and w["id"] in finding_ids))
                and not w.get("replaced_by") for w in workers):
         return "needs_user"
@@ -644,6 +646,28 @@ def _read_action_worker(ua):
 
 def _held_ids(task):
     return {wid for wid in map(_read_action_worker, task.get("user_actions", [])) if wid}
+
+
+def _kept_errors(prefix, task, workers_by_id, held):
+    """A kept worker is a live session whose latest done is verified and recorded, kept for follow-ups until the
+    task is confirmed (SKILL.md 6.3 step 6)."""
+    kept = task.get("kept", [])
+    if not isinstance(kept, list):
+        return [f"{prefix}: kept must be a list of worker ids"]
+    errors = []
+    for i, wid in enumerate(kept):
+        w = workers_by_id.get(wid) or {}
+        report = w.get("last_report") or {}
+        review = w.get("review") or {}
+        review_ok = not task.get("project_id") or review.get("state") == "waived" or (
+            review.get("state") == "approved" and review.get("message_ref") == report.get("message_ref"))
+        recorded = wid in _no_result_ids(task) or _delivery_artifacts_ok(w.get("delivery"), task.get("artifacts", []))
+        if (wid in kept[:i] or w.get("task_id") != task.get("id") or w.get("intended_state") != "running"
+                or w.get("observed_state") not in ("running", "idle", "needs_input") or w.get("replaced_by")
+                or wid in held or report.get("status") != "done" or not recorded or not review_ok):
+            errors.append(f"{prefix}: kept {wid} needs a live, unheld worker of the task whose latest report is a "
+                          "recorded done (artifacts or no_result; an approved or waived review on a project task), once")
+    return errors
 
 
 def _no_result_ids(task):
@@ -980,12 +1004,13 @@ def validate(state, relief=None):
                     errors.append(f"{prefix}: cancelled but worker {wid} is still intended running")
         # A no_result entry exempts its worker from delivery artifacts, so it must stay tied to that finished or held worker.
         held = _held_ids(task)
+        kept = task.get("kept", [])
         seen = set()
         for entry in task.get("no_result", []):
             wid = entry["worker_id"]
             w = workers_by_id.get(wid)
             if (wid in seen or w is None or w.get("task_id") != tid
-                    or (w.get("intended_state") != "archived" and wid not in held) or w.get("replaced_by")):
+                    or (w.get("intended_state") != "archived" and wid not in held and wid not in kept) or w.get("replaced_by")):
                 errors.append(f"{prefix}: no_result {wid} must name an archived, non-replaced worker of the task once")
             seen.add(wid)
         seen = set()
@@ -996,6 +1021,7 @@ def validate(state, relief=None):
                     or w.get("session_id") != entry["session_id"]):
                 errors.append(f"{prefix}: findings {wid} must name a worker of an investigation task by its session_id, once")
             seen.add(wid)
+        errors += _kept_errors(prefix, task, workers_by_id, held)
         # A held worker stays running only while the user still has to read its verified result.
         finding_ids = {f["worker_id"] for f in task.get("findings", [])}
         seen = set()
@@ -1189,10 +1215,22 @@ def _deletion_errors(current, candidate):
     return errors
 
 
+def _needs_push_decision(task, w):
+    return (w["delivery"] == "commit" and not task.get("cancel") and w["observed_state"] != "missing"
+            and not w.get("replaced_by") and w["id"] not in _no_result_ids(task) and not _pushed_at_head(task, w)
+            and not any(_is_push_decision(ua, w) for ua in task.get("user_actions", [])))
+
+
 def _transition_errors(current, candidate):
     errors = []
     cur_workers = {w["id"]: w for w in current["workers"]}
     tasks = {t["id"]: t for t in candidate["tasks"]}
+    cur_kept = {wid for t in current["tasks"] for wid in t.get("kept", [])}
+    for t in candidate["tasks"]:
+        for wid in t.get("kept", []):
+            w = next((x for x in candidate["workers"] if x["id"] == wid), None)
+            if wid not in cur_kept and w is not None and _needs_push_decision(t, w):
+                errors.append(f"worker {wid}: keeping a commit delivery worker requires a push-decision user_action")
     for w in candidate["workers"]:
         if w["intended_state"] != "archived":
             continue
@@ -1206,7 +1244,8 @@ def _transition_errors(current, candidate):
         if w["observed_state"] not in ("archived", "missing") and not candidate["supervisor"].get("archive_consent"):
             errors.append(f"worker {w['id']}: archive requested without supervisor.archive_consent")
         task = tasks.get(w["task_id"], {})
-        if w["delivery"] == "commit" and not task.get("cancel") and w["observed_state"] != "missing" and not w.get("replaced_by") and w["id"] not in _no_result_ids(task) and not _pushed_at_head(task, w) and not any(_is_push_decision(ua, w) for ua in task.get("user_actions", [])):
+        # A kept worker got its push decision when it was kept; the user may have resolved it since.
+        if w["id"] not in cur_kept and _needs_push_decision(task, w):
             errors.append(f"worker {w['id']}: commit delivery archive requires a push-decision user_action")
     return errors + _project_transition_errors(current, candidate)
 
@@ -3019,7 +3058,7 @@ MIGRATE_UA_RULES = (
     (re.compile(r"^Session \S+ was started by the P-\d+ project manager"), "auto", "foreign_session_gone"),
     (re.compile(r"^Tell w-\d+ in the app"), "ask", None),
 )
-V2_RUNTIME_KEYS = ("uid", "note", "note_seen", "user_hold", "confirmed", "held", "last_artifact_number", "art_from",
+V2_RUNTIME_KEYS = ("uid", "note", "note_seen", "user_hold", "confirmed", "held", "kept", "last_artifact_number", "art_from",
                    "artifacts_quarantine", "done_proposed")
 
 
@@ -4478,9 +4517,10 @@ def launch_argv(state, ident, prompt, herdr):
         raise StateError("the prompt is empty")
     if kind == "worker":
         limit = herdr.get("max_workers", DEFAULT_MAX_WORKERS)
+        kept = {wid for t in state.get("tasks", []) for wid in t.get("kept", [])}
         running = [w["id"] for w in state.get("workers", [])
                    if w.get("runtime") == "herdr" and w.get("id") != ident and w.get("intended_state") == "running"
-                   and w.get("observed_state") not in ("archived", "missing")]
+                   and w.get("observed_state") not in ("archived", "missing") and w.get("id") not in kept]
         if len(running) >= limit:
             raise StateError(f"max_workers {limit} reached ({', '.join(running)}); start {ident} after one finishes")
     argv = ["hc", "run", "--bg", "--json", "--name", ident, "--cwd", cwd, "--label", f"sv={kind}", "--label", label,
