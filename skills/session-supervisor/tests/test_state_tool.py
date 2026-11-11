@@ -4231,7 +4231,7 @@ class NotePropsTest(unittest.TestCase):
             (item(user_hold={"at": NOW, "reason": "pause"}, artifacts_quarantine={"at": NOW, "ua": "UA-0001"},
                   user_actions=[{"id": "UA-0001", "description": "q", "since": NOW}]), wk(), None),
             (item(), wk("archived", "archived"), ("done", "user")),
-            (item(user_actions=[read]), wk(), ("done", "agent")),
+            (item(user_actions=[read]), wk(), ("in progress", "user")),
             (item(user_actions=[read, {"id": "UA-0001", "description": "q", "since": NOW}]), wk(), ("in progress", "user")),
             (item(artifacts_quarantine={"at": NOW, "ua": "UA-0001"},
                   user_actions=[{"id": "UA-0001", "description": "q", "since": NOW}]), wk(), ("in progress", "user")),
@@ -4249,7 +4249,7 @@ class NotePropsTest(unittest.TestCase):
             ({"confirmed": {"at": NOW}, "close": {"at": NOW, "reason": "x"}}, ("done", "user")),
             ({"close": {"at": NOW, "reason": "x"}}, ("archived", None)),
             ({"user_hold": {"at": NOW, "reason": "pause"}, "done_proposed": {"at": NOW, "summary": "s"}}, None),
-            ({"done_proposed": {"at": NOW, "summary": "s"}}, ("done", "agent")),
+            ({"done_proposed": {"at": NOW, "summary": "s"}}, ("in progress", "user")),
             ({"user_actions": [{"id": "UA-0001", "description": "q", "since": NOW}]}, ("in progress", "user")),
             ({}, ("in progress", "agent")),
         ]
@@ -4342,6 +4342,7 @@ class UserTransitionTest(unittest.TestCase):
         (IPA, BA, LIVE, "restore", 12),
         (DA, DU, LIVE, "confirm", 13),
         (DA, DU, STUB, "confirm", 13),
+        (IPU, DU, dict(LIVE, open_ua=True, held_only=True), "confirm", 13),
         (DA, DU, PROJ, "confirm", 14),
         (IPA, DU, PROJ, "confirm", 14),
         (IPU, DU, PROJ, "confirm", 14),
@@ -4360,6 +4361,10 @@ class UserTransitionTest(unittest.TestCase):
         (DU, DA, STUB, "restore", 20),
         (DA, IPA, PROJ, "reject_done", 21),
         (DA, IPU, PROJ, "reject_done", 21),
+        (IPU, IPA, dict(PROJ, open_ua=True, done_proposed=True), "reject_done", 24),
+        (IPU, BA, dict(PROJ, open_ua=True, done_proposed=True), "resume", 11),
+        (IPA, DU, dict(LIVE, held_only=True), "confirm", 13),
+        (IPA, DA, dict(LIVE, held_only=True), "cancel", 15),
         (IPA, nv("in progress", "agent", art="a1"), dict(LIVE, artifacts_ok=True), "artifacts_edit", 22),
         (DU, nv("done", "user", art="a1"), dict(STUB, artifacts_ok=False), "artifacts_edit", 22),
         (IPA, nv("in progress", "agent", art="a1"), dict(LIVE, artifacts_ok=False), "artifacts_broken", 23),
@@ -4373,7 +4378,7 @@ class UserTransitionTest(unittest.TestCase):
                 got = st.user_transition(seen, cur, ctx)
                 self.assertEqual((got["event"], got["row"]), (event, row))
         rows = {row for *_, row in self.ROWS}
-        self.assertTrue(set(range(1, 24)) <= rows, set(range(1, 24)) - rows)
+        self.assertTrue(set(range(1, 25)) <= rows, set(range(1, 25)) - rows)
 
     def test_unlisted_combinations_are_invalid(self):
         for seen, cur, ctx in ((DU, IPU, LIVE), (DU, PU, LIVE), (DA, IPA, LIVE), (IPA, DA, PROJ), (BU, IPA, LIVE),
@@ -4634,6 +4639,19 @@ class NoteCommitTest(unittest.TestCase):
         task = find(self.env.load()["tasks"], "T-0022")
         self.assertEqual((task["note"], task["note_seen"]), (reserved["path"], st.note_values(text)))
         self.assertEqual(self.env.scan(), {"events": [], "warnings": []})
+
+    def test_held_task_waits_for_the_user_and_done_user_confirms(self):
+        cand = self.env.load()
+        f = dict(finding("w-0020"), title=find(cand["workers"], "w-0020").get("title"),
+                 session_id=find(cand["workers"], "w-0020").get("session_id"))
+        find(cand["tasks"], "T-0020").update(held=["w-0020"], investigation=True, findings=[f])
+        code, _, err = self.env.commit(cand)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(st._pair(self.env.values(U1)), ("in progress", "user"))
+        self.assertEqual(self.env.commit()[0], 0)
+        self.env.put(U1, self.env.text(U1).replace('status: "in progress"', 'status: "done"'))
+        events = self.env.scan()["events"]
+        self.assertEqual([(e["uid"], e["event"], e["row"]) for e in events], [(U1, "confirm", 13)])
 
     def test_commit_writes_the_id_props_once(self):
         self.env.put(U1, "\n".join(l for l in self.env.text(U1).split("\n") if not l.startswith("task_id:")))
@@ -4969,7 +4987,8 @@ def pair_values(value):
 
 class StatusShortcutTest(unittest.TestCase):
     CTX = {"unmanaged": {"managed": False}, "active": dict(LIVE, active=True), "idle": LIVE, "paused": PAUSED, "stub": STUB,
-           "project": dict(PROJ, active=True), "project_idle": PROJ, "project_paused": dict(PROJ, hold="pause")}
+           "project": dict(PROJ, active=True), "project_idle": PROJ, "project_paused": dict(PROJ, hold="pause"),
+           "held": dict(LIVE, open_ua=True, held_only=True), "project_done": dict(PROJ, active=True, open_ua=True, done_proposed=True)}
     CANCEL_FROM = ("backlog/user", "backlog/agent", "in progress/user", "in progress/agent", "pending/user", "pending/agent")
     CASES = [
         # (kind, label, from, ctx, event, row)
@@ -4998,6 +5017,7 @@ class StatusShortcutTest(unittest.TestCase):
         ("task", "保留", "in progress/agent", "unmanaged", "none", 2),
         ("task", "保留", "backlog/user", "unmanaged", "none", 2),
         ("task", "保留", "backlog/agent", "unmanaged", "none", 2),
+        ("task", "完了確認", "in progress/user", "held", "confirm", 13),
         ("task", "完了確認", "done/agent", "idle", "confirm", 13),
         ("task", "完了確認", "done/agent", "stub", "confirm", 13),
         *[("task", "取り消す", f, "active", "cancel", 17) for f in CANCEL_FROM],
@@ -5007,6 +5027,7 @@ class StatusShortcutTest(unittest.TestCase):
         ("project", "agent に渡す", "in progress/user", "project", "resume", 11),
         ("project", "agent に渡す", "pending/user", "project_paused", "resume", 8),
         ("project", "agent に渡す", "backlog/user", "project_paused", "resume", 8),
+        ("project", "完了を差し戻す", "in progress/user", "project_done", "reject_done", 24),
         ("project", "完了を差し戻す", "done/agent", "project", "reject_done", 21),
         ("project", "自分に引き取る", "in progress/agent", "project", "pause", 5),
         ("project", "自分に引き取る", "in progress/agent", "project_idle", "pause", 7),
@@ -5015,6 +5036,7 @@ class StatusShortcutTest(unittest.TestCase):
         ("project", "保留", "in progress/user", "project_paused", "none", 9),
         ("project", "保留", "backlog/user", "unmanaged", "none", 2),
         ("project", "保留", "backlog/agent", "unmanaged", "none", 2),
+        ("project", "完了確認", "in progress/user", "project_done", "confirm", 14),
         ("project", "完了確認", "done/agent", "project", "confirm", 14),
         *[("project", "取り消す", f, "project", "close", 18) for f in CANCEL_FROM],
         ("project", "取り消す", "backlog/agent", "unmanaged", "none", 2),
@@ -5028,7 +5050,7 @@ class StatusShortcutTest(unittest.TestCase):
             with self.subTest(kind=kind, label=label, frm=frm, ctx=ctx_name):
                 managed = ctx["managed"]
                 offered = [i for i, m in enumerate(moves) if m["kind"] == kind and frm in m["from"] and m.get("managed") in (None, managed)
-                           and m["label"] == label]
+                           and (m.get("when") is None or ctx.get(m["when"])) and m["label"] == label]
                 self.assertEqual(len(offered), 1)
                 covered.add((offered[0], frm))
                 seen = pair_values(frm) if managed else None
@@ -5236,7 +5258,7 @@ class ProposalNoteTest(unittest.TestCase):
                                                       "plans": [], "questions": [], "done": bad}) + "\n```"
             self.assertFalse(st.parse_project_report(text)["ok"])
         self.project["done_proposed"] = {"at": NOW, "summary": "すべて完了しました"}
-        self.assertEqual(st.note_props("project", st.join_view(self.state, self.notes)["projects"][0], {}), ("done", "agent"))
+        self.assertEqual(st.note_props("project", st.join_view(self.state, self.notes)["projects"][0], {}), ("in progress", "user"))
 
 
 LIVE_SHAPE = FIXTURES / "state_v1_live_shape.json"
@@ -5304,7 +5326,7 @@ class MigrateExportTest(unittest.TestCase):
     def test_uids_notes_and_props(self):
         self.assertEqual(find(self.v2["tasks"], "T-0102")["uid"], "20261028_110000")
         self.assertEqual(find(self.v2["tasks"], "T-0101")["uid"], "20261028_110001")
-        expected = {"T-0102": ("in progress", "user"), "T-0090": ("done", "agent"), "T-0106": ("in progress", "agent"),
+        expected = {"T-0102": ("in progress", "user"), "T-0090": ("in progress", "user"), "T-0106": ("in progress", "agent"),
                     "T-0120": ("in progress", "agent")}
         for task_id, pair in expected.items():
             self.assertEqual(st._pair(st.note_values(self.note_of(task_id))), pair, task_id)

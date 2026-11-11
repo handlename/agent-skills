@@ -10,13 +10,16 @@ const MOVES = [
   {"kind": "task", "label": "自分に引き取る", "from": ["in progress/agent"], "to": "in progress/user"},
   {"kind": "task", "label": "保留", "from": ["in progress/user", "in progress/agent"], "to": "pending/user"},
   {"kind": "task", "label": "保留", "from": ["backlog/user", "backlog/agent"], "managed": false, "to": "pending/user"},
+  {"kind": "task", "label": "完了確認", "from": ["in progress/user"], "when": "held_only", "to": "done/user"},
   {"kind": "task", "label": "完了確認", "from": ["done/agent"], "to": "done/user"},
   {"kind": "task", "label": "取り消す", "from": ["backlog/user", "backlog/agent", "in progress/user", "in progress/agent", "pending/user", "pending/agent"], "to": "archived/user"},
   {"kind": "project", "label": "agent に渡す", "from": ["backlog/user", "in progress/user", "pending/user"], "to": "backlog/agent"},
+  {"kind": "project", "label": "完了を差し戻す", "from": ["in progress/user"], "when": "done_proposed", "to": "in progress/agent"},
   {"kind": "project", "label": "完了を差し戻す", "from": ["done/agent"], "managed": true, "to": "in progress/agent"},
   {"kind": "project", "label": "自分に引き取る", "from": ["in progress/agent"], "to": "in progress/user"},
   {"kind": "project", "label": "保留", "from": ["in progress/user", "in progress/agent"], "to": "pending/user"},
   {"kind": "project", "label": "保留", "from": ["backlog/user", "backlog/agent"], "managed": false, "to": "pending/user"},
+  {"kind": "project", "label": "完了確認", "from": ["in progress/user"], "when": "done_proposed", "to": "done/user"},
   {"kind": "project", "label": "完了確認", "from": ["done/agent"], "to": "done/user"},
   {"kind": "project", "label": "取り消す", "from": ["backlog/user", "backlog/agent", "in progress/user", "in progress/agent", "pending/user", "pending/agent"], "to": "archived/user"}
 ];
@@ -38,8 +41,16 @@ if (!tags.includes("supervised")) {
   const kind = tags.includes("project") ? "project" : "task";
   const managed = Boolean(value("task_id") || value("project_id"));
   const now = value("status") + "/" + value("assignee");
+  // state_tool never writes done/agent: a task held only for investigation results shows in progress/user with no
+  // open @user action, and a project the manager proposes as done shows in progress/user with its completion ask.
+  // done/agent comes only from notes written by earlier versions.
+  const body = lines.slice(close + 1);
+  const when = {
+    held_only: managed && !body.some((line) => /^### \[UA-\d+\] @user /.test(line)),
+    done_proposed: managed && body.some((line) => line.startsWith("### [UA-") && line.includes("@user プロジェクトの完了を確認してください")),
+  };
   const moves = close < 0 ? [] : MOVES.filter((m) => m.kind === kind && m.from.includes(now)
-    && (m.managed === undefined || m.managed === managed));
+    && (m.managed === undefined || m.managed === managed) && (m.when === undefined || when[m.when]));
   if (!moves.length) {
     new tp.obsidian.Notice(`${now} から変えられる操作はありません`);
   } else {

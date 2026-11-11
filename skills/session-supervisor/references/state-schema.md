@@ -364,10 +364,9 @@ A project with `confirmed`, no `close`, and no live task left gets `close = {at,
 | `confirmed` | `done` / `user` |
 | task `cancel` / project `close` (occupying workers or not) | `archived` (assignee kept) |
 | `user_hold` | not written |
-| project `done_proposed` | `done` / `agent` |
+| project `done_proposed` | `in progress` / `user` (the user confirms with `done` / `user` or rejects with `in progress` / `agent`) |
 | task derived `done` | `done` / `user` (the user confirms the result, or follows up with `backlog` / `agent`) |
-| task whose only open user actions are held read actions | `done` / `agent` |
-| task derived `needs_user` / project with open user actions | `in progress` / `user` |
+| task derived `needs_user` (held read actions included) / project with open user actions | `in progress` / `user` |
 | otherwise | `in progress` / `agent` |
 
 When the written `status` becomes `done` or `archived`, `commit` also writes the properties of that line of `## Note props` in `<dir>/CLAUDE.md` (default: `completed_at` / `archived_at` with the time as `YYYY-MM-DD HH:mm:ss`); a `{now}` value is written only when the property is empty. When it becomes anything else, every property named in `## Note props` is reset (`para` to `Project`, `aliases` to `[]`, the others to null).
@@ -380,7 +379,7 @@ The `summary` prop is written only by the `summary` note op (SKILL.md section 4)
 
 ### User changes (`user_transition`)
 
-`notes-scan` compares each note with `note_seen` (or with the `before` values of an unconfirmed journal entry) and classifies the change. Any combination not listed is `invalid`: the user is told, `user_hold` (`reason: invalid`) stops props and starts, and nothing is acked until the user sets listed values. A change of `## アクション` alone needs no handling.
+`notes-scan` compares each note with `note_seen` (or with the `before` values of an unconfirmed journal entry) and classifies the change. `state_tool` never writes `done` / `agent` (completion is the user's to confirm); the rows seen from done/agent cover notes written by earlier versions. Any combination not listed is `invalid`: the user is told, `user_hold` (`reason: invalid`) stops props and starts, and nothing is acked until the user sets listed values. A change of `## アクション` alone needs no handling.
 
 | # | Seen | Now | Condition | Event |
 | :--- | :--- | :--- | :--- | :--- |
@@ -396,9 +395,9 @@ The `summary` prop is written only by the `summary` note op (SKILL.md section 4)
 | 10 | in progress/user | only `## アクション` changed (answers, requests) | open user actions | `none` |
 | 11 | in progress/user | in progress/agent, backlog/agent | | `resume` |
 | 12 | in progress/agent | backlog/agent | | `restore` |
-| 13 | done/agent | done/user | task | `confirm` |
+| 13 | done/agent; in progress/* with only held read actions open | done/user | task | `confirm` |
 | 14 | done/agent, in progress/* | done/user | project | `confirm` |
-| 15 | in progress/*, paused | done/user, done/agent | task | `cancel` |
+| 15 | in progress/*, paused | done/user, done/agent | task, except #13 | `cancel` |
 | 16 | done/agent, done/user; or any value but archived on a stub (a task that is not live) | backlog/agent; also in progress/agent on a stub | | `follow_up` |
 | 17 | managed | archived | task | `cancel` |
 | 18 | managed | archived | project | `close` |
@@ -407,6 +406,7 @@ The `summary` prop is written only by the `summary` note op (SKILL.md section 4)
 | 21 | done/agent | in progress/agent, in progress/user | project | `reject_done` (with `pause` for in progress/user) |
 | 22 | only `## 成果物` changed | dependencies met (or a stub) | | `artifacts_edit` |
 | 23 | only `## 成果物` changed | dependencies not met | live task | `artifacts_broken` |
+| 24 | in progress/user | in progress/agent | project with `done_proposed` | `reject_done` |
 
 The stub case of #16 is checked right after #19 and before the rows that look at a hold or a worker (#8, #11, #12), so a stub set to in progress/agent or backlog/agent is always `follow_up` (SKILL.md 6.7 (c)). A change to the same values as before stays `none`.
 

@@ -2737,16 +2737,13 @@ def note_props(kind, item, workers_by_id):
     if item.get("user_hold"):
         return None
     if kind == "project":
-        if item.get("done_proposed"):
-            return ("done", "agent")
-        return ("in progress", "user") if item.get("user_actions") else ("in progress", "agent")
+        return ("in progress", "user") if item.get("user_actions") or item.get("done_proposed") else ("in progress", "agent")
     actions = item.get("user_actions", [])
     status = derive_status(item, workers_by_id)
-    # A finished task is the user's to confirm (or to follow up with backlog/agent), so it is never done/agent.
+    # Completion is the user's to confirm, so the agent never writes done/agent: a finished task is done/user, and
+    # a task waiting only for the user to read held results is in progress/user until the user sets done/user.
     if status == "done":
         return ("done", "user")
-    if actions and all(_read_action_worker(ua) for ua in actions):
-        return ("done", "agent")
     return ("in progress", "user") if status == "needs_user" else ("in progress", "agent")
 
 
@@ -2776,7 +2773,8 @@ NOTE_AGENT_RESUME = (("in progress", "agent"), ("backlog", "agent"))
 def user_transition(seen, cur, ctx):
     """Classify a user's change of a note (3.4 (2)). seen and cur are {status, assignee, ua_sha, art_sha}; seen is
     None for an unmanaged note, cur None when the frontmatter cannot be read. ctx: managed, live, active,
-    hold (None, "pause", "invalid"), open_ua, kind ("task" or "project"), duplicate, artifacts_ok.
+    hold (None, "pause", "invalid"), open_ua, held_only (every open user action is a held read action),
+    done_proposed, kind ("task" or "project"), duplicate, artifacts_ok.
     Returns {event, row, ack, clear_invalid[, pause]}: row is the table row (0 for no change), ack the values to copy
     into note_seen once handled (an invalid change acks nothing; a status change leaves an artifact change for later)."""
     hold = ctx.get("hold")
@@ -2827,8 +2825,12 @@ def user_transition(seen, cur, ctx):
             found = ("pause", 6 if ctx.get("active") else 7)
         elif prev[1] == "agent" and pair == ("backlog", "agent"):
             found = ("restore", 12)
+        elif prev[1] == "user" and pair == ("in progress", "agent") and not task and ctx.get("done_proposed"):
+            return result("reject_done", 24, ack)
         elif prev[1] == "user" and pair in NOTE_AGENT_RESUME:
             found = ("resume", 11)
+        elif task and pair == ("done", "user") and ctx.get("held_only"):
+            found = ("confirm", 13)
         elif task and pair[0] == "done":
             found = ("cancel", 15)
         elif not task and pair == ("done", "user"):
@@ -4654,12 +4656,15 @@ def _ua_summary(ua):
 
 
 def _scan_ctx(kind, item, view_item, workers, live, duplicate, items):
+    uas = (view_item or {}).get("user_actions") or []
     if kind == "project":
         active = _occupies(item.get("manager") or {})
     else:
         active = any(_occupies(w) for w in workers if w.get("task_id") == item.get("id"))
     ctx = {"managed": True, "live": live, "kind": kind, "active": active, "duplicate": duplicate,
-           "hold": (item.get("user_hold") or {}).get("reason"), "open_ua": bool((view_item or {}).get("user_actions"))}
+           "hold": (item.get("user_hold") or {}).get("reason"), "open_ua": bool((view_item or {}).get("user_actions")),
+           "held_only": bool(uas) and all(_read_action_worker(ua) for ua in uas),
+           "done_proposed": bool(item.get("done_proposed"))}
     needs = artifact_needs(view_item, workers, items) if live and kind == "task" and view_item else []
     return dict(ctx, artifacts_ok=not needs), needs
 
