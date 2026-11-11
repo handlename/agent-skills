@@ -144,6 +144,12 @@ HC_DENY = frozenset({"keys", "exec", "attach", "server", "update", "machine", "f
 # Catches the denied hc subcommands also where tokens cannot see them, e.g. a Python list ['hc', 'keys', ...].
 HC_DENY_RE = re.compile(r"(?<![\w./-])hc(?![\w.-])['\"]?\s*,?\s*['\"]?(" + "|".join(sorted(HC_DENY)) + r")(?![\w-])")
 HC_TARGET_RE = re.compile(r"^(w-\d+|m-p-\d+|sv-watch)$")
+# The chat session (role chat) only reads hc and state; its requests reach sv through state_tool chat-send.
+CHAT_HC_ALLOW = frozenset({"ls", "get", "read", "events", "wait"})
+CHAT_TOOL_ALLOW = frozenset({"chat-send", "chat-wait", "digest", "note-show", "version"})
+CHAT_DIR = "chat"
+CHAT_INBOX = ".supervisor/chat"
+CHAT_ID_RE = re.compile(r"^C-(\d{4,})$")
 GUARD_VALUE_OPTIONS = {
     "git": ("-C", "-c", "--git-dir", "--work-tree", "--namespace"),
     "jj": ("-R", "--repository", "--at-op", "--at-operation", "--color", "--config", "--config-file"),
@@ -401,9 +407,11 @@ def _hc_labels(args):
     return labels + [a.split("=", 1)[1] for a in args if a.startswith("--label=")]
 
 
-def _hc_violation(sub, args):
+def _hc_violation(sub, args, role=None):
     if sub in HC_DENY:
         return f"{sub} (the supervisor never types into, attaches to or manages terminals directly)"
+    if role == "chat" and sub not in CHAT_HC_ALLOW:
+        return f"{sub} (the chat session only reads terminals; requests go to sv through state_tool chat-send)"
     if sub == "run" and not any(label.startswith("sv=") for label in _hc_labels(args)):
         return "run without --label sv=... (start sessions only with the argv from launch-plan)"
     if sub in ("kill", "rm"):
@@ -425,30 +433,35 @@ def _split_subcommand(tool, args):
     return (args[i], args[i + 1:]) if i < len(args) else (None, [])
 
 
-def _tool_violations(words):
+def _tool_violations(words, role=None):
     for i, tok in enumerate(words):
         tool = os.path.basename(tok)
+        if role == "chat" and tool == "state_tool.py":
+            sub = words[i + 1] if i + 1 < len(words) else None
+            if sub not in CHAT_TOOL_ALLOW:
+                return [f"state_tool.py {sub or ''} (the chat session runs only {', '.join(sorted(CHAT_TOOL_ALLOW))})"]
         if tool in GUARD_CHECKS:
             sub, args = _split_subcommand(tool, words[i + 1:])
-            found = GUARD_CHECKS[tool](sub, args) if sub else None
+            check = GUARD_CHECKS[tool]
+            found = (check(sub, args, role) if tool == "hc" else check(sub, args)) if sub else None
             return [f"{tool} {found}"] if found else []
     return []
 
 
-def _shell_c_violations(words):
+def _shell_c_violations(words, role=None):
     for i, tok in enumerate(words):
         if os.path.basename(tok) not in GUARD_SHELLS:
             continue
         has_c = False
         for opt in words[i + 1:]:
             if not opt.startswith("-"):
-                return bash_violations(opt) if has_c else []
+                return bash_violations(opt, role) if has_c else []
             has_c = has_c or (not opt.startswith("--") and "c" in opt[1:])
         return []
     return []
 
 
-def bash_violations(command):
+def bash_violations(command, role=None):
     """Deny-list matches of git / jj / gh / hc in a Bash command. A guardrail, not a security boundary."""
     command = command.replace("\\\n", "")
     try:
@@ -465,7 +478,7 @@ def bash_violations(command):
             violations.append("command substitution (split the command; command substitution around git/jj/gh/hc is not inspected)")
             continue
         words = _strip_redirections(segment)
-        violations += _shell_c_violations(words) + _tool_violations(words)
+        violations += _shell_c_violations(words, role) + _tool_violations(words, role)
     named = " ".join(violations)
     violations += [f"hc {sub} (the supervisor never types into, attaches to or manages terminals directly)"
                    for sub in sorted(hidden) if f"hc {sub} " not in named]
@@ -497,6 +510,7 @@ def path_violation(path, cwd, supervisor_dir, config_dir, tmp_dirs):
 GUARD_TAILS = {
     None: "The supervisor does not change repositories: send it to a worker session, or ask an observer subagent for read-only facts.",
     "manager": "The project manager only reads: answer or forward through send_message, or return a plan in your project-report.",
+    "chat": "The chat session changes nothing itself: hand the user's request to sv with state_tool.py chat-send.",
 }
 
 
@@ -509,7 +523,7 @@ def guard_decision(payload, supervisor_dir, env, role=None):
     if not isinstance(value, str) or not value:
         return None
     if tool == "Bash":
-        violations = bash_violations(value)
+        violations = bash_violations(value, role)
     else:
         config_dir = env.get("CLAUDE_CONFIG_DIR") or "~/.claude"
         tmp_dirs = [d for d in (env.get("TMPDIR"), "/tmp") if d]
@@ -3961,6 +3975,7 @@ def cmd_setup(args):
         report.append(("created", state_path))
 
     report += _setup_vault(target)
+    report += _setup_chat(target, script)
 
     if old_md is None:
         claude_md.write_text(new_md, encoding="utf-8")
@@ -4027,6 +4042,23 @@ def _setup_vault(supervisor_dir):
         shutil.copyfile(src, dest)
     report.append((status, dest))
     return report
+
+
+def _setup_chat(supervisor_dir, script):
+    """<dir>/chat, where the free-form session sv-chat runs: its guard (role chat) and its brief CLAUDE.md, which is
+    overwritten when it differs, like sv-status.md, so that it stays in step with the chat subcommands."""
+    chat = Path(supervisor_dir) / CHAT_DIR
+    settings_path = chat / ".claude" / "settings.json"
+    settings = _read_settings(settings_path, ("PreToolUse",), "setup")
+    wanted = (("PreToolUse", GUARD_MATCHER, guard_hook_command(script, chat, "chat")),)
+    report = [(_install_hooks(settings_path, settings, wanted, {"model": SUPERVISOR_MODEL}), settings_path)]
+    src, dest = HERE.parent / "assets" / "chat-CLAUDE.md", chat / "CLAUDE.md"
+    if not src.exists():
+        return report + [("skipped", dest)]
+    status = "exists" if dest.exists() and dest.read_bytes() == src.read_bytes() else ("updated" if dest.exists() else "created")
+    if status != "exists":
+        shutil.copyfile(src, dest)
+    return report + [(status, dest)]
 
 
 def guard_hook_command(script, directory, role=None):
@@ -4785,6 +4817,99 @@ def cmd_watch_vault(args, runner=None, sleep=time.sleep):
         sleep(args.interval)
 
 
+def _chat_dir(state_path):
+    return Path(os.path.dirname(os.path.abspath(state_path))) / CHAT_INBOX
+
+
+def _chat_text(args):
+    text = Path(args.text_file).read_text(encoding="utf-8") if args.text_file else args.text
+    if not text or not text.strip():
+        raise StateError("the text is empty")
+    return text
+
+
+def _chat_path(state_path, chat_id):
+    if not CHAT_ID_RE.match(chat_id or ""):
+        raise StateError(f"{chat_id!r} is not a chat request id (C-NNNN)")
+    path = _chat_dir(state_path) / f"{chat_id}.json"
+    if not path.exists():
+        raise StateError(f"no chat request {chat_id}")
+    return path
+
+
+def chat_entries(state_path):
+    """(entries, warnings): the chat requests under <dir>/.supervisor/chat, oldest id first."""
+    entries, warnings = [], []
+    folder = _chat_dir(state_path)
+    names = sorted((p for p in folder.glob("C-*.json") if CHAT_ID_RE.match(p.stem)),
+                   key=lambda p: int(CHAT_ID_RE.match(p.stem).group(1))) if folder.is_dir() else []
+    for path in names:
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            warnings.append(f"{path.name}: {e}")
+            continue
+        if not isinstance(entry, dict) or entry.get("id") != path.stem or not isinstance(entry.get("text"), str):
+            warnings.append(f"{path.name}: not a chat request")
+            continue
+        entries.append(entry)
+    return entries, warnings
+
+
+def cmd_chat_send(args, runner=None):
+    """sv-chat: store the user's words as a chat request and tell sv. The file, not the signal, is the request."""
+    text = _chat_text(args)
+    context = Path(args.context_file).read_text(encoding="utf-8") if args.context_file else None
+    folder = _chat_dir(args.state)
+    folder.mkdir(parents=True, exist_ok=True)
+    n = max([int(CHAT_ID_RE.match(p.stem).group(1)) for p in folder.glob("C-*.json") if CHAT_ID_RE.match(p.stem)] + [0])
+    entry = {"at": _now(), "text": text, "context": context or None, "reply": None, "replied_at": None}
+    while True:
+        n += 1
+        chat_id = f"C-{n:04d}"
+        try:
+            # Exclusive creation: an id is never reused, even by a second send in the same moment.
+            with open(folder / f"{chat_id}.json", "x", encoding="utf-8") as f:
+                f.write(json.dumps({"id": chat_id, **entry}, ensure_ascii=False, indent=2) + "\n")
+            break
+        except FileExistsError:
+            continue
+    proc = (runner or _run_hc)(["hc", "send", args.notify, f"chat: {chat_id}"])
+    print(json.dumps({"id": chat_id, "notified": proc.returncode == 0}, ensure_ascii=False))
+    return 0
+
+
+def cmd_chat_inbox(args):
+    entries, warnings = chat_entries(args.state)
+    pending = [{k: e.get(k) for k in ("id", "at", "text", "context")} for e in entries if e.get("replied_at") is None]
+    print(json.dumps({"entries": pending, "warnings": warnings}, ensure_ascii=False))
+    return 0
+
+
+def cmd_chat_reply(args):
+    path = _chat_path(args.state, args.id)
+    entry = json.loads(path.read_text(encoding="utf-8"))
+    if entry.get("replied_at") is not None:
+        raise StateError(f"{args.id} was already answered at {entry['replied_at']}")
+    entry.update(reply=_chat_text(args), replied_at=_now())
+    _write_atomic(str(path), json.dumps(entry, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps({"id": args.id, "replied_at": entry["replied_at"]}))
+    return 0
+
+
+def cmd_chat_wait(args, sleep=time.sleep):
+    path = _chat_path(args.state, args.id)
+    waited = 0.0
+    while True:
+        entry = json.loads(path.read_text(encoding="utf-8"))
+        if entry.get("replied_at") is not None or waited >= args.timeout:
+            break
+        sleep(2)
+        waited += 2
+    print(json.dumps({"id": args.id, "reply": entry.get("reply"), "replied_at": entry.get("replied_at")}, ensure_ascii=False))
+    return 0
+
+
 def cmd_note_show(args):
     vault, texts, uids = _vault_index(args.state)
     if args.uid not in uids:
@@ -5008,7 +5133,7 @@ def build_parser():
 
     p = sub.add_parser("guard", help="PreToolUse hook: exit 3 with a reason on stderr when the call is blocked, else 0")
     p.add_argument("--dir", required=True)
-    p.add_argument("--role", choices=("manager",), help="manager: the guard of a project directory")
+    p.add_argument("--role", choices=("manager", "chat"), help="manager: the guard of a project directory; chat: of <dir>/chat")
     p.set_defaults(func=cmd_guard)
 
     p = sub.add_parser("validate-follow-ups", help="check the ## Follow-ups section of CLAUDE.md (exit 1 with error lines when invalid)")
@@ -5072,6 +5197,34 @@ def build_parser():
     p.add_argument("--interval", type=float, default=10, help="seconds between ticks (default: 10)")
     p.add_argument("--once", action="store_true", help="run one tick and exit")
     p.set_defaults(func=cmd_watch_vault)
+
+    def chat_text(p, required=True):
+        group = p.add_mutually_exclusive_group(required=required)
+        group.add_argument("--text")
+        group.add_argument("--text-file")
+
+    p = sub.add_parser("chat-send", help="sv-chat: store the user's words as a chat request C-NNNN and tell sv")
+    p.add_argument("--state", required=True)
+    chat_text(p)
+    p.add_argument("--context-file", help="the chat session's own notes on the request (no user authority)")
+    p.add_argument("--notify", default="sv", help="the supervisor terminal (default: sv)")
+    p.set_defaults(func=cmd_chat_send)
+
+    p = sub.add_parser("chat-inbox", help="list the chat requests sv has not answered yet (JSON, writes nothing)")
+    p.add_argument("--state", required=True)
+    p.set_defaults(func=cmd_chat_inbox)
+
+    p = sub.add_parser("chat-reply", help="sv: answer a chat request once (it then leaves chat-inbox)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--id", required=True)
+    chat_text(p)
+    p.set_defaults(func=cmd_chat_reply)
+
+    p = sub.add_parser("chat-wait", help="sv-chat: wait up to --timeout seconds for sv's answer to a chat request")
+    p.add_argument("--state", required=True)
+    p.add_argument("--id", required=True)
+    p.add_argument("--timeout", type=float, default=120)
+    p.set_defaults(func=cmd_chat_wait)
 
     p = sub.add_parser("check-cwd", help="print busy or free for a non-git cwd")
     p.add_argument("--state", required=True)

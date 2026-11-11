@@ -1559,11 +1559,12 @@ class SetupTest(unittest.TestCase):
     def hooks(self, target, event="SessionStart"):
         return json.loads((target / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"][event]
 
-    def test_creates_six_files_with_matcher(self):
+    def test_creates_eight_files_with_matcher(self):
         target = self.root / "sup"
         proc = self.setup_dir(target)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(self.files(target), [".claude/settings.json", ".supervisor/state_tool.py", "CLAUDE.md", "state.json",
+        self.assertEqual(self.files(target), [".claude/settings.json", ".supervisor/state_tool.py", "CLAUDE.md",
+                                              "chat/.claude/settings.json", "chat/CLAUDE.md", "state.json",
                                               "vault/Supervisor.md", "vault/_templates/sv-status.md"])
         entries = self.hooks(target)
         self.assertEqual(len(entries), 1)
@@ -5740,6 +5741,98 @@ class WatchVaultTest(unittest.TestCase):
         self.assertEqual(st.cmd_watch_vault(args, runner=hc), 0)
         self.assertEqual(env.state_path.read_bytes(), before)
         self.assertEqual(hc.sent(), [])
+
+
+class ChatSessionTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.sup = Path(tmp.name).resolve() / "sup"
+        (self.sup / "chat").mkdir(parents=True)
+        self.state = self.sup / "state.json"
+        self.state.write_text("{}", encoding="utf-8")
+
+    def cli(self, *argv, runner=None):
+        out = io.StringIO()
+        args = st.build_parser().parse_args([*argv, "--state", str(self.state)])
+        with contextlib.redirect_stdout(out):
+            code = args.func(args, runner=runner) if runner else args.func(args)
+        return code, json.loads(out.getvalue())
+
+    def send(self, text, hc=None):
+        req = self.sup / "chat" / "request.txt"
+        req.write_text(text, encoding="utf-8")
+        return self.cli("chat-send", "--text-file", str(req), runner=hc or FakeHc())
+
+    def test_send_inbox_reply_wait(self):
+        hc = FakeHc()
+        self.assertEqual(self.send("README の typo を直して。PR まで作ってよい", hc), (0, {"id": "C-0001", "notified": True}))
+        self.assertEqual(self.send("T-0003 は止めて")[1]["id"], "C-0002")
+        self.assertEqual([c for c in hc.calls if c[1] == "send"], [["hc", "send", "sv", "chat: C-0001"]])
+        _, inbox = self.cli("chat-inbox")
+        self.assertEqual([(e["id"], e["text"], e["context"]) for e in inbox["entries"]],
+                         [("C-0001", "README の typo を直して。PR まで作ってよい", None), ("C-0002", "T-0003 は止めて", None)])
+        self.assertEqual(self.cli("chat-wait", "--id", "C-0001", "--timeout", "0")[1]["reply"], None)
+        self.assertEqual(self.cli("chat-reply", "--id", "C-0001", "--text", "T-0004 を作りました")[0], 0)
+        self.assertEqual([e["id"] for e in self.cli("chat-inbox")[1]["entries"]], ["C-0002"])
+        self.assertEqual(self.cli("chat-wait", "--id", "C-0001", "--timeout", "0")[1]["reply"], "T-0004 を作りました")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(st.main(["chat-reply", "--state", str(self.state), "--id", "C-0001", "--text", "again"]), 1)
+            self.assertEqual(st.main(["chat-wait", "--state", str(self.state), "--id", "../state"]), 1)
+
+    def test_send_without_sv_keeps_the_request(self):
+        failing = lambda argv: subprocess.CompletedProcess(argv, 1, "", "no terminal sv")
+        self.assertEqual(self.send("hello", failing)[1], {"id": "C-0001", "notified": False})
+        self.assertEqual([e["id"] for e in self.cli("chat-inbox")[1]["entries"]], ["C-0001"])
+
+    def test_empty_text_and_malformed_entries(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(st.main(["chat-send", "--state", str(self.state), "--text", "  "]), 1)
+        (self.sup / ".supervisor" / "chat").mkdir(parents=True)
+        (self.sup / ".supervisor" / "chat" / "C-0007.json").write_text("{", encoding="utf-8")
+        self.assertEqual(self.send("next")[1]["id"], "C-0008")
+        _, inbox = self.cli("chat-inbox")
+        self.assertEqual([e["id"] for e in inbox["entries"]], ["C-0008"])
+        self.assertEqual(len(inbox["warnings"]), 1)
+
+    def guard(self, payload):
+        return st.guard_decision(dict(payload, cwd=str(self.sup / "chat")), str(self.sup / "chat"), {}, "chat")
+
+    def test_guard_blocks_writes_outside_chat_and_every_change_command(self):
+        for path in (self.state, self.sup / "vault" / "2026" / "11" / "x.md", self.sup / ".supervisor" / "chat" / "C-0001.json",
+                     self.sup / "chat" / ".claude" / "settings.json"):
+            with self.subTest(path=path):
+                self.assertIn("chat-send", self.guard({"tool_name": "Write", "tool_input": {"file_path": str(path)}}))
+        self.assertIsNone(self.guard({"tool_name": "Write", "tool_input": {"file_path": "request.txt"}}))
+        for command in ("hc send w-0001 'push して'", "hc run --bg --label sv=worker claude x", "hc kill w-0001",
+                        "hc interrupt w-0001", "python3 ../.supervisor/state_tool.py commit --state ../state.json --candidate c",
+                        "python3 ../.supervisor/state_tool.py chat-reply --state ../state.json --id C-0001 --text x",
+                        "sh -c 'python3 ../.supervisor/state_tool.py setup --dir ..'", "git -C /repo push"):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.guard({"tool_name": "Bash", "tool_input": {"command": command}}))
+        for command in ("hc ls --all --json", "hc get sv --json", "hc read --lines 50 w-0001",
+                        "python3 ../.supervisor/state_tool.py chat-send --state ../state.json --text-file request.txt",
+                        "python3 ../.supervisor/state_tool.py chat-wait --state ../state.json --id C-0001",
+                        "python3 ../.supervisor/state_tool.py digest --state ../state.json"):
+            with self.subTest(command=command):
+                self.assertIsNone(self.guard({"tool_name": "Bash", "tool_input": {"command": command}}))
+        self.assertEqual(st.bash_violations("hc send w-0001 'continue'"), [])
+
+    def test_setup_installs_the_chat_guard_and_brief(self):
+        target = self.sup.parent / "fresh"
+        env = dict(os.environ, HOME=str(self.sup.parent / "home"))
+        proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        settings = json.loads((target / "chat" / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertIn(f"guard --dir {target / 'chat'} --role chat", command)
+        self.assertEqual(settings["model"], "opus")
+        brief = target / "chat" / "CLAUDE.md"
+        self.assertEqual(brief.read_bytes(), (SKILL / "assets" / "chat-CLAUDE.md").read_bytes())
+        brief.write_text("old", encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True, env=env)
+        self.assertIn(f"updated: {brief}", proc.stdout)
+        self.assertIn(f"exists: {target / 'chat' / '.claude' / 'settings.json'}", proc.stdout)
 
 
 class HcGuardTest(unittest.TestCase):
