@@ -2300,10 +2300,19 @@ def _op_ua_add(lines, op, now, rev, index, problems):
     errors = _ua_errors(ua)
     if errors:
         raise StateError(f"ua_add: {errors}")
+    if op.get("reply") is not None and ua["kind"] != "req":
+        raise StateError("ua_add: only a req item takes a reply")
     if _find_ua(lines, ua["id"]):
         return []
     _put_block(lines, _open_end(lines), render_ua_block(ua))
+    _reply(lines, op, ua["id"], now, rev, problems)
     return [ua["id"].lower()]
+
+
+def _reply(lines, op, ua_id, now, rev, problems):
+    """The agent's reply to a req item numbered in this same op, whose id the supervisor could not name in a ua_answer."""
+    if op.get("reply") is not None:
+        _op_ua_answer(lines, {"id": ua_id, "text": op["reply"]}, now, rev, None, problems)
 
 
 def _op_ua_ack(lines, op, now, rev, index, problems):
@@ -2380,6 +2389,7 @@ def _op_ua_adopt(lines, op, now, rev, index, problems):
     k = e["at"]
     blank = [""] if k + 1 < len(lines) and lines[k + 1].strip() else []
     lines[k:k + 1] = [f"### {_ua_title(ua)}", f"<!-- sv req since={ua.get('since') or now} -->"] + blank
+    _reply(lines, op, ua["id"], now, rev, problems)
     return [ua["id"].lower()]
 
 

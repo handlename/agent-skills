@@ -3808,6 +3808,26 @@ class ActionSectionTest(unittest.TestCase):
         with self.assertRaises(st.StateError):
             st.apply_note_ops(text, [{"op": "ua_adopt", "ua": {"id": "UA-0012", "description": "docs も見る"}}], NOTE_NOW, 13)
 
+    def test_agent_reply_goes_under_the_request_and_keeps_the_users_text(self):
+        lines = ["### @agent docs も見る", "", "本文 1", "", "##### 補足", "本文 2"]
+        text = actions_note(lines)
+        adopt = {"op": "ua_adopt", "ua": {"id": "AA-0010", "description": "docs も見る"}, "reply": "w-0141 に送りました"}
+        out, ids, problems = apply_twice(self, text, [adopt])
+        self.assertEqual((ids, problems), (["aa-0010"], []))
+        self.assertEqual(out, actions_note(["### [AA-0010] @agent docs も見る", f"<!-- sv req since={NOTE_NOW} -->"] + lines[1:]
+                                          + ["", "#### 回答", "w-0141 に送りました"]))
+        finish = [{"op": "ua_ack", "id": "AA-0010"}, {"op": "ua_answer", "id": "AA-0010", "text": "完了: 2 件直しました\nhttps://example.com/c/1"}]
+        done, _, problems = apply_twice(self, out, finish, rev=14)
+        self.assertEqual(problems, [])
+        ua = note_uas(done)["AA-0010"]
+        self.assertEqual((ua["done"], ua["body"]), (NOTE_NOW, "本文 1\n\n##### 補足\n本文 2"))
+        self.assertEqual(ua["answer"], "w-0141 に送りました\n\n完了: 2 件直しました\nhttps://example.com/c/1")
+        added = st.apply_note_ops(actions_note([]), [{"op": "ua_add", "ua": {"id": "AA-0011", "kind": "req", "description": "r", "body": "b"},
+                                                      "reply": "T-0200 として受け付けました"}], NOTE_NOW, 13)[0]
+        self.assertEqual((note_uas(added)["AA-0011"]["body"], note_uas(added)["AA-0011"]["answer"]), ("b", "T-0200 として受け付けました"))
+        with self.assertRaises(st.StateError):
+            st.apply_note_ops(text, [{"op": "ua_add", "ua": {"id": "UA-0012", "kind": "ask", "description": "q"}, "reply": "x"}], NOTE_NOW, 13)
+
     def test_ua_check_is_gone_and_missing_items_are_problems(self):
         text = note("task_managed")
         with self.assertRaises(st.StateError):
