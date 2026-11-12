@@ -5846,6 +5846,24 @@ class LaunchPlanTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--cwd") + 1], PROJECT_DIR)
         self.assertNotIn("env", argv)
 
+    def test_project_worker_starts_under_its_live_manager_without_notes(self):
+        state = fixture_state()
+        herdr_worker(state)
+        hc = lambda live: lambda argv: subprocess.CompletedProcess(
+            argv, 0, json.dumps({"address": "t9", "state": "live" if live else "finished"}), "")
+        self.assertIsNone(st.project_worker_parent(state, "w-0030", hc(True)))
+        add_project(state)
+        find(state["tasks"], "T-0030")["project_id"] = "P-0001"
+        self.assertEqual(st.project_worker_parent(state, "w-0030", hc(True)), "t9")
+        self.assertIsNone(st.project_worker_parent(state, "w-0030", hc(False)))
+        gone = lambda argv: subprocess.CompletedProcess(argv, 1, "", "not found")
+        self.assertIsNone(st.project_worker_parent(state, "w-0030", gone))
+        argv = st.launch_argv(state, "w-0030", "Fix it.", {}, "t9")
+        self.assertEqual(argv[argv.index("--parent"):argv.index("--parent") + 3], ["--parent", "t9", "--no-notify"])
+        self.assertIn("--outlive-parent", argv)
+        self.assertEqual(argv[-1], "Fix it.")
+        self.assertNotIn("--parent", st.launch_argv(state, "w-0030", "Fix it.", {}))
+
     def test_refusals(self):
         state = fixture_state()
         w = herdr_worker(state)
@@ -5936,6 +5954,16 @@ class ManagerHcRowsTest(unittest.TestCase):
         self.assertIn({"decision": "pending_approval", "session_id": SID}, decisions)
         self.assertIn({"decision": "handle_turn", "message_ref": "a9"}, decisions)
         self.assertNotIn("old", [d.get("session_id") for d in decisions])
+
+    def test_supervisor_workers_under_the_manager_are_not_foreign(self):
+        terminals = [
+            {"address": "t5", "name": "m-p-0001", "state": "live", "status": "done"},
+            {"address": "t6", "name": "w-0030", "parent": "t5", "state": "live", "status": "working"},
+            {"address": "t7", "name": "helper", "parent": "t5", "state": "live", "status": "working"},
+        ]
+        rows = st.manager_rows_from_hc(self.manager(), "m-p-0001", terminals, {"w-0030"})
+        foreign = [d["session_id"] for d in st.manager_reconcile(self.manager(), rows) if d["decision"] == "foreign_session"]
+        self.assertEqual(foreign, ["helper"])
 
     def test_finished_and_missing_manager(self):
         finished = [{"address": "t5", "name": "m-p-0001", "state": "finished"}]

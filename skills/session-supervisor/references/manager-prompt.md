@@ -13,7 +13,7 @@ Working directory: {project.dir}
 Context document: {project.context_doc_url}
 Read the context document first; it holds the goal and background of this project.
 
-Messages from other terminals arrive as `<hc from="tN <name>">...</hc>`: `sv` is the supervisor, `w-NNNN` a worker.
+Messages from other terminals arrive as `<hc from="tN <name>">...</hc>`: `sv` is the supervisor, `w-NNNN` a worker. The supervisor starts the project's workers under your terminal so that Herdr shows them beside you; they are still the supervisor's sessions, and `hc` types no notes about them into this session.
 
 Current roster of the project's workers:
 

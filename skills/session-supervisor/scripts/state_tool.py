@@ -4639,8 +4639,9 @@ def _herdr_target(state, ident):
     raise StateError(f"{ident} is neither a worker id nor a manager handle (m-p-NNNN)")
 
 
-def launch_argv(state, ident, prompt, herdr):
-    """The `hc run` argv that starts the herdr worker or manager `ident`. herdr: parsed `## Herdr` values."""
+def launch_argv(state, ident, prompt, herdr, parent=None):
+    """The `hc run` argv that starts the herdr worker or manager `ident`. herdr: parsed `## Herdr` values. parent: the
+    terminal address to start it under instead of `sv` (a project worker under its manager, `project_worker_parent`)."""
     kind, session, cwd, label = _herdr_target(state, ident)
     if session.get("runtime") != "herdr" or session.get("handle") != ident:
         raise StateError(f"{ident} must have runtime 'herdr' and handle {ident!r} in the state before launch")
@@ -4662,6 +4663,10 @@ def launch_argv(state, ident, prompt, herdr):
             raise StateError(f"max_workers {limit} reached ({', '.join(running)}); start {ident} after one finishes")
     argv = ["hc", "run", "--bg", "--json", "--name", ident, "--cwd", cwd, "--label", f"sv={kind}", "--label", label,
             "--outlive-parent"]
+    if parent:
+        # Shown under its manager in Herdr; hc's own blocked / exit notes would go to the manager's input box, so they
+        # are off and sv-watch forwards those changes to sv (its parent is not sv).
+        argv += ["--parent", parent, "--no-notify"]
     if herdr.get("worker_path"):
         argv += ["env", f"PATH={herdr['worker_path']}"]
     argv += ["claude", "--session-id", sid]
@@ -4672,6 +4677,20 @@ def launch_argv(state, ident, prompt, herdr):
     return argv
 
 
+def project_worker_parent(state, ident, runner):
+    """Address of the live manager terminal of the project of worker `ident`, or None (not a project worker, or the
+    manager is not live: the worker then starts under `sv`)."""
+    worker = next((w for w in state.get("workers", []) if w.get("id") == ident), None)
+    task = next((t for t in state.get("tasks", []) if worker and t.get("id") == worker.get("task_id")), None)
+    if not (task and task.get("project_id")):
+        return None
+    try:
+        got = _hc_json(runner, ["hc", "get", manager_handle(task["project_id"]), "--json"])
+    except (StateError, OSError, ValueError):
+        return None
+    return got.get("address") if got.get("state") == "live" else None
+
+
 def cmd_launch_plan(args):
     state = _read_json(args.state)
     text = Path(args.claude_md).read_text(encoding="utf-8") if os.path.exists(args.claude_md) else ""
@@ -4679,7 +4698,7 @@ def cmd_launch_plan(args):
     if errors:
         raise StateError(errors)
     prompt = Path(args.prompt_file).read_text(encoding="utf-8")
-    argv = launch_argv(state, args.worker, prompt, herdr)
+    argv = launch_argv(state, args.worker, prompt, herdr, project_worker_parent(state, args.worker, _run_hc))
     if args.run:
         # Run here so the prompt never becomes Bash text, which the guard would scan for blocked commands.
         return subprocess.run(argv).returncode
@@ -4788,9 +4807,10 @@ def cmd_last_message(args):
     return 0
 
 
-def manager_rows_from_hc(manager, handle, terminals):
+def manager_rows_from_hc(manager, handle, terminals, workers=()):
     """manager-reconcile rows from `hc ls --all --json` terminals: the manager's own row (by terminal name) and a
-    row for each live terminal it started, so its agents show up as foreign sessions."""
+    row for each live terminal it started, so its agents show up as foreign sessions. workers: handles of the
+    supervisor's workers, which launch-plan starts under their manager and are not foreign."""
     sid = manager.get("session_id")
     rows = []
     own = next((t for t in terminals if t.get("name") == handle), None)
@@ -4800,7 +4820,8 @@ def manager_rows_from_hc(manager, handle, terminals):
         rows.append({"session_id": sid, "running": word == "working", "archived": own.get("state") == "finished",
                      "blocked": word == "blocked"})
         rows += [{"session_id": t.get("name") or t.get("address"), "started_by": sid, "running": True}
-                 for t in terminals if t.get("parent") == own.get("address") and t.get("state") == "live"]
+                 for t in terminals if t.get("parent") == own.get("address") and t.get("state") == "live"
+                 and t.get("name") not in workers]
     return rows
 
 
@@ -4947,9 +4968,11 @@ def cmd_waits(args):
 
 
 def cmd_manager_reconcile(args):
-    project = _project(_load_view(args.state), args.project)
+    view = _load_view(args.state)
+    project = _project(view, args.project)
     data = _read_json(args.from_file) if args.from_file else _hc_json(_run_hc, ["hc", "ls", "--all", "--json"])
-    rows = manager_rows_from_hc(project["manager"], manager_handle(project["id"]), data.get("terminals", []))
+    workers = {w.get("handle") for w in view.get("workers", []) if w.get("runtime") == "herdr"}
+    rows = manager_rows_from_hc(project["manager"], manager_handle(project["id"]), data.get("terminals", []), workers)
     events = {"last_message_ref": args.last_message_ref, "pending_approval": any(r.get("blocked") for r in rows)}
     print(json.dumps(manager_reconcile(project["manager"], rows, events), ensure_ascii=False))
     return 0
