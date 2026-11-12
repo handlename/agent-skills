@@ -1,0 +1,44 @@
+/* session-supervisor: wrap the title and summary of Bases kanban cards onto several lines.
+
+   The kanban gives every card one height, which it measures from a hidden test card whose
+   properties have no data-property attribute, and places each property at a fixed offset.
+   This snippet lets the properties flow instead, and makes the test card's title tall enough
+   to hold the extra lines, so a long title or summary uses the room a short one leaves.
+   Every card keeps the same height: a card with a short title and summary has space at the bottom. */
+
+body {
+  --sv-kanban-line: 20px;
+  --sv-kanban-title-lines: 3;
+  --sv-kanban-summary-lines: 4;
+}
+
+.bases-kanban-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.bases-kanban-card-property[data-property] {
+  position: static !important;
+  height: auto !important;
+  flex: none;
+}
+
+.bases-kanban-card-property.mod-title:not([data-property]) {
+  height: calc((var(--sv-kanban-title-lines) + var(--sv-kanban-summary-lines)) * var(--sv-kanban-line)
+    - var(--bases-kanban-line-height));
+}
+
+.bases-kanban-card-property.mod-title[data-property] .bases-kanban-card-line,
+.bases-kanban-card-property[data-property="summary"] .bases-kanban-card-line {
+  height: auto;
+  line-height: var(--sv-kanban-line);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--sv-kanban-summary-lines);
+}
+
+.bases-kanban-card-property.mod-title[data-property] .bases-kanban-card-line {
+  -webkit-line-clamp: var(--sv-kanban-title-lines);
+}

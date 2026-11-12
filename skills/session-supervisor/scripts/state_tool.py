@@ -4317,8 +4317,8 @@ def legacy_supervisor_notes(templates):
 
 def _setup_vault(supervisor_dir):
     """Create the dashboard note when it is missing; never overwrite it unless it is an unedited earlier version. Templates are built with the user (section 3),
-    except the Templater scripts sv-status.md and sv-project.md, which are placed in the template folder (created,
-    exists or updated)."""
+    except the Templater scripts sv-status.md and sv-project.md, which are placed in the template folder, and the CSS
+    snippet sv-kanban.css in .obsidian/snippets (created, exists or updated)."""
     vault, dashboard, templates = vault_locations(supervisor_dir)
     files = ((Path(vault) / dashboard, supervisor_note(templates)),)
     report = []
@@ -4333,8 +4333,12 @@ def _setup_vault(supervisor_dir):
             _write_atomic(str(path), text)
             report.append(("created", path))
     # The scripts are overwritten like .supervisor/state_tool.py, so sv-status's MOVES stay in step with user_transition.
-    for name in ("sv-status.md", "sv-project.md"):
-        src, dest = HERE.parent / "assets" / name, Path(vault) / templates / name
+    # The kanban snippet goes only into a vault Obsidian has opened; setup never creates .obsidian.
+    copies = [(name, Path(vault) / templates / name) for name in ("sv-status.md", "sv-project.md")]
+    if (Path(vault) / ".obsidian").is_dir():
+        copies.append(("sv-kanban.css", Path(vault) / ".obsidian" / "snippets" / "sv-kanban.css"))
+    for name, dest in copies:
+        src = HERE.parent / "assets" / name
         if not src.exists():
             report.append(("skipped", dest))
             continue

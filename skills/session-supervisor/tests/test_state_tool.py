@@ -5348,6 +5348,23 @@ class SetupVaultTest(unittest.TestCase):
                 self.assertEqual(shortcut.read_text(encoding="utf-8"), asset)
             self.assertEqual(reports, ["created", "exists", "updated"])
 
+    def test_places_the_kanban_snippet_only_in_an_opened_vault(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "sup"
+            snippet = target / "vault" / ".obsidian" / "snippets" / "sv-kanban.css"
+            asset = (SKILL / "assets" / "sv-kanban.css").read_text(encoding="utf-8")
+            reports = []
+            for change in (None, "obsidian", None, "mine\n"):
+                if change == "obsidian":
+                    (target / "vault" / ".obsidian").mkdir()
+                elif change:
+                    snippet.write_text(change, encoding="utf-8")
+                proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                reports += [l.split(":")[0] for l in proc.stdout.splitlines() if l.endswith("sv-kanban.css")]
+            self.assertEqual(snippet.read_text(encoding="utf-8"), asset)
+            self.assertEqual(reports, ["created", "exists", "updated"])
+
 
 class DigestFallbackTest(unittest.TestCase):
     def test_missing_vault_and_held_notes(self):
