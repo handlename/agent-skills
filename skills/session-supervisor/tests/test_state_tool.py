@@ -5394,6 +5394,7 @@ class ParentProjectTest(unittest.TestCase):
         self.assertTrue(text.endswith("-%>\n"))
         self.assertIn("(プロジェクトなし)", text)
         self.assertIn("app.fileManager.renameFile(file, dest)", text)
+        self.assertIn("tp.system.prompt(\"タイトル\"", text)
 
 
 class ProposalNoteTest(unittest.TestCase):
