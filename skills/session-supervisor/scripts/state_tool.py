@@ -75,12 +75,13 @@ PR_URL_RE = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)/?$", re.I)
 NOTE_STATUSES = ("backlog", "in progress", "pending", "done", "archived")
 ASSIGNEES = ("user", "agent")
 NOTE_KEYS = ("uid", "title", "para", "aliases", "created_at", "archived_at", "tags", "start_date", "due_date",
-             "pending_until", "completed_at", "status", "assignee", "summary", "task_id", "project_id", "parent", "proposed_by",
+             "pending_until", "completed_at", "status", "assignee", "summary", "subtasks", "task_id", "project_id", "parent", "proposed_by",
              "follows")
 NOTE_RAW_KEYS = ("created_at", "archived_at")
 NOTE_SUMMARY_MAX = 80
-NOTE_SECTIONS = ("概要", "アクション", "サブタスク", "関連ノート", "関連資料", "成果物", "ログ")
+NOTE_SECTIONS = ("概要", "サブタスク", "アクション", "関連ノート", "関連資料", "成果物", "ログ")
 UA_SECTION = "アクション"
+ST_SECTION = "サブタスク"
 ART_SECTION = "成果物"
 LOG_SECTION = "ログ"
 UA_KINDS = ("ask", "auto", "req")
@@ -91,7 +92,7 @@ UA_META_KEYS = ("rule", "url", "since")
 HOLD_REASONS = ("pause", "invalid")
 SEEN_KEYS = ("status", "assignee", "ua_sha", "art_sha")
 NOTE_MOVED_KEYS = {
-    "tasks": ("title", "request", "status", "user_actions", "agent_actions", "followups", "artifacts"),
+    "tasks": ("title", "request", "status", "user_actions", "agent_actions", "followups", "artifacts", "subtasks"),
     "projects": ("name", "context_doc_url", "user_actions"),
     "archived": ("title", "request", "followups", "artifacts"),
 }
@@ -109,6 +110,11 @@ UA_DONE_RE = re.compile(r"^> - \[((?:UA|AA)-\d+)\] @(?:user|agent) (.*?) <!-- sv
 UA_CALLOUT_RE = re.compile(r"^> \[!done\]- 完了 \((\d+)\)[ \t]*$")
 UA_ANSWER_RE = re.compile(r"^#### 回答[ \t]*$")
 UA_ANSWER_DETECTORS = ("worker_report", "pr_closed")
+ST_ID_RE = re.compile(r"^ST-(\d+)$")
+# A subtask is a top-level checklist line of `## サブタスク`: `- [ ] [ST-NNNN] @agent|@user text (w-NNNN sha)`. The id,
+# the assignee and the trailing worker mark are optional; state_tool writes the id and the mark.
+ST_LINE_RE = re.compile(r"^- \[([ xX])\] (?:\[(ST-\d+)\] )?(?:@(agent|user)(?: |$))?(.*?)"
+                        r"(?: \((w-\d+)(?: ([0-9a-f]{7,40}))?\))?[ \t]*$")
 QUOTE_HEAD = "> [!quote]- 依頼の原文"
 ART_COMMENT_RE = re.compile(r"<!--[ \t]*sv-art[ \t]+(.*?)[ \t]*-->")
 
@@ -568,6 +574,10 @@ def derive_status(task, workers_by_id):
         return "running"
     if any(o == "none" for o in observed):
         return "waiting"
+    # A numbered subtask left unchecked when the workers are done (a @user one, or one the user reopened) is the user's
+    # turn: the user checks it, or hands the note back to the agent with it unchecked to have it done.
+    if any(not st.get("done") for st in task.get("subtasks", [])):
+        return "needs_user"
     # Workers given up as missing deliver nothing, and a replaced worker was never verified;
     # without one verified archive the task needs a replacement or a cancel. An investigation
     # worker that went missing while held has its verified findings, so it counts as finished.
@@ -1572,6 +1582,9 @@ def parse_report(text, expect_task=None, expect_worker=None, allow_awaiting_mana
     if not isinstance(answered, list) or not all(
             isinstance(a, dict) and all(isinstance(a.get(k), str) and a[k].strip() for k in ("question", "answer")) for a in answered):
         return {"ok": False, "error": "answered must be a list of {question, answer} with non-empty strings"}
+    done_sts = report.get("subtasks_done", [])
+    if not isinstance(done_sts, list) or not all(isinstance(i, str) and ST_ID_RE.match(i) for i in done_sts):
+        return {"ok": False, "error": "subtasks_done must be a list of ST-NNNN ids"}
     confirmed = _read_confirmed_errors(report)
     if confirmed:
         return {"ok": False, "error": confirmed[0]}
@@ -2132,6 +2145,29 @@ def ua_open(ua):
     return not ua.get("done")
 
 
+def _st_match(line):
+    m = ST_LINE_RE.match(line)
+    return m if m and m.group(4).strip() else None
+
+
+def _st_item(m):
+    return {"id": m.group(2), "done": m.group(1) != " ", "assignee": m.group(3) or "agent", "text": m.group(4).strip(),
+            "worker": m.group(5), "commit": m.group(6)}
+
+
+def parse_subtasks(section_text):
+    """Subtasks of a `## サブタスク` section in line order: {id, done, assignee, text, worker, commit}. id is None for a
+    line the supervisor has not numbered yet, and a line without @ is the agent's. Indented lines, fenced blocks and
+    comments are the user's notes."""
+    return [_st_item(m) for m in map(_st_match, _strip_ignored((section_text or "").split("\n"))) if m]
+
+
+def subtask_progress(text):
+    """The subtasks prop of a note (checked/all, e.g. 2/5), or None when its `## サブタスク` has no checklist line."""
+    sts = parse_subtasks(parse_sections(parse_frontmatter(text)[1]).get(ST_SECTION, ""))
+    return f"{sum(st['done'] for st in sts)}/{len(sts)}" if sts else None
+
+
 def _ua_tokens(ua):
     meta = [f"auto={ua['detector']}" if ua["kind"] == "auto" else ua["kind"]]
     if ua.get("answer_required"):
@@ -2331,6 +2367,8 @@ def _insert_in_section(lines, title, new_lines):
 def _has_block(lines, block_id):
     if re.fullmatch(r"(?:ua|aa)-\d+", block_id):
         return _find_ua(lines, block_id.upper()) is not None
+    if re.fullmatch(r"st-\d+", block_id):
+        return _find_st(lines, block_id.upper()) is not None
     pattern = re.compile(rf"\^{re.escape(block_id)}[ \t]*$")
     return any(pattern.search(line) for line in lines)
 
@@ -2343,6 +2381,40 @@ def _find_ua(lines, ua_id):
         return None
     return next((e for e in _ua_layout(lines, span[0] + 1, span[1])[0]
                  if e["ua"]["id"] and _ua_number(e["ua"]["id"]) == number), None)
+
+
+def _st_lines(lines):
+    """(index, match) of each subtask line of `## サブタスク`."""
+    span = _section_span(lines, ST_SECTION)
+    if not span:
+        return []
+    stripped = _strip_ignored(lines[span[0] + 1:span[1]])
+    return [(span[0] + 1 + k, m) for k, m in enumerate(map(_st_match, stripped)) if m]
+
+
+def _find_st(lines, st_id):
+    return next(((i, m) for i, m in _st_lines(lines) if m.group(2) == st_id), None)
+
+
+def _render_st(done, st_id, who, text, worker=None, commit=None):
+    mark = f" ({worker}{' ' + commit if commit else ''})" if worker else ""
+    return f"- [{'x' if done else ' '}] [{st_id}] {'@' + who + ' ' if who else ''}{text}{mark}"
+
+
+def _st_errors(name, st, fields=("id", "text")):
+    errors = []
+    if "id" in fields and not (isinstance(st.get("id"), str) and ST_ID_RE.match(st["id"])):
+        errors.append(f"invalid subtask id {st.get('id')!r}")
+    if "text" in fields and (not isinstance(st.get("text"), str) or not st["text"].strip() or "\n" in st["text"]):
+        errors.append("subtask text must be one non-empty line")
+    if st.get("assignee") is not None and st["assignee"] not in ASSIGNEES:
+        errors.append(f"subtask assignee must be one of {list(ASSIGNEES)}")
+    if st.get("worker") is not None and not re.fullmatch(r"w-\d+", str(st["worker"])):
+        errors.append(f"invalid worker {st['worker']!r}")
+    if st.get("commit") is not None and not re.fullmatch(r"[0-9a-f]{7,40}", str(st["commit"])):
+        errors.append(f"commit must be a hex sha, got {st['commit']!r}")
+    if errors:
+        raise StateError(f"{name}: {errors}")
 
 
 def _put_block(lines, pos, block):
@@ -2494,6 +2566,49 @@ def _op_ua_adopt(lines, op, now, rev, index, problems):
     return [ua["id"].lower()]
 
 
+def _op_st_adopt(lines, op, now, rev, index, problems):
+    st = op.get("st") or {}
+    _st_errors("st_adopt", st)
+    if _find_st(lines, st["id"]):
+        return []
+    found = next(((i, m) for i, m in _st_lines(lines) if m.group(2) is None and m.group(4).strip() == st["text"].strip()), None)
+    if found is None:
+        problems.append(f"st_adopt {st['id']}: no unnumbered subtask {st['text']!r}")
+        return []
+    i, m = found
+    lines[i] = lines[i][:6] + f"[{st['id']}] " + lines[i][6:]
+    return [st["id"].lower()]
+
+
+def _op_st_add(lines, op, now, rev, index, problems):
+    st = op.get("st") or {}
+    _st_errors("st_add", st)
+    if _find_st(lines, st["id"]):
+        return []
+    _insert_in_section(lines, ST_SECTION, [_render_st(False, st["id"], st.get("assignee"), st["text"].strip())])
+    return [st["id"].lower()]
+
+
+def _op_st_set(lines, op, now, rev, index, problems):
+    """Sets the given fields of a subtask line: done (the checkbox), assignee, worker and commit (the trailing mark;
+    worker null removes it). Fields left out keep their value, so the op can be applied again."""
+    _st_errors("st_set", op, fields=("id",))
+    found = _find_st(lines, op["id"])
+    if found is None:
+        problems.append(f"st_set {op['id']}: subtask not found")
+        return []
+    i, m = found
+    cur = _st_item(m)
+    done = op["done"] if "done" in op else cur["done"]
+    who = op["assignee"] if op.get("assignee") else m.group(3)
+    worker = op["worker"] if "worker" in op else cur["worker"]
+    commit = op["commit"] if "commit" in op else (cur["commit"] if worker == cur["worker"] else None)
+    if commit and not worker:
+        raise StateError(f"st_set {op['id']}: a commit needs the worker that made it")
+    lines[i] = _render_st(bool(done), op["id"], who, cur["text"], worker, commit)
+    return []
+
+
 def _op_art_add(lines, op, now, rev, index, problems):
     items = op.get("items") or []
     g = op.get("g") or (items[0].get("n") if items else None)
@@ -2558,6 +2673,7 @@ def _op_art_replace_group(lines, op, now, rev, index, problems):
 _NOTE_BODY_OPS = {
     "log": _op_log, "ua_add": _op_ua_add, "ua_answer": _op_ua_answer, "ua_ack": _op_ua_ack, "ua_adopt": _op_ua_adopt,
     "art_add": _op_art_add, "art_set": _op_art_set, "art_replace_group": _op_art_replace_group,
+    "st_adopt": _op_st_adopt, "st_add": _op_st_add, "st_set": _op_st_set,
 }
 
 
@@ -2674,6 +2790,8 @@ def join_view(state, notes):
     sup = view["supervisor"]
     numbers = [_ua_number(ua["id"]) for _, sections, _ in parsed.values()
                for ua in parse_user_actions(sections.get(UA_SECTION, "")) if ua["id"]]
+    numbers += [_id_number(ST_ID_RE, st["id"]) for _, sections, _ in parsed.values()
+                for st in parse_subtasks(sections.get(ST_SECTION, "")) if st["id"]]
     sup["last_ua_number"] = max(numbers + [sup.get("last_ua_number", 0)])
     for project in view.get("projects", []):
         props, sections, _ = parsed.get(project.get("uid"), empty)
@@ -2690,6 +2808,7 @@ def join_view(state, notes):
                     user_actions=(_view_user_actions(sections.get(UA_SECTION))
                                   + [_held_action(task, wid) for wid in task.get("held", [])]),
                     agent_actions=_view_agent_actions(sections.get(UA_SECTION)),
+                    subtasks=[st for st in parse_subtasks(sections.get(ST_SECTION)) if st["id"]],
                     last_artifact_number=max([i["n"] for i in items] + [task.get("last_artifact_number", 0)]))
         task["status"] = derive_status(task, workers_by_id)
         if isinstance(task.get("proposal"), dict):
@@ -3029,6 +3148,9 @@ def number_note_ops(ops, next_ua, art_last):
         last = art_last.get(uid, 0)
         filled = []
         for op in copy.deepcopy(ops[uid]):
+            if op.get("op") in ("st_add", "st_adopt") and not (op.get("st") or {}).get("id"):
+                op.setdefault("st", {})["id"] = f"ST-{next_ua:04d}"
+                next_ua += 1
             if op.get("op") in ("ua_add", "ua_adopt") and not (op.get("ua") or {}).get("id"):
                 req = op["op"] == "ua_adopt" or (op.get("ua") or {}).get("kind") == "req"
                 op.setdefault("ua", {})["id"] = f"{'AA' if req else 'UA'}-{next_ua:04d}"
@@ -3951,7 +4073,10 @@ def _commit_v2(args, current):
                 props[uid] = changes
             except StateError as e:
                 problems.append(f"{paths[uid]}: props not written ({e})")
+    task_uids = {t.get("uid") for key in ("tasks", "archived") for t in view_new.get(key, [])}
     for uid, ids in id_props(view_new).items():
+        if uid in task_uids and after.get(uid):
+            ids = dict(ids, subtasks=subtask_progress(after[uid]))
         changes = _id_changes(after[uid], ids) if after.get(uid) else {}
         if changes:
             try:
@@ -4137,7 +4262,7 @@ def cmd_setup(args):
     return 0
 
 
-KANBAN_ORDER = "[formula.title, summary, task_id, project_id, created_at]"
+KANBAN_ORDER = "[formula.title, summary, subtasks, task_id, project_id, created_at]"
 
 
 def _kanban_base(name, filters, templates, order=KANBAN_ORDER):
@@ -4830,13 +4955,18 @@ def _ua_summary(ua):
 
 def _scan_ctx(kind, item, view_item, workers, live, duplicate, items):
     uas = (view_item or {}).get("user_actions") or []
+    # done/user confirms a task whose open items are only held results and the completion ask, or, with nothing open,
+    # whose workers are done (the user checked the last @user subtask): anything else open is cancelled (row 15).
+    rest = dict(view_item or {}, user_actions=[], subtasks=[])
+    settled = (kind == "task" and not any(not st["done"] for st in (view_item or {}).get("subtasks", []))
+               and (bool(uas) or derive_status(rest, {w["id"]: w for w in workers}) == "done"))
     if kind == "project":
         active = _occupies(item.get("manager") or {})
     else:
         active = any(_occupies(w) for w in workers if w.get("task_id") == item.get("id"))
     ctx = {"managed": True, "live": live, "kind": kind, "active": active, "duplicate": duplicate,
            "hold": (item.get("user_hold") or {}).get("reason"), "open_ua": bool((view_item or {}).get("user_actions")),
-           "held_only": bool(uas) and all(_read_action_worker(ua) or ua.get("detector") == "task_done" for ua in uas),
+           "held_only": settled and all(_read_action_worker(ua) or ua.get("detector") == "task_done" for ua in uas),
            "done_proposed": bool(item.get("done_proposed"))}
     needs = artifact_needs(view_item, workers, items) if live and kind == "task" and view_item else []
     return dict(ctx, artifacts_ok=not needs), needs
@@ -4887,6 +5017,8 @@ def notes_scan(state, texts, uids, vault=None):
                 continue
         event = dict(result, uid=uid, path=rels[0], id=item.get("id"), kind=kind, live=live, seen=seen, cur=cur,
                      user_actions=[_ua_summary(u) for u in parse_user_actions(body.get(UA_SECTION, ""))])
+        if kind == "task":
+            event["subtasks"] = parse_subtasks(body.get(ST_SECTION, ""))
         if needs:
             event["needs"] = needs
         if warning:
@@ -4922,6 +5054,8 @@ def notes_scan(state, texts, uids, vault=None):
                      parent=props.get("parent"), project_id=parent_project_id(state, props.get("parent")),
                      proposed_by=props.get("proposed_by"), follows=props.get("follows"),
                      user_actions=[_ua_summary(u) for u in parse_user_actions(sections.get(UA_SECTION, ""))])
+        if kind == "task":
+            event["subtasks"] = parse_subtasks(sections.get(ST_SECTION, ""))
         if uid is None and vault:
             event["proposed_uid"] = _proposed_uid(os.path.join(vault, rel), taken)
             taken.add(event["proposed_uid"])
@@ -4949,7 +5083,7 @@ def _former_follow_up(uid, rel, kind, props, body, cur):
     return {"event": "follow_up", "row": 16, "ack": cur, "clear_invalid": False, "uid": uid, "path": rel, "kind": kind,
             "live": False, "former": True, "cur": cur, "title": props.get("title"),
             "request": _request_text(sections.get("概要")), "last_artifact_number": max([r["n"] for r in rows] + [0]),
-            "user_actions": [_ua_summary(u) for u in uas]}
+            "user_actions": [_ua_summary(u) for u in uas], "subtasks": parse_subtasks(sections.get(ST_SECTION, ""))}
 
 
 def cmd_notes_scan(args):
@@ -5129,6 +5263,7 @@ def cmd_note_show(args):
                       "request": _request_text(sections.get("概要")), "lang": note_lang(_request_text(sections.get("概要"))),
                       "user_actions": [_ua_summary(u) for u in uas],
                       "requests": [_ua_summary(u) for u in uas if u["kind"] == "req" and ua_open(u)],
+                      "subtasks": parse_subtasks(sections.get(ST_SECTION, "")),
                       "artifacts": items, "artifact_problems": problems}, ensure_ascii=False))
     return 0
 

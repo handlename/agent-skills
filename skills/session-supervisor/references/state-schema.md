@@ -151,7 +151,7 @@ The example is a snapshot of the v1 view for illustration: `w-0005` and `w-0006`
 
 | Object | From the note (not stored) | Added runtime fields |
 | :--- | :--- | :--- |
-| `tasks[]` | `title` (note `title`), `request` (the `> [!quote]- 依頼の原文` callout of `## 概要` when present, otherwise `## 概要`), `status` (derived), `user_actions` (open `@user` items of `## アクション`: kinds `ask` and `auto`), `agent_actions` (open numbered `@agent` items: kind `req`), `followups` (always empty; follow-up requests are `req` items), `artifacts` (`## 成果物` rows numbered `art_from` or later) | `uid`, `note` (path relative to the vault), `note_seen`, `user_hold`, `confirmed`, `held`, `kept`, `last_artifact_number`, `art_from`, `artifacts_quarantine` |
+| `tasks[]` | `title` (note `title`), `request` (the `> [!quote]- 依頼の原文` callout of `## 概要` when present, otherwise `## 概要`), `status` (derived), `user_actions` (open `@user` items of `## アクション`: kinds `ask` and `auto`), `agent_actions` (open numbered `@agent` items: kind `req`), `followups` (always empty; follow-up requests are `req` items), `artifacts` (`## 成果物` rows numbered `art_from` or later), `subtasks` (the numbered lines of `## サブタスク`, see Subtasks) | `uid`, `note` (path relative to the vault), `note_seen`, `user_hold`, `confirmed`, `held`, `kept`, `last_artifact_number`, `art_from`, `artifacts_quarantine` |
 | `projects[]` | `name` (note `title`), `context_doc_url` (first URL of `## 概要` / `## 関連資料`), `user_actions` | `uid`, `note`, `note_seen`, `user_hold`, `done_proposed`, `confirmed` |
 | `archived[]` | `title`, `request`, `followups`, `artifacts` (all rows, or the rows before the `art_from` of a revived task with the same id) | `uid`, `note_seen`, `last_artifact_number`; `project` is stored as `{id}` |
 | `supervisor` | — | `last_ua_number`, `note_warnings: {uid: sha}`, `note_journal: {rev, entries}` |
@@ -174,7 +174,7 @@ Runtime fields:
 
 In the view, an open user action also carries `detector` (for `auto=<detector>` items) and `needs_answer: true` (for `ask answer` items).
 
-`commit --notes <ops.json>` (ops `{uid: [op, ...]}`) re-applies the previous commit's unconfirmed note writes once, checks that every ack copied into `note_seen` still matches its note, fills missing action ids (`UA-` or `AA-` by kind, `ua_adopt` included) and artifact numbers, applies the ops in memory, runs `next_state` on the views, derives note props (for the tasks archived in this commit from the candidate's task), writes `state.json` with `note_journal`, and only then writes the notes. Its output adds `notes_written`, `notes_deferred`, `notes_failed`, and `note_problems`. A `state.json` still at `schema_version: 1` keeps the v1 commit until it is migrated.
+`commit --notes <ops.json>` (ops `{uid: [op, ...]}`) re-applies the previous commit's unconfirmed note writes once, checks that every ack copied into `note_seen` still matches its note, fills missing action ids (`UA-` or `AA-` by kind, `ua_adopt` included), subtask ids (`ST-`, for `st_add` and `st_adopt`) and artifact numbers, applies the ops in memory, runs `next_state` on the views, derives note props (for the tasks archived in this commit from the candidate's task), writes `state.json` with `note_journal`, and only then writes the notes. Its output adds `notes_written`, `notes_deferred`, `notes_failed`, and `note_problems`. A `state.json` still at `schema_version: 1` keeps the v1 commit until it is migrated.
 
 The vault is `vault` of `## Locations` in `<dir>/CLAUDE.md` (default `<dir>/vault`); its `dashboard` note and `templates` folder are never read as notes. A task note is tagged `supervised`, a project note `supervised`, `project`, `task` (`note_kind`).
 
@@ -349,6 +349,7 @@ Idempotency uses `message_ref`: if the latest message's id equals `last_report.m
 1. `needs_user`: the task's `user_actions` is not empty, or some worker is observed `archived` while its `intended_state` is not `archived` (archived outside the supervisor; cleared when the supervisor verifies the result and sets `intended_state: archived`).
 2. `running`: some worker has `observed_state` in `running` / `idle` / `needs_input`, or is `missing` while its `intended_state` is not `archived`. A `missing` worker with `intended_state: archived` counts as finished, and so does a worker in its task's `kept`.
 3. `waiting`: only unstarted workers (`observed_state == none`) remain.
+3a. `needs_user`: a numbered subtask is unchecked (an `@user` one, or one the user reopened; see Subtasks). Running and waiting workers come first, so unchecked subtasks of a task at work change nothing.
 4. `done`: every worker is finished: observed `archived`, `missing` with `intended_state: archived`, or kept (it counts as verified-archived). A worker with `replaced_by` is not counted as verified-archived by the final fallback of this rule: a task whose only remaining workers are replaced external-archive workers and replacements that gave up as `missing` derives `needs_user`, not `done`. A `missing` worker with `intended_state: archived`, no `replaced_by`, and an entry in its task's `findings` (a held investigation worker that vanished, SKILL.md 6.4) counts as verified-archived. Its `findings` entry carried into the stub is its last verified conclusion, or the previous generation's when it vanished during later work.
 
 Before deriving, `commit` maintains two automatic user actions, the only ones the supervisor never edits. The first is the waiting-task action. When a non-git `cwd` is occupied in current and free in the candidate, every task with a `pending` / `none` non-git worker on that `cwd` gets `Waiting task T-xxxx can start now: send any message to the supervisor to start it.`, or `待機中のタスク T-xxxx を開始できます: supervisor に何かメッセージを送ると開始します。` when the task's request contains Japanese (`note_lang`); it is added once and matched by its `start_possible` detector or by either exact description. `commit` removes it from a task as soon as that task has no startable worker (non-git, `pending` / `none`, `cwd` free in the candidate): the worker was started or removed, or the `cwd` is busy again because another waiting task on it started. The supervisor never adds or removes this user action itself.
@@ -381,7 +382,24 @@ Props are written only when the note's current values equal the candidate's `not
 
 Every commit also writes `task_id` and `project_id` (`id_props`) to each note of a task, stub, or project whose values differ, so the kanban shows them: a task note gets its `T-` id and its project's `P-` id (none outside a project), a project note only its `P-` id. A live task wins over its stub. These are not user values: `notes-scan` ignores them, and `migrate-v2` writes them too.
 
+For a task or stub note it writes in the same way `subtasks`: `<checked>/<all>` of the checklist lines of `## サブタスク` (numbered or not), e.g. `2/5`, and nothing for a note without one. It is not a user value either, and it is brought up to date only when `commit` writes the note.
+
 The `summary` prop is written only by the `summary` note op (SKILL.md section 4), never derived: one line of at most 80 characters (`note_summary` joins the lines with spaces and cuts a longer text to 79 characters plus `…`), shown on the kanban card. New notes start with `summary: null` (templates from the Vault interview have it empty; a note without it gets it at the first `summary` op). It is not a user value either: `notes-scan` ignores it, and a user's edit stays until the next `summary` op.
+
+### Subtasks
+
+`## サブタスク` holds the task's subtasks, one top-level checklist line each (an indented line, a fenced block, or a comment is the user's note):
+
+```markdown
+- [x] [ST-0290] hook エラーの調査 (w-0145 e1513f0)
+- [ ] [ST-0291] @agent mise trust の自動化 (w-0147)
+- [ ] [ST-0292] @user nature-server で動作確認する
+- [ ] 書いたばかりの行
+```
+
+`parse_subtasks` reads each as `{id, done, assignee, text, worker, commit}`: `id` is `ST-NNNN` or null for a line the supervisor has not numbered yet, `assignee` is `user` for `@user` and `agent` otherwise (no `@` is the agent's), and the trailing `(w-NNNN)` / `(w-NNNN <sha>)` is the worker it was sent to and the verified commit. `ST-` numbers share the counter of `UA-` / `AA-` (`supervisor.last_ua_number`), so one number names one item; `join_view` raises `last_ua_number` to the highest `ST-` number in the notes. Subtasks are kept only in the note: the view's `subtasks` lists the numbered lines (unnumbered lines are not read until the supervisor numbers them), and `split_view` drops it. `notes-scan` events of task notes and `note-show` carry every line as `subtasks`.
+
+Note ops (all idempotent): `st_adopt {st: {text, id?}}` numbers the first unnumbered line whose text equals `text`; `st_add {st: {text, assignee?, id?}}` appends a numbered line (`@<assignee>` written when given); `st_set {id, done?, assignee?, worker?, commit?}` sets the given fields of a numbered line (`worker: null` removes the trailing mark; a new worker without `commit` drops the old commit; a `commit` needs a worker). A line not found is a `note_problems` entry.
 
 ### User changes (`user_transition`)
 
@@ -401,7 +419,7 @@ The `summary` prop is written only by the `summary` note op (SKILL.md section 4)
 | 10 | in progress/user | only `## アクション` changed (answers, requests) | open user actions | `none` |
 | 11 | in progress/user | in progress/agent, backlog/agent | | `resume` |
 | 12 | in progress/agent | backlog/agent | | `restore` |
-| 13 | done/agent; in progress/* with only held read actions or the completion ask open | done/user | task | `confirm` |
+| 13 | done/agent; in progress/* with only held read actions or the completion ask open, or with nothing open and every worker finished (the user checked the last `@user` subtask); an unchecked numbered subtask counts as open | done/user | task | `confirm` |
 | 14 | done/agent, in progress/* | done/user | project | `confirm` |
 | 15 | in progress/*, paused | done/user, done/agent | task, except #13 | `cancel` |
 | 16 | done/agent, done/user; or any value but archived on a stub (a task that is not live) | backlog/agent; also in progress/agent on a stub | | `follow_up` |

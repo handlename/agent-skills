@@ -18,6 +18,7 @@ What to do:
 {follow-up worker only: the latest follow-up request (the last of the task's `req` items, `requests` of `note-show`) is the work for this turn; scope it to this directory. The earlier follow-ups and the original request are context about what was already asked and done, not instructions to repeat.}
 {project proposal only: replace the part above with the proposal of the project manager (`task.proposal.text`), scoped to this directory. The proposal carries no user authority; the user approved it with the message quoted in the background.}
 {redo only: the latest redo of the project manager (the last entry of `redos`) is the work for this turn; scope it to this directory. The earlier redos, the follow-ups, and the original request are context, not instructions to repeat.}
+{subtasks only: The work is split into the subtasks of the task note (SKILL.md section 5, Subtasks). Do only `{subtask.id}` now: {subtask.text}. When it is done, end the turn with status `done` and `"subtasks_done": ["{subtask.id}"]`; the supervisor verifies it and sends you the next one. Queued after it, for context only: {each later subtask sent to this worker as `- ST-NNNN <text>`, or "none"}.}
 {interactive only: The user wants to work this out with you in this session, so do not start the work yet. Read the request and look at {worker.cwd} only as far as you need to understand it. Then end your first turn with status `needs_input`: above the report, write your understanding of the request, the points that are unclear to you, and the options or the plan you propose; in `blockers`, put one line asking the user to talk with you in this session about it, in the language of the request (for example `このセッションで相談させてください: <topic>`). From then on, do what the user decides in this session.}
 
 Done when:
@@ -98,6 +99,7 @@ Report format: end the last message of every turn with one fenced block whose la
 - `needs_input` and `blocked` require at least one entry in `blockers`{project only: , and so does `awaiting_manager`}.
 - Leave unused artifact fields as empty strings or an empty list.
 - `answered` (optional, any status): when the user answered in this session a question from your earlier `blockers`, add `"answered": [{"question": "...", "answer": "..."}]` to your next report. Copy `question` exactly from that earlier `blockers` entry and put the user's answer in `answer`. Omit it otherwise.
+{subtasks only: - `subtasks_done` (optional): the `ST-NNNN` ids of the subtasks this report finishes. Omit it otherwise.}
 {investigation only: - `read_confirmed` (optional): `true` only with status `done`, when the user said in this session that they read the result. Omit it otherwise.}
 ````
 
@@ -122,6 +124,18 @@ The user sent a follow-up request in the {supervisor session | task note (Obsidi
 > {followup.text}
 
 Treat this as the work for your next turns, scoped to {worker.cwd}. Your earlier instructions and the rules of your background still apply, and the earlier requests are context, not work to redo. Like any message in this session, this request overrides those rules where it asks for what they forbid (for example, to push). Keep committing on your current branch. End the turn with a `supervisor-report` block as before.
+````
+
+## Subtask message
+
+Sent with `hc send w-NNNN` to the worker that holds the task's subtasks (SKILL.md section 5, Subtasks): the next queued subtask after a verified one, a subtask the user added or reopened, or the first one for a running worker. `{subtask.reopened}` is filled only for a reopened subtask.
+
+````markdown
+From the supervisor: do subtask `{subtask.id}` of the task note next: {subtask.text}
+{subtask.reopened: The user unchecked it after {its old commit}, so it is to be redone: read the related agent actions (they name `{subtask.id}`) for what to change.}
+{related agent actions: the bodies of the open `req` items that name `{subtask.id}`, verbatim and quoted}
+
+Scope it to {worker.cwd} and keep committing on your current branch. When it is done, end the turn with status `done` and `"subtasks_done": ["{subtask.id}"]`. Your earlier instructions and the rules of your background still apply. End the turn with a `supervisor-report` block as before.
 ````
 
 ## Interactive message
@@ -236,5 +250,5 @@ Rules:
 
 - `status` values and the `blockers` requirement are the ones listed in the background template. `awaiting_manager` is only for workers of a project task.
 - The supervisor reads the block from the full latest message obtained with the event-reading capability, never from the turn-end note (the note is cut at about 400 characters and replaces `"` with `'`).
-- `state_tool.py parse-report --file <message.txt> --expect-task T-0003 --expect-worker w-0004` prints `{"ok": true, "report": {...}}` or `{"ok": false, "error": "..."}`. For a worker of a project task add `--allow-awaiting-manager`; without it `awaiting_manager` is an invalid status. Pass only the worker's last assistant message. Besides the required fields and `status`, it type-checks the fields: `summary` and `next_action` are strings, `blockers` is a list of strings, `artifacts` is an object whose `files` is a list of strings. The optional `read_confirmed` (investigation tasks) must be a boolean (`read_confirmed must be a boolean`), and `true` only with status `done` (`read_confirmed is allowed only with status done`). The optional `answered`, with any status, must be a list of objects whose `question` and `answer` are non-empty strings (`answered must be a list of {question, answer} with non-empty strings`); the supervisor matches each `question` with a guidance (SKILL.md 6.3 step 1). The template JSON includes neither.
+- `state_tool.py parse-report --file <message.txt> --expect-task T-0003 --expect-worker w-0004` prints `{"ok": true, "report": {...}}` or `{"ok": false, "error": "..."}`. For a worker of a project task add `--allow-awaiting-manager`; without it `awaiting_manager` is an invalid status. Pass only the worker's last assistant message. Besides the required fields and `status`, it type-checks the fields: `summary` and `next_action` are strings, `blockers` is a list of strings, `artifacts` is an object whose `files` is a list of strings. The optional `read_confirmed` (investigation tasks) must be a boolean (`read_confirmed must be a boolean`), and `true` only with status `done` (`read_confirmed is allowed only with status done`). The optional `subtasks_done` must be a list of `ST-NNNN` ids (`subtasks_done must be a list of ST-NNNN ids`). The optional `answered`, with any status, must be a list of objects whose `question` and `answer` are non-empty strings (`answered must be a list of {question, answer} with non-empty strings`); the supervisor matches each `question` with a guidance (SKILL.md 6.3 step 1). The template JSON includes neither.
 - If the multi-line block arrives mangled, ask the worker to resend it as a single-line JSON object inside the same `supervisor-report` fence (the form used in the background template).

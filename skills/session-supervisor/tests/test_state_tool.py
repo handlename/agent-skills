@@ -3516,7 +3516,7 @@ class FrontmatterTest(unittest.TestCase):
     def test_reads_json_shapes(self):
         props, _, errors = st.parse_frontmatter(note("task_managed"))
         self.assertEqual(errors, [])
-        self.assertEqual(list(props), [k for k in st.NOTE_KEYS if k not in ("summary", "task_id", "project_id", "proposed_by", "follows")])
+        self.assertEqual(list(props), [k for k in st.NOTE_KEYS if k not in ("summary", "subtasks", "task_id", "project_id", "proposed_by", "follows")])
         self.assertEqual((props["uid"], props["aliases"], props["tags"]), ("20261109_221500", [], ["task", "oss"]))
         self.assertEqual((props["status"], props["assignee"], props["parent"]), ("in progress", "user", "[[20261101_090000]]"))
         self.assertEqual(props["created_at"], "2026-11-09 22:15:00")
@@ -3576,7 +3576,7 @@ class NoteTemplateTest(unittest.TestCase):
                                         'tags: ["supervised"]\n'))
         props, body, errors = st.parse_frontmatter(text)
         self.assertEqual(errors, [])
-        self.assertEqual(list(props), [k for k in st.NOTE_KEYS if k not in ("task_id", "project_id", "proposed_by", "follows")])
+        self.assertEqual(list(props), [k for k in st.NOTE_KEYS if k not in ("subtasks", "task_id", "project_id", "proposed_by", "follows")])
         self.assertEqual((props["status"], props["assignee"], props["parent"]), ("in progress", "agent", "[[20261101_090000]]"))
         self.assertFalse(re.search(r"^# ", body, re.M))
         sections = st.parse_sections(body)
@@ -3816,9 +3816,9 @@ class ActionSectionTest(unittest.TestCase):
     def test_ua_add_creates_the_section_in_template_order(self):
         text = note("task_obsidian")
         out, _, _ = apply_twice(self, text, [{"op": "ua_add", "ua": {"id": "UA-0001", "kind": "ask", "description": "どちらにしますか"}}])
-        self.assertEqual(list(st.parse_sections(st.parse_frontmatter(out)[1]))[:3], ["概要", "アクション", "サブタスク"])
+        self.assertEqual(list(st.parse_sections(st.parse_frontmatter(out)[1]))[:3], ["概要", "サブタスク", "アクション"])
         self.assertEqual(list(note_uas(out)), ["UA-0001"])
-        self.assertIn("- [x] M3x10 (4pcs)\n\n## アクション\n\n### [UA-0001] @user どちらにしますか\n", out)
+        self.assertIn("```\n\n## アクション\n\n### [UA-0001] @user どちらにしますか\n", out)
 
     def test_ack_moves_the_item_into_the_callout(self):
         text = note("task_managed")
@@ -5096,7 +5096,7 @@ class NotesScanCliTest(unittest.TestCase):
         self.assertIn("is not a schema_version 2 state", err)
 
     def test_note_show(self):
-        self.env.put(U1, self.env.text(U1).replace("## サブタスク", "### @agent 追加\n\n本文\n\n## サブタスク"))
+        self.env.put(U1, self.env.text(U1).replace("## 関連ノート", "### @agent 追加\n\n本文\n\n## 関連ノート"))
         code, out, _ = self.env.run("note-show", "--state", str(self.env.state_path), "--uid", U1)
         shown = json.loads(out)
         self.assertEqual((shown["path"], shown["props"]["uid"], shown["sections"]["概要"].strip(), shown["request"]),
@@ -5105,9 +5105,9 @@ class NotesScanCliTest(unittest.TestCase):
         self.assertEqual([(u["id"], u["description"], u["body"]) for u in shown["requests"]], [(None, "追加", "本文")])
 
     def test_events_carry_unnumbered_requests(self):
-        request = "### @agent CHANGELOG も直す\n\nUnreleased に 1 行\n\n## サブタスク"
+        request = "### @agent CHANGELOG も直す\n\nUnreleased に 1 行\n\n## 関連ノート"
         # Writing a request without a status change prints nothing (it is read on the next transition).
-        self.env.put(U1, self.env.text(U1).replace("## サブタスク", request))
+        self.env.put(U1, self.env.text(U1).replace("## 関連ノート", request))
         self.assertEqual(self.env.scan()["events"], [])
         state = self.env.load()
         paused = self.env.text(U1).replace('status: "in progress"', 'status: "pending"').replace('assignee: "agent"', 'assignee: "user"')
@@ -5118,7 +5118,7 @@ class NotesScanCliTest(unittest.TestCase):
         self.assertEqual((event["event"], event["row"]), ("resume", 8))
         self.assertEqual([(u["id"], u["kind"], u["assignee"], u["description"], u["body"]) for u in event["user_actions"]],
                          [(None, "req", "agent", "CHANGELOG も直す", "Unreleased に 1 行")])
-        self.env.put(U3, st.new_note_text(U3, "新しい依頼", "task", "backlog", "agent", NOTE_NOW, "やって").replace("## サブタスク", request))
+        self.env.put(U3, st.new_note_text(U3, "新しい依頼", "task", "backlog", "agent", NOTE_NOW, "やって").replace("## 関連ノート", request))
         pickup = next(e for e in self.env.scan()["events"] if e["uid"] == U3)
         self.assertEqual((pickup["event"], [u["description"] for u in pickup["user_actions"]]), ("pickup", ["CHANGELOG も直す"]))
         self.assertEqual(self.env.run("note-show", "--state", str(self.env.state_path), "--uid", "nope")[0], 1)
@@ -5318,7 +5318,7 @@ class SetupVaultTest(unittest.TestCase):
             self.assertIn("## プロジェクト", dashboard)
             self.assertIn("order: [formula.title, summary, project_id, assignee, created_at]", dashboard)
             self.assertIn("groupOrder: [backlog, in progress, pending, done, archived]", (vault / "Supervisor.md").read_text(encoding="utf-8"))
-            self.assertEqual(dashboard.count("order: [formula.title, summary, task_id, project_id, created_at]"), 2)
+            self.assertEqual(dashboard.count("order: [formula.title, summary, subtasks, task_id, project_id, created_at]"), 2)
             self.assertIn('file.hasTag("supervised")', dashboard)
             self.assertEqual(sorted(p.name for p in (vault / "_templates").iterdir()), ["sv-project.md", "sv-status.md"])
             self.assertFalse((vault / ".obsidian").exists())
@@ -5665,7 +5665,7 @@ class VerifyFixesTest(unittest.TestCase):
         self.env.put(U1, self.env.text(U1).replace('status: "done"', 'status: "pending"').replace('assignee: "agent"', 'assignee: "user"'))
         self.assertEqual(self.env.scan()["events"], [])
         text = self.env.text(U1).replace('status: "pending"', 'status: "backlog"').replace('assignee: "user"', 'assignee: "agent"')
-        self.env.put(U1, text.replace("## サブタスク", "### @agent README の別の typo も直して\n\nCHANGELOG も\n\n## サブタスク"))
+        self.env.put(U1, text.replace("## 関連ノート", "### @agent README の別の typo も直して\n\nCHANGELOG も\n\n## 関連ノート"))
         event = self.env.scan()["events"][0]
         self.assertEqual((event["event"], event["row"], event["live"], event["former"]), ("follow_up", 16, False, True))
         self.assertEqual(([(u["id"], u["kind"], u["description"], u["body"]) for u in event["user_actions"] if u["kind"] == "req"],
@@ -6380,6 +6380,126 @@ class CancelWithoutWorkersTest(unittest.TestCase):
         self.assertNotIn("T-0099", [t["id"] for t in new["tasks"]])
         self.assertTrue(new["archived"][0]["cancelled"])
 
+
+def subtask_note(lines, uid="u5"):
+    text = st.new_note_text(uid, "task", "task", "in progress", "agent", NOTE_NOW, "メモを整理して")
+    return text.replace("## サブタスク\n\n", "## サブタスク\n\n" + "".join(f"{line}\n" for line in lines) + "\n", 1)
+
+
+def finished_task(lines):
+    state, notes = v2_state()
+    nongit_task(state, "T-0005", "w-0006", "/Users/example/notes", "archived", "archived")
+    notes["u5"] = st.apply_note_ops(subtask_note(lines), [{"op": "art_add", "g": 1, "items": [
+        {"n": 1, "kind": "file", "path": "/Users/example/notes/a.txt"}]}], NOTE_NOW, 1)[0]
+    to_v2(find(state["tasks"], "T-0005"), "tasks", "u5")
+    return state, notes
+
+
+class SubtaskTest(unittest.TestCase):
+    def test_parse_subtasks(self):
+        section = "\n".join([
+            "- [ ] 未番号の行", "- [x] [ST-0003] @user 確認する (w-0005 abc1234)", "  - [ ] 子の行はメモ",
+            "- [ ] [ST-0004] @agent 直す (w-0006)", "```", "- [ ] フェンスの中", "```", "- [ ] [ST-0007] 部材 (4pcs)",
+            "- 箇条書き", "- [ ] ",
+        ])
+        self.assertEqual([(s["id"], s["done"], s["assignee"], s["text"], s["worker"], s["commit"]) for s in st.parse_subtasks(section)], [
+            (None, False, "agent", "未番号の行", None, None), ("ST-0003", True, "user", "確認する", "w-0005", "abc1234"),
+            ("ST-0004", False, "agent", "直す", "w-0006", None), ("ST-0007", False, "agent", "部材 (4pcs)", None, None)])
+        self.assertEqual(st.subtask_progress(subtask_note(["- [x] [ST-0001] a", "- [ ] b"])), "1/2")
+        self.assertIsNone(st.subtask_progress(subtask_note([])))
+
+    def test_ops(self):
+        text = subtask_note(["- [ ] 調べる", "- [ ] @user 確認する"])
+        out, ids, problems = apply_twice(self, text, [
+            {"op": "st_adopt", "st": {"id": "ST-0010", "text": "調べる"}},
+            {"op": "st_adopt", "st": {"id": "ST-0011", "text": "確認する"}},
+            {"op": "st_add", "st": {"id": "ST-0012", "text": "考慮漏れを直す", "assignee": "agent"}},
+            {"op": "st_set", "id": "ST-0010", "worker": "w-0001"},
+        ])
+        self.assertEqual((ids, problems), (["st-0010", "st-0011", "st-0012"], []))
+        self.assertEqual(note_section(out, "サブタスク").strip("\n").split("\n"), [
+            "- [ ] [ST-0010] 調べる (w-0001)", "- [ ] [ST-0011] @user 確認する", "- [ ] [ST-0012] @agent 考慮漏れを直す"])
+        self.assertTrue(st.journal_reflected(out, {"new_ids": ["st-0012"]}, 99))
+        out, _, _ = apply_twice(self, out, [{"op": "st_set", "id": "ST-0010", "done": True, "commit": "e1513f0"},
+                                            {"op": "st_set", "id": "ST-0012", "assignee": "user"}])
+        self.assertIn("- [x] [ST-0010] 調べる (w-0001 e1513f0)\n", out)
+        self.assertIn("- [ ] [ST-0012] @user 考慮漏れを直す\n", out)
+        # A reopened subtask sent to another worker loses the old commit.
+        out, _, _ = apply_twice(self, out, [{"op": "st_set", "id": "ST-0010", "done": False, "worker": "w-0002"}])
+        self.assertIn("- [ ] [ST-0010] 調べる (w-0002)\n", out)
+        self.assertIn("- [ ] [ST-0010] 調べる\n", st.apply_note_ops(out, [{"op": "st_set", "id": "ST-0010", "worker": None}], NOTE_NOW, 14)[0])
+        _, _, problems = st.apply_note_ops(out, [{"op": "st_set", "id": "ST-0099", "done": True},
+                                                 {"op": "st_adopt", "st": {"id": "ST-0020", "text": "ない行"}}], NOTE_NOW, 14)
+        self.assertEqual(len(problems), 2)
+        for bad in ({"op": "st_add", "st": {"id": "AA-0001", "text": "x"}}, {"op": "st_add", "st": {"id": "ST-0001", "text": "a\nb"}},
+                    {"op": "st_set", "id": "ST-0010", "commit": "zz"}, {"op": "st_set", "id": "ST-0010", "assignee": "bot"}):
+            with self.subTest(bad=bad), self.assertRaises(st.StateError):
+                st.apply_note_ops(out, [bad], NOTE_NOW, 14)
+        # A note without the section gets it in the template order.
+        bare = st.new_note_text("u6", "t", "task", "in progress", "agent", NOTE_NOW, "x").replace("## サブタスク\n\n", "")
+        added = st.apply_note_ops(bare, [{"op": "st_add", "st": {"id": "ST-0001", "text": "足す"}}], NOTE_NOW, 2)[0]
+        self.assertEqual(list(st.parse_sections(st.parse_frontmatter(added)[1]))[:3], ["概要", "サブタスク", "アクション"])
+
+    def test_numbers_share_the_action_counter(self):
+        ops = st.number_note_ops({"u": [{"op": "st_adopt", "st": {"text": "x"}}, {"op": "ua_add", "ua": {"kind": "ask", "description": "q"}},
+                                        {"op": "st_add", "st": {"text": "y"}}]}, 5, {})
+        self.assertEqual([o.get("st", o.get("ua"))["id"] for o in ops["u"]], ["ST-0005", "UA-0006", "ST-0007"])
+        state, notes = finished_task(["- [x] [ST-0030] a"])
+        self.assertEqual(st.join_view(state, notes)["supervisor"]["last_ua_number"], 30)
+
+    def test_open_subtasks_hold_the_completion_ask(self):
+        for lines, status, asked in ((["- [ ] [ST-0001] @user 確認する"], "needs_user", False),
+                                     (["- [ ] [ST-0001] 直す (w-0006 abc1234)"], "needs_user", False),
+                                     (["- [x] [ST-0001] @user 確認する", "- [ ] 番号のない行"], "needs_user", True)):
+            with self.subTest(lines=lines):
+                state, notes = finished_task(lines)
+                view = st.join_view(state, notes)
+                new = st.next_state(view, copy.deepcopy(view), NOW)
+                task = find(new["tasks"], "T-0005")
+                self.assertEqual((task["status"], any(u.get("detector") == "task_done" for u in task["user_actions"])), (status, asked))
+                self.assertEqual(st.note_props("task", task, {w["id"]: w for w in new["workers"]}), ("in progress", "user"))
+                self.assertNotIn("subtasks", st.split_view(view, new)[0]["tasks"][0])
+        # A running worker keeps the task running whatever its subtasks show.
+        state, notes = finished_task(["- [ ] [ST-0001] @user 確認する"])
+        find(state["workers"], "w-0006").update(intended_state="running", observed_state="running")
+        self.assertEqual(find(st.join_view(state, notes)["tasks"], "T-0005")["status"], "running")
+
+    def test_done_user_confirms_once_the_subtasks_are_checked(self):
+        for lines, held_only in ((["- [x] [ST-0001] @user 確認する"], True), (["- [ ] [ST-0001] @user 確認する"], False)):
+            with self.subTest(lines=lines):
+                state, notes = finished_task(lines)
+                view = st.join_view(state, notes)
+                ctx, _ = st._scan_ctx("task", state["tasks"][0], find(view["tasks"], "T-0005"), view["workers"], True, False, [])
+                self.assertEqual(ctx["held_only"], held_only)
+                seen = {"status": "in progress", "assignee": "user"}
+                self.assertEqual(st.user_transition(seen, {"status": "done", "assignee": "user"}, ctx)["event"],
+                                 "confirm" if held_only else "cancel")
+        # A task whose workers are still running is not confirmed by checking its subtasks.
+        state, notes = finished_task(["- [x] [ST-0001] @user 確認する"])
+        find(state["workers"], "w-0006").update(intended_state="running", observed_state="running")
+        view = st.join_view(state, notes)
+        self.assertFalse(st._scan_ctx("task", state["tasks"][0], find(view["tasks"], "T-0005"), view["workers"], True, False, [])[0]["held_only"])
+
+    def test_commit_writes_the_progress_prop(self):
+        env = VaultEnv(self)
+        env.add_task("T-0020", "w-0020", U1)
+        env.put(U1, env.text(U1).replace("## サブタスク\n\n", "## サブタスク\n\n- [ ] 調べる\n\n", 1))
+        env.state["tasks"][0]["note_seen"] = st.note_values(env.text(U1))
+        env.save()
+        code, out, err = env.commit(ops={U1: [{"op": "st_adopt", "st": {"text": "調べる"}},
+                                              {"op": "st_add", "st": {"text": "足す", "assignee": "user"}}]})
+        self.assertEqual(code, 0, err)
+        props = st.parse_frontmatter(env.text(U1))[0]
+        self.assertEqual(props["subtasks"], "0/2")
+        self.assertIn("- [ ] [ST-0001] 調べる\n- [ ] [ST-0002] @user 足す\n", env.text(U1))
+        self.assertEqual(env.load()["supervisor"]["last_ua_number"], 2)
+        code, out, _ = env.run("note-show", "--state", str(env.state_path), "--uid", U1)
+        self.assertEqual([s["id"] for s in json.loads(out)["subtasks"]], ["ST-0001", "ST-0002"])
+
+    def test_report_subtasks_done(self):
+        block = '```supervisor-report\n{"task_id": "T-1", "worker_id": "w-1", "status": "done", "summary": "", "artifacts": {}, "blockers": [], "next_action": "", "subtasks_done": %s}\n```'
+        self.assertTrue(st.parse_report(block % '["ST-0012"]')["ok"])
+        self.assertFalse(st.parse_report(block % '["12"]')["ok"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -50,7 +50,9 @@ if (!tags.includes("supervised")) {
   // of the task and marks it done (notes-scan row 15).
   const body = lines.slice(close + 1);
   const open = body.map((line, i) => (/^### \[UA-\d+\] @user /.test(line) ? body[i + 1] || "" : null)).filter((m) => m !== null);
-  const waiting = open.every((meta) => /^<!-- sv auto=task_done /.test(meta));
+  // A numbered subtask left unchecked keeps the task open as well: done/user would cancel it.
+  const subtasks = body.some((line) => /^- \[ \] \[ST-\d+\] /.test(line));
+  const waiting = !subtasks && open.every((meta) => /^<!-- sv auto=task_done /.test(meta));
   const when = {
     held_only: managed && waiting,
     unheld: managed && !waiting,
