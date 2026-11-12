@@ -4,12 +4,13 @@
    properties have no data-property attribute, and places each property at a fixed offset.
    This snippet lets the properties flow instead, and makes the test card's title tall enough
    to hold the extra lines, so a long title or summary uses the room a short one leaves.
-   Every card keeps the same height: a card with a short title and summary has space at the bottom. */
+   Every card keeps the same height: a card with a short title and summary has space at the bottom.
+   setup overwrites this file; to change the line counts, set them on body in a snippet of your own. */
 
-body {
+:root {
   --sv-kanban-line: 20px;
   --sv-kanban-title-lines: 3;
-  --sv-kanban-summary-lines: 4;
+  --sv-kanban-summary-lines: 3;
 }
 
 .bases-kanban-card {
@@ -29,7 +30,7 @@ body {
 }
 
 .bases-kanban-card-property.mod-title[data-property] .bases-kanban-card-line,
-.bases-kanban-card-property[data-property="summary"] .bases-kanban-card-line {
+.bases-kanban-card-property[data-property="note.summary"] .bases-kanban-card-line {
   height: auto;
   line-height: var(--sv-kanban-line);
   white-space: normal;
