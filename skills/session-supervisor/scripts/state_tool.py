@@ -2010,7 +2010,8 @@ def new_note_text(uid, title, kind, status, assignee, now, request="", parent=No
     content = (request or "").strip("\n")
     if original and original.strip("\n"):
         content = "\n\n".join(c for c in (content, "\n".join([QUOTE_HEAD] + _quote(original.strip("\n")))) if c)
-    body = "\n".join(f"## {name}\n\n{content}\n" if name == "概要" and content else f"## {name}\n\n" for name in NOTE_SECTIONS)
+    sections = [f"## {name}\n\n{content}\n" if name == "概要" and content else f"## {name}\n\n" for name in NOTE_SECTIONS]
+    body = "\n".join(sections[:1] + [PROJECT_TASKS_SECTION] * (kind == "project") + sections[1:])
     return f"---\n{head}---\n{body}"
 
 
@@ -4266,12 +4267,12 @@ KANBAN_ORDER = "[formula.title, summary, subtasks, task_id, project_id, created_
 
 
 def _kanban_base(name, filters, templates, order=KANBAN_ORDER):
-    lines = "".join(f"\n    - {f}" for f in filters)
+    in_templates = (f"""'!file.inFolder("{templates}")'""",) if templates else ()
+    lines = "".join(f"\n    - {f}" for f in in_templates + filters)
     return f"""```base
 filters:
   and:
-    - file.hasTag("supervised")
-    - '!file.inFolder("{templates}")'{lines}
+    - file.hasTag("supervised"){lines}
 formulas:
   title: link(file.name, title)
 views:
@@ -4289,6 +4290,13 @@ views:
 
 _NOT_PROJECT = """'!file.hasTag("project")'"""
 _ASSIGNEE_IS = """'assignee == "{}"'"""
+
+
+# The project note's own tasks: `this` is the note that holds the block, and a link equals the file it resolves to,
+# so `parent == this` matches both `[[<uid>]]` (state_tool) and `[[<path>|<title>]]` (sv-project.md).
+PROJECT_TASKS_FILTER = "'parent == this'"
+PROJECT_TASKS_SECTION = "## タスク\n\n" + _kanban_base("タスク", (_NOT_PROJECT, PROJECT_TASKS_FILTER), None,
+                                                    "[formula.title, summary, task_id, subtasks, assignee]")
 
 
 def supervisor_note(templates):
@@ -5302,6 +5310,9 @@ def template_errors(text, kind):
             errors.append(f"{key} must be {want}, got {props.get(key)!r}")
     if "概要" not in parse_sections(body):
         errors.append("the body must have a '## 概要' section")
+    if kind == "project" and PROJECT_TASKS_FILTER.strip("'") not in body:
+        errors.append("a project template must have the '## タスク' kanban of its tasks (a base block filtered by "
+                      f"{PROJECT_TASKS_FILTER}, as in the notes state_tool creates)")
     return errors
 
 
