@@ -5165,8 +5165,40 @@ def watch_messages(scan, terminals, notify_address, memo):
     return messages
 
 
+def tab_renames(state, spaces):
+    """(tab id, new name) for each Herdr tab that is still named after the herdr worker or manager in it, as Herdr names
+    the tab when the user gives that terminal a pane: `w-NNNN <task title>` / `m-p-NNNN <project name>`. A tab the user
+    named otherwise is left alone. spaces: `herdr-app ls` spaces."""
+    purpose = {w.get("handle"): w.get("title") for w in state.get("workers", []) if w.get("runtime") == "herdr"}
+    purpose.update({manager_handle(p.get("id")): p.get("name") for p in _projects(state)
+                    if (p.get("manager") or {}).get("runtime") == "herdr"})
+    out = []
+    for space in spaces:
+        for tab in space.get("tabs", []):
+            name = tab.get("name")
+            if purpose.get(name) and any(t.get("name") == name for t in tab.get("terminals", [])):
+                out.append((tab.get("id"), f"{name} {purpose[name]}"))
+    return out
+
+
+def rename_tabs(state, runner):
+    """Rename the Herdr tabs of `tab_renames`. Without a Herdr window (`herdr-app ls` fails) there is nothing to do."""
+    try:
+        spaces = _hc_json(runner, ["herdr-app", "ls"]).get("spaces", [])
+    except (StateError, OSError, ValueError):
+        return []
+    renames = tab_renames(state, spaces)
+    for tab_id, name in renames:
+        argv = ["herdr-app", "do", "tab.rename", json.dumps({"id": tab_id, "name": name}, ensure_ascii=False)]
+        proc = runner(argv)
+        if proc.returncode != 0:
+            raise StateError(f"{' '.join(argv)} exited with {proc.returncode}: {(proc.stderr or proc.stdout).strip()}")
+    return renames
+
+
 def watch_tick(state_path, notify, runner, memo):
-    """One tick of watch-vault: scan notes, read hc, send the messages. Writes nothing. Returns the messages sent."""
+    """One tick of watch-vault: scan notes, read hc, send the messages, name the Herdr tabs of kept sessions. Writes
+    nothing of the supervisor. Returns the messages sent."""
     state = _read_json(state_path)
     _require_v2(state, state_path)
     vault, texts, uids = _vault_index(state_path)
@@ -5176,6 +5208,7 @@ def watch_tick(state_path, notify, runner, memo):
     messages = watch_messages(scan, terminals, target, memo)
     for text in messages:
         _hc_json(runner, ["hc", "send", notify, text])
+    rename_tabs(state, runner)
     return messages
 
 
@@ -5572,7 +5605,7 @@ def build_parser():
     p.add_argument("--from", dest="from_file", help="read `hc ls --all --json` output from this file instead of running hc")
     p.set_defaults(func=cmd_observe_hc)
 
-    p = sub.add_parser("watch-vault", help="loop: tell the supervisor terminal about note changes and blocked / finished sessions")
+    p = sub.add_parser("watch-vault", help="loop: tell the supervisor terminal about note changes and blocked / finished sessions, and name the Herdr tabs of kept sessions")
     p.add_argument("--state", required=True)
     p.add_argument("--notify", default="sv", help="the supervisor terminal (default: sv)")
     p.add_argument("--interval", type=float, default=10, help="seconds between ticks (default: 10)")

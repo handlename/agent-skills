@@ -5754,11 +5754,14 @@ def herdr_worker(state, task_id="T-0030", worker_id="w-0030", **kw):
 class FakeHc:
     """Records hc argv and answers ls / get / send from canned data."""
 
-    def __init__(self, terminals=(), sv_address="t1"):
-        self.terminals, self.sv_address, self.calls = list(terminals), sv_address, []
+    def __init__(self, terminals=(), sv_address="t1", spaces=()):
+        self.terminals, self.sv_address, self.spaces, self.calls = list(terminals), sv_address, list(spaces), []
 
     def __call__(self, argv):
         self.calls.append(argv)
+        if argv[0] == "herdr-app":
+            out = {"spaces": self.spaces} if argv[1] == "ls" else {}
+            return subprocess.CompletedProcess(argv, 0, json.dumps(out), "")
         out = {"ls": {"terminals": self.terminals}, "get": {"address": self.sv_address}}.get(argv[1], {"started": True})
         return subprocess.CompletedProcess(argv, 0, json.dumps(out), "")
 
@@ -6039,6 +6042,33 @@ class WatchVaultTest(unittest.TestCase):
         self.assertEqual(hc.sent(), sent)
         self.assertEqual([c[:3] for c in hc.calls if c[1] == "send"], [["hc", "send", "sv"]] * 2)
         self.assertEqual(st.watch_tick(str(env.state_path), "sv", hc, memo), [])
+
+    def test_tab_renames_only_tabs_named_after_their_session(self):
+        state = fixture_state()
+        herdr_worker(state)
+        add_project(state)
+        state["projects"][0]["manager"].update(runtime="herdr", session_id=SID, handle="m-p-0001")
+        name = state["projects"][0]["name"]
+        tabs = [{"id": "tb1", "name": "w-0030", "terminals": [{"terminal": "t5", "name": "w-0030"}]},
+                {"id": "tb2", "name": "m-p-0001", "terminals": [{"terminal": "t6", "name": "m-p-0001"}]},
+                {"id": "tb3", "name": "mine", "terminals": [{"terminal": "t7", "name": "w-0030"}]},
+                {"id": "tb4", "name": "w-0030", "terminals": [{"terminal": "t8", "name": None}]},
+                {"id": "tb5", "name": "w-0099", "terminals": [{"terminal": "t9", "name": "w-0099"}]}]
+        self.assertEqual(st.tab_renames(state, [{"tabs": tabs}]),
+                         [("tb1", "w-0030 T-0030|w-0030 fix it"), ("tb2", f"m-p-0001 {name}")])
+
+    def test_tick_renames_tabs_and_tolerates_no_window(self):
+        env = VaultEnv(self)
+        state = env.state
+        herdr_worker(state)
+        env.save()
+        tab = {"id": "tb1", "name": "w-0030", "terminals": [{"terminal": "t5", "name": "w-0030"}]}
+        hc = FakeHc(spaces=[{"tabs": [tab]}])
+        st.watch_tick(str(env.state_path), "sv", hc, {})
+        self.assertEqual([c for c in hc.calls if c[:2] == ["herdr-app", "do"]],
+                         [["herdr-app", "do", "tab.rename", json.dumps({"id": "tb1", "name": "w-0030 T-0030|w-0030 fix it"})]])
+        failing = lambda argv: subprocess.CompletedProcess(argv, 1, "", "no window")
+        self.assertEqual(st.rename_tabs(state, failing), [])
 
     def test_cli_once_writes_nothing(self):
         env = VaultEnv(self)
