@@ -6047,15 +6047,17 @@ class WatchVaultTest(unittest.TestCase):
         state = fixture_state()
         herdr_worker(state)
         add_project(state)
-        state["projects"][0]["manager"].update(runtime="herdr", session_id=SID, handle="m-p-0001")
-        name = state["projects"][0]["name"]
+        project = state["projects"][0]
+        project["manager"].update(runtime="herdr", session_id=SID, handle="m-p-0001", title="P-0001 Uploader reliability")
+        # The stored (v2) state has no project name; the manager's title carries it.
+        project.pop("name", None)
         tabs = [{"id": "tb1", "name": "w-0030", "terminals": [{"terminal": "t5", "name": "w-0030"}]},
                 {"id": "tb2", "name": "m-p-0001", "terminals": [{"terminal": "t6", "name": "m-p-0001"}]},
                 {"id": "tb3", "name": "mine", "terminals": [{"terminal": "t7", "name": "w-0030"}]},
                 {"id": "tb4", "name": "w-0030", "terminals": [{"terminal": "t8", "name": None}]},
                 {"id": "tb5", "name": "w-0099", "terminals": [{"terminal": "t9", "name": "w-0099"}]}]
         self.assertEqual(st.tab_renames(state, [{"tabs": tabs}]),
-                         [("tb1", "w-0030 T-0030|w-0030 fix it"), ("tb2", f"m-p-0001 {name}")])
+                         [("tb1", "w-0030 T-0030|w-0030 fix it"), ("tb2", "m-p-0001 Uploader reliability")])
 
     def test_tick_renames_tabs_and_tolerates_no_window(self):
         env = VaultEnv(self)

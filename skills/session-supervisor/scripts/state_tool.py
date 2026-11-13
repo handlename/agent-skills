@@ -5170,8 +5170,9 @@ def tab_renames(state, spaces):
     the tab when the user gives that terminal a pane: `w-NNNN <task title>` / `m-p-NNNN <project name>`. A tab the user
     named otherwise is left alone. spaces: `herdr-app ls` spaces."""
     purpose = {w.get("handle"): w.get("title") for w in state.get("workers", []) if w.get("runtime") == "herdr"}
-    purpose.update({manager_handle(p.get("id")): p.get("name") for p in _projects(state)
-                    if (p.get("manager") or {}).get("runtime") == "herdr"})
+    # A v2 state keeps the project name only in the manager's title `P-NNNN <name>` (the note holds the name).
+    purpose.update({manager_handle(p.get("id")): re.sub(r"^P-\d+\s+", "", p["manager"].get("title") or "")
+                    for p in _projects(state) if (p.get("manager") or {}).get("runtime") == "herdr"})
     out = []
     for space in spaces:
         for tab in space.get("tabs", []):
