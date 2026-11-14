@@ -49,7 +49,9 @@ if (!tags.includes("supervised")) {
   // done/agent comes only from notes written by earlier versions. done/user with anything else open cancels the rest
   // of the task and marks it done (notes-scan row 15).
   const body = lines.slice(close + 1);
-  const open = body.map((line, i) => (/^### \[UA-\d+\] @user /.test(line) ? body[i + 1] || "" : null)).filter((m) => m !== null);
+  // The metadata line is right below the heading, or after one blank line (0.65.3 and later).
+  const meta = (i) => (body[i + 1] || "").trim() ? body[i + 1] : body[i + 2] || "";
+  const open = body.map((line, i) => (/^### \[UA-\d+\] @user /.test(line) ? meta(i) : null)).filter((m) => m !== null);
   // A numbered subtask left unchecked keeps the task open as well: done/user would cancel it.
   const subtasks = body.some((line) => /^- \[ \] \[ST-\d+\] /.test(line));
   const waiting = !subtasks && open.every((meta) => /^<!-- sv auto=task_done /.test(meta));

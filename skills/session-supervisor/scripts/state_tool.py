@@ -111,13 +111,12 @@ UA_META_RE = re.compile(r"^<!-- sv (.*?) -->[ \t]*$")
 UA_DONE_RE = re.compile(r"^> - \[((?:UA|AA)-\d+)\] @(?:user|agent) (.*?) <!-- sv (.*?) -->[ \t]*$")
 UA_CALLOUT_RE = re.compile(r"^> \[!done\]- 完了 \((\d+)\)[ \t]*$")
 # The thread of an action is under `#### やりとり` (`#### 回答` in notes written before 0.65.0): the supervisor's messages are
-# `> [!sv-agent] <time>` callouts, the user's are the plain text between them. `> [!sv-input]` marks where the user writes.
+# `> [!sv-agent] <time>` callouts, the user's are the plain text between them. Notes written by 0.65.x also have a
+# `> [!sv-input]` mark where the user writes; it is read as no text and removed when the item is next written.
 UA_ANSWER_RE = re.compile(r"^#### (?:やりとり|回答)[ \t]*$")
 UA_THREAD_HEAD = "#### やりとり"
 UA_AGENT_RE = re.compile(r"^> \[!sv-agent\][ \t]*(.*?)[ \t]*$")
 UA_INPUT_RE = re.compile(r"^> \[!sv-input\]")
-# The empty `>` line closes the callout, so text the user types right below it does not join it (lazy continuation).
-UA_INPUT_MARK = ["> [!sv-input] この下に書いてください", ">"]
 UA_OPTION_OPEN_RE = re.compile(r"^[ \t]*[-*+] \[ \] ")
 UA_ANSWER_DETECTORS = ("worker_report", "pr_closed")
 ST_ID_RE = re.compile(r"^ST-(\d+)$")
@@ -2174,12 +2173,14 @@ def _ua_layout(lines, start, end):
         heads = [k for k in range(lo, hi) if re.match(r"^#{1,3} ", stripped[k])]
         for n, k in enumerate(heads):
             stop = heads[n + 1] if n + 1 < len(heads) else hi
-            meta = UA_META_RE.match(lines[k + 1]) if k + 1 < stop else None
+            # The metadata line is right below the heading (before 0.65.3) or after one blank line.
+            at = k + 2 if k + 2 < stop and not lines[k + 1].strip() and UA_META_RE.match(lines[k + 2]) else k + 1
+            meta = UA_META_RE.match(lines[at]) if at < stop else None
             ua = _ua_meta(meta.group(1)) if meta else None
             m, req = UA_HEAD_RE.match(stripped[k]), UA_REQ_RE.match(stripped[k])
             if m and ua and ua["kind"]:
-                entries.append({"ua": _ua_full(ua, m.group(1), m.group(2), lines[k + 2:stop]), "at": k, "first": k + 2,
-                                "stop": stop, "done": False})
+                entries.append({"ua": _ua_full(ua, m.group(1), m.group(2), lines[at + 1:stop]), "at": k,
+                                "meta": at, "first": at + 1, "stop": stop, "done": False})
             elif req and not meta:
                 entries.append({"ua": _ua_full(dict(_ua_meta(""), kind="req"), None, req.group(1), lines[k + 1:stop]),
                                 "at": k, "first": k + 1, "stop": stop, "done": False})
@@ -2263,13 +2264,8 @@ def _answer_lines(text):
 
 
 def _agent_lines(text, at):
-    """A `[!sv-agent]` callout, closed by an empty `>` line like the mark, so text typed right below it stays outside."""
+    """A `[!sv-agent]` callout, closed by an empty `>` line, so text typed right below it stays outside (lazy continuation)."""
     return [f"> [!sv-agent] {at}" if at else "> [!sv-agent]"] + _quote(text.strip("\n")) + [">"]
-
-
-def _input_lines(options):
-    """The options (above the mark, so that a line typed below the mark does not continue the list) and the mark."""
-    return ([f"- [ ] {o}" for o in options] + [""] if options else []) + UA_INPUT_MARK
 
 
 def _short_time(at):
@@ -2286,10 +2282,9 @@ def _ua_content(ua):
     if thread or ua["kind"] == "ask" or ua.get("detector") in UA_ANSWER_DETECTORS:
         lines.append(UA_THREAD_HEAD)
         for m in thread:
-            lines += ([""] if lines[-1] != UA_THREAD_HEAD else []) + (
-                _agent_lines(m["text"], m["at"]) if m["from"] == "agent" else _answer_lines(m["text"]))
-        if not ua.get("done") and ua["kind"] != "req" and (not thread or thread[-1]["from"] == "agent"):
-            lines += ([""] if thread else []) + _input_lines(ua.get("options"))
+            lines += [""] + (_agent_lines(m["text"], m["at"]) if m["from"] == "agent" else _answer_lines(m["text"]))
+        if ua.get("options") and not ua.get("done") and ua["kind"] != "req" and (not thread or thread[-1]["from"] == "agent"):
+            lines += [""] + [f"- [ ] {o}" for o in ua["options"]]
     return lines[:-1] if lines and not lines[-1] else lines
 
 
@@ -2300,7 +2295,7 @@ def _callout_lines(content):
 def render_ua_block(ua):
     """Lines of an open action: heading, metadata, a blank line, the quoted body and the `#### やりとり` thread."""
     content = _ua_content(ua)
-    return [f"### {_ua_title(ua)}", f"<!-- sv {_ua_tokens(ua)} -->"] + ([""] + content if content else [])
+    return [f"### {_ua_title(ua)}", "", f"<!-- sv {_ua_tokens(ua)} -->"] + ([""] + content if content else [])
 
 
 def render_ua_done(ua):
@@ -2578,8 +2573,13 @@ def _op_ua_add(lines, op, now, rev, index, problems):
     if _find_ua(lines, ua["id"]):
         return []
     block = render_ua_block(dict(ua, options=options))
-    # An empty line to type in below the mark, besides the blank line that separates the next block.
-    _put_block(lines, _open_end(lines), block + ([""] if block[-1] == UA_INPUT_MARK[-1] else []))
+    # A user action that waits for an answer ends with a blank line and an empty line to type in, besides the blank line
+    # that separates the next block.
+    # It goes after the blank lines that end the last item, which keep the empty line to type in of a waiting item.
+    pos = _open_end(lines)
+    while not lines[pos - 1].startswith("## ") and pos < len(lines) and not lines[pos].strip():
+        pos += 1
+    _put_block(lines, pos, block + (["", ""] if ua["kind"] != "req" and UA_THREAD_HEAD in block else []))
     _reply(lines, op, ua["id"], now, rev, problems)
     return [ua["id"].lower()]
 
@@ -2592,15 +2592,15 @@ def _options(op, name):
 
 
 def _drop_marks(content):
-    """content without the `[!sv-input]` mark and unchecked option lines under `#### やりとり`, blank runs left by them
-    collapsed and trailing blank lines removed."""
+    """content without the `[!sv-input]` mark of older notes and unchecked option lines under `#### やりとり`, with one
+    blank line below the heading, blank runs collapsed and trailing blank lines removed."""
     k = _answer_at(content)
-    out, j = list(content if k is None else content[:k + 1]), (len(content) if k is None else k + 1)
+    out, j = list(content if k is None else content[:k + 1] + [""]), (len(content) if k is None else k + 1)
     while j < len(content):
         if UA_INPUT_RE.match(content[j]):
             j = _mark_end(content, j)
             continue
-        if not UA_OPTION_OPEN_RE.match(content[j]) and (content[j].strip() or len(out) > k + 1 and out[-1].strip()):
+        if not UA_OPTION_OPEN_RE.match(content[j]) and (content[j].strip() or out[-1].strip()):
             out.append(content[j])
         j += 1
     while out and not out[-1].strip():
@@ -2621,7 +2621,7 @@ def _op_ua_ack(lines, op, now, rev, index, problems):
         return []
     if e["done"]:
         return []
-    tokens = UA_META_RE.match(lines[e["at"] + 1]).group(1).split()
+    tokens = UA_META_RE.match(lines[e["meta"]]).group(1).split()
     if not any(t.startswith("done=") for t in tokens):
         tokens += [f"done={op.get('at') or now}", f"r{rev}"]
     content = _drop_marks(lines[e["first"]:e["stop"]])
@@ -2664,15 +2664,15 @@ def _op_ua_answer(lines, op, now, rev, index, problems):
     content = _drop_marks(content)
     if _answer_at(content) is None:
         content += ([""] if content or not e["done"] else []) + [UA_THREAD_HEAD]
-    content += ([""] if _answer_at(content) != len(content) - 1 else []) + (
-        _agent_lines(text, _short_time(now)) if who == "agent" else _answer_lines(text))
-    if who == "agent" and not e["done"] and ua["kind"] != "req":
-        content += [""] + _input_lines(options)
+    content += [""] + (_agent_lines(text, _short_time(now)) if who == "agent" else _answer_lines(text))
+    if who == "agent" and not e["done"] and ua["kind"] != "req" and options:
+        content += [""] + [f"- [ ] {o}" for o in options]
     if e["done"]:
         lines[e["first"]:e["stop"]] = _callout_lines(content)
     else:
-        # After the supervisor's message the user writes next: leave an empty line to type in and one before the next block.
-        tail = ["", ""] if who == "agent" else tail or ([""] if e["stop"] < len(lines) and lines[e["stop"]].strip() else [])
+        # After the supervisor's message the user writes next: leave a blank line, an empty line to type in and one
+        # before the next block.
+        tail = ["", "", ""] if who == "agent" else tail or ([""] if e["stop"] < len(lines) and lines[e["stop"]].strip() else [])
         lines[e["first"]:e["stop"]] = content + tail
     return []
 
@@ -2692,7 +2692,7 @@ def _op_ua_adopt(lines, op, now, rev, index, problems):
         return []
     k = e["at"]
     blank = [""] if k + 1 < len(lines) and lines[k + 1].strip() else []
-    lines[k:k + 1] = [f"### {_ua_title(ua)}", f"<!-- sv req since={ua.get('since') or now} -->"] + blank
+    lines[k:k + 1] = [f"### {_ua_title(ua)}", "", f"<!-- sv req since={ua.get('since') or now} -->"] + blank
     _reply(lines, op, ua["id"], now, rev, problems)
     return [ua["id"].lower()]
 

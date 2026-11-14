@@ -8,8 +8,7 @@
    setup overwrites this file; to change the line counts, set them on body in a snippet of your own.
 
    It also styles the thread of an action (`#### やりとり` of a task note): the supervisor's messages
-   (`> [!sv-agent]`) in a quiet grey, and the mark where the user writes (`> [!sv-input]`) in the accent,
-   because it means "your turn". */
+   (`> [!sv-agent]`) in a quiet grey. */
 
 :root {
   --sv-kanban-line: 20px;
@@ -59,8 +58,3 @@
   font-size: var(--font-ui-small);
 }
 
-.callout[data-callout="sv-input"] {
-  --callout-color: var(--color-orange-rgb);
-  --callout-icon: lucide-pencil;
-  padding-block: 4px;
-}

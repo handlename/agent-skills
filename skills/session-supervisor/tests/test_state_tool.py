@@ -3695,9 +3695,9 @@ class ActionSectionTest(unittest.TestCase):
                 lines = ["> [!done]- 完了 (1)"] + st.render_ua_done(ua) if ua["done"] else st.render_ua_block(ua)
                 text = "\n".join(lines)
                 self.assertEqual(st.parse_user_actions(text), [ua])
-        self.assertEqual(st.render_ua_block(note_uas(note("task_sample"))["UA-0240"])[:3], [
+        self.assertEqual(st.render_ua_block(note_uas(note("task_sample"))["UA-0240"])[:4], [
             "### [UA-0240] @user Decide whether to push branch `claude/t0999-readme-typo-1a2b3c` of `agent-skills` (and whether to open a PR)",
-            "<!-- sv ask answer since=2026-11-11T22:40:00+09:00 -->", ""])
+            "", "<!-- sv ask answer since=2026-11-11T22:40:00+09:00 -->", ""])
         # A user action's body is the supervisor's first message: a callout titled with its since.
         self.assertEqual(st.render_ua_done(note_uas(note("task_sample"))["UA-0238"])[1:4], [
             ">     > [!sv-agent] 2026-11-11 22:10", ">     > どのリポジトリ (owner/repo) の README ですか。", ">     >"])
@@ -3805,11 +3805,10 @@ class ActionSectionTest(unittest.TestCase):
         out, ids, _ = apply_twice(self, text, [op])
         self.assertEqual(ids, ["ua-0165"])
         block = "\n".join(st.render_ua_block(note_uas(out)["UA-0165"]))
-        self.assertEqual(block, "### [UA-0165] @user Answer w-0120 in Herdr\n<!-- sv auto=worker_report since=2026-11-10T09:00:00+09:00 -->\n\n"
-                                "> [!sv-agent] 2026-11-10 09:00\n> which file?\n>\n> [w-0120](https://example.com)\n>\n\n#### やりとり\n"
-                                "> [!sv-input] この下に書いてください\n>")
-        self.assertIn("- [ ] 自分用のチェック(メタデータなし)\n\n" + block + "\n\n\n> [!done]- 完了 (1)\n", out)
-        self.assertEqual(out.replace(block + "\n\n\n", ""), text)
+        self.assertEqual(block, "### [UA-0165] @user Answer w-0120 in Herdr\n\n<!-- sv auto=worker_report since=2026-11-10T09:00:00+09:00 -->\n\n"
+                                "> [!sv-agent] 2026-11-10 09:00\n> which file?\n>\n> [w-0120](https://example.com)\n>\n\n#### やりとり")
+        self.assertIn("- [ ] 自分用のチェック(メタデータなし)\n\n" + block + "\n\n\n\n> [!done]- 完了 (1)\n", out)
+        self.assertEqual(out.replace(block + "\n\n\n\n", ""), text)
         for bad in ({"id": "UA-0166", "kind": "auto", "detector": "nope", "description": "x"},
                     {"id": "UA-0166", "kind": "ask", "description": "a\nb"}, {"id": "166", "kind": "ask", "description": "x"},
                     {"id": "UA-0166", "kind": "slot", "description": "x"}, {"id": "UA-0166", "kind": "ask", "description": "x", "body": 1},
@@ -3841,7 +3840,7 @@ class ActionSectionTest(unittest.TestCase):
         self.assertTrue(section.rstrip().endswith(
             "> - [UA-0160] @user Decide whether to push branch `claude/t0120-fix-typo` of `repo-a` "
             f"<!-- sv ask answer since=2026-11-09T22:30:00+09:00 done={NOTE_NOW} r13 -->\n>     > typo を 3 か所直した。\n>\n"
-            ">     #### 回答\n>     push してください\n>\n>     main への PR も作ってください"))
+            ">     #### 回答\n>\n>     push してください\n>\n>     main への PR も作ってください"))
         self.assertTrue(st.journal_reflected(out, {"new_ids": []}, 13))
         self.assertEqual(st.apply_note_ops(text, [{"op": "ua_ack", "id": "UA-0163"}], NOTE_NOW, 13)[0], text)
 
@@ -3855,13 +3854,13 @@ class ActionSectionTest(unittest.TestCase):
         text = note("task_managed")
         out, _, _ = apply_twice(self, text, [{"op": "ua_answer", "id": "UA-0164", "text": "~/notes"},
                                              {"op": "ua_answer", "id": "UA-0161", "text": "マージ済み"}])
-        self.assertIn("#### 回答\n~/notes\n\n\n### @agent", out)
-        self.assertIn("[repo-a#42](https://github.com/org/repo-a/pull/42)\n\n#### やりとり\nマージ済み\n\n### [UA-0164]", out)
+        self.assertIn("#### 回答\n\n~/notes\n\n\n### @agent", out)
+        self.assertIn("[repo-a#42](https://github.com/org/repo-a/pull/42)\n\n#### やりとり\n\nマージ済み\n\n### [UA-0164]", out)
         self.assertEqual((note_uas(out)["UA-0164"]["answer"], note_uas(out)["UA-0161"]["answer"]), ("~/notes", "マージ済み"))
         # ua_ack before ua_answer keeps the answer as well.
         acked = st.apply_note_ops(text, [{"op": "ua_ack", "id": "UA-0164"}, {"op": "ua_answer", "id": "UA-0164", "text": "~/notes"}], NOTE_NOW, 13)[0]
         self.assertEqual(note_uas(acked)["UA-0164"]["answer"], "~/notes")
-        self.assertIn("r13 -->\n>     #### 回答\n>     ~/notes\n", acked)
+        self.assertIn("r13 -->\n>     #### 回答\n>\n>     ~/notes\n", acked)
 
     def test_answer_appends_once(self):
         cases = (
@@ -3877,7 +3876,7 @@ class ActionSectionTest(unittest.TestCase):
                 out, _, _ = apply_twice(self, actions_note(lines), [{"op": "ua_answer", "id": "UA-0001", "text": answer}])
                 self.assertEqual(note_uas(out)["UA-0001"]["answer"], expected)
         out = st.apply_note_ops(actions_note(cases[2][1]), [{"op": "ua_answer", "id": "UA-0001", "text": "B1\nB2"}], NOTE_NOW, 13)[0]
-        self.assertIn(">     #### 回答\n>     A\n>\n>     > B1\n>     > B2\n", out)
+        self.assertIn(">     #### 回答\n>\n>     A\n>\n>     > B1\n>     > B2\n", out)
 
     def test_adopt_numbers_the_request_with_the_same_heading(self):
         lines = ["### @agent CHANGELOG も直す", "本文 1", "", "### @agent docs も見る", "", "本文 2"]
@@ -3885,14 +3884,14 @@ class ActionSectionTest(unittest.TestCase):
         op = {"op": "ua_adopt", "ua": {"id": "AA-0010", "description": "docs も見る"}}
         out, ids, problems = apply_twice(self, text, [op])
         self.assertEqual((ids, problems), (["aa-0010"], []))
-        self.assertEqual(out, actions_note(lines[:3] + ["### [AA-0010] @agent docs も見る", f"<!-- sv req since={NOTE_NOW} -->", "", "本文 2"]))
+        self.assertEqual(out, actions_note(lines[:3] + ["### [AA-0010] @agent docs も見る", "", f"<!-- sv req since={NOTE_NOW} -->", "", "本文 2"]))
         uas = st.parse_user_actions(note_section(out, "アクション"))
         self.assertEqual([(u["id"], u["body"]) for u in uas], [(None, "本文 1"), ("AA-0010", "本文 2")])
         self.assertTrue(st.journal_reflected(out, {"new_ids": ids}, 99))
         self.assertFalse(st.journal_reflected(text, {"new_ids": ids}, 99))
         adopted = st.apply_note_ops(text, [op, {"op": "ua_adopt", "ua": {"id": "AA-0011", "description": "CHANGELOG も直す"}}], NOTE_NOW, 13)[0]
         self.assertEqual([u["id"] for u in st.parse_user_actions(note_section(adopted, "アクション"))], ["AA-0011", "AA-0010"])
-        self.assertIn("### [AA-0011] @agent CHANGELOG も直す\n<!-- sv req since=2026-11-10T09:00:00+09:00 -->\n\n本文 1", adopted)
+        self.assertIn("### [AA-0011] @agent CHANGELOG も直す\n\n<!-- sv req since=2026-11-10T09:00:00+09:00 -->\n\n本文 1", adopted)
         missing = st.apply_note_ops(text, [{"op": "ua_adopt", "ua": {"id": "AA-0012", "description": "直した見出し"}}], NOTE_NOW, 13)
         self.assertEqual(missing[0], text)
         self.assertEqual(missing[2], ["ua_adopt AA-0012: no unnumbered @agent request '直した見出し'"])
@@ -3905,8 +3904,8 @@ class ActionSectionTest(unittest.TestCase):
         adopt = {"op": "ua_adopt", "ua": {"id": "AA-0010", "description": "docs も見る"}, "reply": "w-0141 に送りました"}
         out, ids, problems = apply_twice(self, text, [adopt])
         self.assertEqual((ids, problems), (["aa-0010"], []))
-        self.assertEqual(out, actions_note(["### [AA-0010] @agent docs も見る", f"<!-- sv req since={NOTE_NOW} -->"] + lines[1:]
-                                          + ["", "#### やりとり", f"> [!sv-agent] {NOTE_NOW[:10]} {NOTE_NOW[11:16]}", "> w-0141 に送りました", ">", ""]))
+        self.assertEqual(out, actions_note(["### [AA-0010] @agent docs も見る", "", f"<!-- sv req since={NOTE_NOW} -->"] + lines[1:]
+                                          + ["", "#### やりとり", "", f"> [!sv-agent] {NOTE_NOW[:10]} {NOTE_NOW[11:16]}", "> w-0141 に送りました", ">", "", ""]))
         finish = [{"op": "ua_ack", "id": "AA-0010"}, {"op": "ua_answer", "id": "AA-0010", "text": "完了: 2 件直しました\nhttps://example.com/c/1"}]
         done, _, problems = apply_twice(self, out, finish, rev=14)
         self.assertEqual(problems, [])
@@ -3927,24 +3926,30 @@ class ActionSectionTest(unittest.TestCase):
         add = {"op": "ua_add", "ua": {"id": "UA-0001", "kind": "ask", "answer_required": True, "description": "q", "body": "どれ?"},
                "options": ["案A", "案B"]}
         out, _, _ = apply_twice(self, actions_note([]), [add])
-        self.assertIn("#### やりとり\n- [ ] 案A\n- [ ] 案B\n\n> [!sv-input] この下に書いてください\n>\n\n\n", out)
+        self.assertIn("#### やりとり\n\n- [ ] 案A\n- [ ] 案B\n\n\n\n\n## ログ", out)
         self.assertEqual((note_uas(out)["UA-0001"]["answer"], note_uas(out)["UA-0001"]["thread"]), ("", []))
+        # A later item keeps the blank lines of a waiting one.
+        more = st.apply_note_ops(out, [{"op": "ua_add", "ua": {"id": "UA-0002", "kind": "ask", "description": "q2"}}], NOTE_NOW, 14)[0]
+        self.assertIn("- [ ] 案B\n\n\n\n\n### [UA-0002] @user q2\n", more)
         checked = out.replace("- [ ] 案B", "- [x] 案B")
         self.assertEqual(note_uas(checked)["UA-0001"]["answer"], "- [x] 案B")
         # The supervisor asks again in the same item: the user's answer is the text after its last message.
         ask = {"op": "ua_answer", "id": "UA-0001", "from": "agent", "text": "B のどちらの版ですか", "options": ["v1", "v2"]}
         asked, _, _ = apply_twice(self, checked, [ask])
-        self.assertIn(f"#### やりとり\n- [x] 案B\n\n> [!sv-agent] {at}\n> B のどちらの版ですか\n>\n\n- [ ] v1\n- [ ] v2\n\n"
-                      "> [!sv-input] この下に書いてください\n>\n\n\n## ログ", asked)
+        self.assertIn(f"#### やりとり\n\n- [x] 案B\n\n> [!sv-agent] {at}\n> B のどちらの版ですか\n>\n\n- [ ] v1\n- [ ] v2\n\n\n\n## ログ", asked)
         self.assertNotIn("案A", asked)
         ua = note_uas(asked)["UA-0001"]
         self.assertEqual((ua["answer"], [m["from"] for m in ua["thread"]]), ("", ["user", "agent"]))
-        replied = asked.replace("この下に書いてください\n>\n\n", "この下に書いてください\n>\nv2 で。**急ぎ**です\n")
+        replied = asked.replace("- [ ] v2\n\n\n", "- [ ] v2\n\nv2 で。**急ぎ**です\n")
         self.assertEqual(note_uas(replied)["UA-0001"]["answer"], "v2 で。**急ぎ**です")
         acked = st.apply_note_ops(replied, [{"op": "ua_ack", "id": "UA-0001"}], NOTE_NOW, 14)[0]
-        self.assertNotIn("sv-input", acked)
         self.assertNotIn("- [ ] v1", acked)
         self.assertEqual(note_uas(acked)["UA-0001"]["thread"], ua["thread"] + [{"from": "user", "text": "v2 で。**急ぎ**です", "at": None}])
+        # The `[!sv-input]` mark of 0.65.x notes is no text, and the next write removes it.
+        legacy = actions_note(["### [UA-0002] @user q", "<!-- sv ask since=s -->", "", "#### やりとり", "> [!sv-input] この下に書いてください", ">", "はい"])
+        self.assertEqual(note_uas(legacy)["UA-0002"]["answer"], "はい")
+        later = st.apply_note_ops(legacy, [{"op": "ua_answer", "id": "UA-0002", "from": "agent", "text": "了解"}], NOTE_NOW, 14)[0]
+        self.assertIn(f"#### やりとり\n\nはい\n\n> [!sv-agent] {at}\n> 了解\n>\n", later)
         for bad in ({"options": "a"}, {"options": ["a\nb"]}, {"from": "worker"}):
             with self.subTest(bad=bad), self.assertRaises(st.StateError):
                 st.apply_note_ops(out, [dict({"op": "ua_answer", "id": "UA-0001", "text": "x"}, **bad)], NOTE_NOW, 13)
@@ -3955,8 +3960,8 @@ class ActionSectionTest(unittest.TestCase):
         self.assertEqual((ua["answer"], ua["thread"]), ("", [{"from": "agent", "text": "w-0001 に送りました。", "at": None}]))
         out, _, _ = apply_twice(self, actions_note(legacy), [{"op": "ua_answer", "id": "AA-0001", "text": "直しました"}])
         self.assertNotIn("sv-input", out)
-        self.assertIn("> 直しました\n>\n\n\n## ログ", out)
-        follow = out.replace("> 直しました\n>\n\n", "> 直しました\n>\nテストも足してください\n")
+        self.assertIn("> 直しました\n>\n\n\n\n## ログ", out)
+        follow = out.replace("> 直しました\n>\n\n\n", "> 直しました\n>\n\nテストも足してください\n")
         ua = note_uas(follow)["AA-0001"]
         self.assertEqual(ua["answer"], "テストも足してください")
         self.assertEqual([m["from"] for m in ua["thread"]], ["agent", "agent", "user"])
@@ -4945,7 +4950,7 @@ class NoteCommitTest(unittest.TestCase):
                     {"op": "ua_add", "ua": {"kind": "ask", "description": "q2"}}]}
         self.assertEqual(self.env.commit(None, ops)[0], 0)
         self.assertEqual(st._pair(self.env.values(U1)), ("in progress", "user"))
-        answered = re.sub(r"(### \[UA-0001\] .*\n.*\n\n#### やりとり\n)", r"\1済み\n", self.env.text(U1))
+        answered = re.sub(r"(### \[UA-0001\] .*\n\n.*\n\n#### やりとり\n\n)", r"\1済み\n", self.env.text(U1))
         self.env.put(U1, answered.replace('assignee: "user"', 'assignee: "agent"'))
         event = self.env.scan()["events"][0]
         self.assertEqual((event["event"], event["row"]), ("resume", 11))
@@ -5654,7 +5659,7 @@ class MigrateExportTest(unittest.TestCase):
     def test_migrated_notes_use_the_action_format(self):
         text = st._migrated_note("u", "t", "task", "in progress", "agent", NOW, "依頼", 1,
                                  uas=[{"id": "UA-0001", "kind": "ask", "answer_required": True, "description": "q"}])
-        self.assertIn("## アクション\n\n### [UA-0001] @user q\n<!-- sv ask answer since=", text)
+        self.assertIn("## アクション\n\n### [UA-0001] @user q\n\n<!-- sv ask answer since=", text)
         self.assertEqual(list(note_uas(text)), ["UA-0001"])
 
     def test_user_action_kinds(self):
