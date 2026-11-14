@@ -6217,10 +6217,13 @@ class ChatSessionTest(unittest.TestCase):
         self.assertIn(f"updated: {launcher}", proc.stdout)
         self.assertTrue(os.access(launcher, os.X_OK))
 
-        # Fake hc and herdr-app record their argv; every terminal exists, at address t9.
+        # Fake hc and herdr-app record their argv; every terminal exists, at address t9. herdr-app fails on its first
+        # call, as when the window does not know a terminal started a moment ago.
         bin_dir, log = self.sup.parent / "bin", self.sup.parent / "calls.log"
         bin_dir.mkdir()
-        for name, out in (("hc", '[ "$1" = get ] && echo \'{"address": "t9"}\''), ("herdr-app", "")):
+        flag = self.sup.parent / "herdr-app-called"
+        for name, out in (("hc", '[ "$1" = get ] && echo \'{"address": "t9"}\''),
+                          ("herdr-app", f'[ -e "{flag}" ] || {{ touch "{flag}"; echo \'{{"error": "not yet"}}\'; exit 1; }}')):
             (bin_dir / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{log}"\n{out}\nexit 0\n', encoding="utf-8")
             (bin_dir / name).chmod(0o755)
         env["PATH"] = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
@@ -6230,7 +6233,8 @@ class ChatSessionTest(unittest.TestCase):
         self.assertEqual(calls[:4], ["hc kill sv-watch", "hc rm sv-watch", "hc kill sv", "hc rm sv"])
         self.assertTrue(calls[4].startswith(f"hc run --bg --no-parent --name sv --cwd {target} env PATH="))
         self.assertTrue(calls[5].startswith("hc run --bg --name sv-watch --parent sv"))
-        self.assertEqual(calls[6:], ["hc get sv --json", "herdr-app do terminal.keep --terminal t9", "hc ls"])
+        self.assertEqual(calls[6:], ["hc get sv --json"] + ["herdr-app do terminal.keep --terminal t9"] * 2 + ["hc ls"])
+        self.assertNotIn("warning", proc.stderr)
         self.assertFalse(any("sv-chat" in c for c in calls))
         log.unlink()
         proc = subprocess.run([str(launcher), "start"], capture_output=True, text=True, env=env)

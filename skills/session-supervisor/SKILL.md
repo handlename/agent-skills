@@ -259,7 +259,7 @@ Tell the user to open a terminal in Herdr (any terminal but `sv`) and run:
 | `stop` | Ends and removes `sv-watch`, `sv`, and `sv-chat`. Workers and managers keep running (`--outlive-parent`); the next `sv` takes them over (section 7). |
 | `chat` | Ends and removes `sv-chat`, then starts it again (for example after `setup` updated `chat/CLAUDE.md`). |
 
-It runs these commands from `<dir>`, and after starting `sv` or `sv-chat` gives that terminal a pane with `herdr-app do terminal.keep --terminal <address>` (a warning, not an error, when there is no Herdr window):
+It runs these commands from `<dir>`, and after starting `sv` or `sv-chat` gives that terminal a pane with `herdr-app do terminal.keep --terminal <address>`. The window may not know a terminal started a moment ago, so it retries for about 5 seconds; then it prints `herdr-app`'s answer as a warning (not an error, for example when there is no Herdr window) and the user runs that command by hand:
 
 ```bash
 hc run --bg --no-parent --name sv --cwd "<dir>" env PATH="$PATH" claude --model opus --permission-mode auto "session-supervisor skill で監督を再開してください"

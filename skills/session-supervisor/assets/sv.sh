@@ -23,10 +23,15 @@ end() {
 }
 
 # Give the terminal a pane (a tab) in the Herdr window, as `hc run --bg` starts it without one.
+# Right after `hc run` the window may not know the terminal yet, so this retries for about 5 seconds.
 keep() {
   id=$(hc get "$1" --json | python3 -c 'import json, sys; print(json.load(sys.stdin)["address"])')
-  herdr-app do terminal.keep --terminal "$id" >/dev/null ||
-    echo "warning: herdr-app do terminal.keep --terminal $id failed; give $1 a pane in Herdr" >&2
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    out=$(herdr-app do terminal.keep --terminal "$id" 2>&1) && return 0
+    sleep 0.5
+  done
+  echo "warning: herdr-app do terminal.keep --terminal $id failed: $out" >&2
+  echo "warning: give $1 a pane in Herdr (run the command above by hand)" >&2
 }
 
 start_sv() {
