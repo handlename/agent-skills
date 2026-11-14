@@ -5913,10 +5913,14 @@ class HerdrSchemaTest(unittest.TestCase):
     def test_herdr_manager_handle(self):
         state = fixture_state()
         add_project(state)
-        state["projects"][0]["manager"].update(runtime="herdr", session_id=SID, handle="m-p-0001")
+        state["projects"][0]["manager"].update(runtime="herdr", session_id=SID, handle="p-0001")
         self.assertEqual(st.validate(state), [])
-        state["projects"][0]["manager"]["handle"] = "m-P-0001"
-        self.assertTrue(any("handle" in e for e in st.validate(state)))
+        # A manager started before 0.66.0 keeps its old name.
+        state["projects"][0]["manager"]["handle"] = "m-p-0001"
+        self.assertEqual(st.validate(state), [])
+        for bad in ("P-0001", "m-P-0001", "p-0002"):
+            state["projects"][0]["manager"]["handle"] = bad
+            self.assertTrue(any("handle" in e for e in st.validate(state)), bad)
 
 
 class LaunchPlanTest(unittest.TestCase):
@@ -5947,9 +5951,11 @@ class LaunchPlanTest(unittest.TestCase):
     def test_manager_argv(self):
         state = fixture_state()
         add_project(state)
-        state["projects"][0]["manager"].update(runtime="herdr", session_id=SID, handle="m-p-0001")
-        argv = st.launch_argv(state, "m-p-0001", "Review.", {})
+        state["projects"][0]["manager"].update(runtime="herdr", session_id=SID, handle="p-0001")
+        argv = st.launch_argv(state, "p-0001", "Review.", {})
         self.assertIn("sv=manager", argv)
+        state["projects"][0]["manager"]["handle"] = "m-p-0001"
+        self.assertIn("project=P-0001", st.launch_argv(state, "m-p-0001", "Review.", {}))
         self.assertIn("project=P-0001", argv)
         self.assertEqual(argv[argv.index("--cwd") + 1], PROJECT_DIR)
         self.assertNotIn("env", argv)
@@ -5963,6 +5969,11 @@ class LaunchPlanTest(unittest.TestCase):
         add_project(state)
         find(state["tasks"], "T-0030")["project_id"] = "P-0001"
         self.assertEqual(st.project_worker_parent(state, "w-0030", hc(True)), "t9")
+        asked = []
+        st.project_worker_parent(state, "w-0030", lambda argv: asked.append(argv[2]) or hc(True)(argv))
+        state["projects"][0]["manager"].update(runtime="herdr", handle="m-p-0001")
+        st.project_worker_parent(state, "w-0030", lambda argv: asked.append(argv[2]) or hc(True)(argv))
+        self.assertEqual(asked, ["p-0001", "m-p-0001"])
         self.assertIsNone(st.project_worker_parent(state, "w-0030", hc(False)))
         gone = lambda argv: subprocess.CompletedProcess(argv, 1, "", "not found")
         self.assertIsNone(st.project_worker_parent(state, "w-0030", gone))
@@ -6052,11 +6063,11 @@ class ManagerHcRowsTest(unittest.TestCase):
 
     def test_blocked_manager_and_its_agents(self):
         terminals = [
-            {"address": "t5", "name": "m-p-0001", "state": "live", "status": {"state": "blocked", "msg": "approve"}},
+            {"address": "t5", "name": "p-0001", "state": "live", "status": {"state": "blocked", "msg": "approve"}},
             {"address": "t6", "name": "helper", "parent": "t5", "state": "live", "status": "working"},
             {"address": "t7", "name": "old", "parent": "t5", "state": "finished"},
         ]
-        rows = st.manager_rows_from_hc(self.manager(), "m-p-0001", terminals)
+        rows = st.manager_rows_from_hc(self.manager(), "p-0001", terminals)
         decisions = st.manager_reconcile(self.manager(), rows, {"last_message_ref": "a9", "pending_approval": True})
         self.assertIn({"decision": "foreign_session", "session_id": "helper"}, decisions)
         self.assertIn({"decision": "pending_approval", "session_id": SID}, decisions)
@@ -6065,22 +6076,22 @@ class ManagerHcRowsTest(unittest.TestCase):
 
     def test_supervisor_workers_under_the_manager_are_not_foreign(self):
         terminals = [
-            {"address": "t5", "name": "m-p-0001", "state": "live", "status": "done"},
+            {"address": "t5", "name": "p-0001", "state": "live", "status": "done"},
             {"address": "t6", "name": "w-0030", "parent": "t5", "state": "live", "status": "working"},
             {"address": "t7", "name": "helper", "parent": "t5", "state": "live", "status": "working"},
         ]
-        rows = st.manager_rows_from_hc(self.manager(), "m-p-0001", terminals, {"w-0030"})
+        rows = st.manager_rows_from_hc(self.manager(), "p-0001", terminals, {"w-0030"})
         foreign = [d["session_id"] for d in st.manager_reconcile(self.manager(), rows) if d["decision"] == "foreign_session"]
         self.assertEqual(foreign, ["helper"])
 
     def test_finished_and_missing_manager(self):
-        finished = [{"address": "t5", "name": "m-p-0001", "state": "finished"}]
-        rows = st.manager_rows_from_hc(self.manager(), "m-p-0001", finished)
+        finished = [{"address": "t5", "name": "p-0001", "state": "finished"}]
+        rows = st.manager_rows_from_hc(self.manager(), "p-0001", finished)
         self.assertEqual(st.manager_reconcile(self.manager(), rows), [{"decision": "external_archive", "session_id": SID}])
-        rows = st.manager_rows_from_hc(self.manager(intended_state="archived"), "m-p-0001", finished)
+        rows = st.manager_rows_from_hc(self.manager(intended_state="archived"), "p-0001", finished)
         self.assertEqual(st.manager_reconcile(self.manager(intended_state="archived"), rows),
                          [{"decision": "update", "observed_state": "archived"}])
-        self.assertEqual(st.manager_reconcile(self.manager(), st.manager_rows_from_hc(self.manager(), "m-p-0001", [])),
+        self.assertEqual(st.manager_reconcile(self.manager(), st.manager_rows_from_hc(self.manager(), "p-0001", [])),
                          [{"decision": "missing", "session_id": SID}])
 
 
@@ -6153,16 +6164,19 @@ class WatchVaultTest(unittest.TestCase):
         herdr_worker(state)
         add_project(state)
         project = state["projects"][0]
-        project["manager"].update(runtime="herdr", session_id=SID, handle="m-p-0001", title="P-0001 Uploader reliability")
+        project["manager"].update(runtime="herdr", session_id=SID, handle="p-0001", title="P-0001 Uploader reliability")
         # The stored (v2) state has no project name; the manager's title carries it.
         project.pop("name", None)
         tabs = [{"id": "tb1", "name": "w-0030", "terminals": [{"terminal": "t5", "name": "w-0030"}]},
-                {"id": "tb2", "name": "m-p-0001", "terminals": [{"terminal": "t6", "name": "m-p-0001"}]},
+                {"id": "tb2", "name": "p-0001", "terminals": [{"terminal": "t6", "name": "p-0001"}]},
                 {"id": "tb3", "name": "mine", "terminals": [{"terminal": "t7", "name": "w-0030"}]},
                 {"id": "tb4", "name": "w-0030", "terminals": [{"terminal": "t8", "name": None}]},
                 {"id": "tb5", "name": "w-0099", "terminals": [{"terminal": "t9", "name": "w-0099"}]}]
         self.assertEqual(st.tab_renames(state, [{"tabs": tabs}]),
-                         [("tb1", "w-0030 T-0030|w-0030 fix it"), ("tb2", "m-p-0001 Uploader reliability")])
+                         [("tb1", "w-0030 T-0030|w-0030 fix it"), ("tb2", "p-0001 Uploader reliability")])
+        project["manager"]["handle"] = "m-p-0001"
+        tabs[1].update(name="m-p-0001", terminals=[{"terminal": "t6", "name": "m-p-0001"}])
+        self.assertIn(("tb2", "m-p-0001 Uploader reliability"), st.tab_renames(state, [{"tabs": tabs}]))
 
     def test_tick_renames_tabs_and_tolerates_no_window(self):
         env = VaultEnv(self)
@@ -6342,6 +6356,7 @@ class HcGuardTest(unittest.TestCase):
         "hc run --bg --json --name w-0001 --cwd /t --label sv=worker --label task=T-0001 --outlive-parent claude 'x'",
         "hc run --bg --name sv-watch --label=sv=watch python3 state_tool.py watch-vault --state s.json",
         "hc kill w-0001",
+        "hc rm p-0006",
         "hc rm m-p-0006",
         "hc kill sv-watch",
         "hc send w-0001 'continue'",

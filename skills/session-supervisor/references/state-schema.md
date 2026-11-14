@@ -10,7 +10,7 @@ Field names are agent-neutral:
 
 - `runtime`: `"herdr"` on workers and managers started in Herdr (SKILL.md 6.2). Any other value is an error. Without it, the session was started in the Claude desktop app by an earlier version (SKILL.md section 7).
 - `session_id`: for `runtime: "herdr"`, the Claude Code conversation uuid that the supervisor chooses (a lowercase uuid4, set and committed before the start; `launch-plan` passes it as `claude --session-id`), or `null` before it is set. It locates the session's transcript for its latest message. For a desktop-app session, the id the app returned.
-- `handle`: for `runtime: "herdr"`, the `hc` terminal name and equal to the id: `w-NNNN` for a worker, `m-p-NNNN` for the manager of `P-NNNN` (lowercase, since `hc` names allow only `a-z 0-9 - _`). `validate` checks it. For a desktop-app session, the start-time name, e.g. `t0003-w0004`.
+- `handle`: for `runtime: "herdr"`, the `hc` terminal name and equal to the id: `w-NNNN` for a worker, `p-NNNN` for the manager of `P-NNNN` (lowercase, since `hc` names allow only `a-z 0-9 - _`; a manager started before 0.66.0 keeps `m-p-NNNN` until its next replacement). `validate` checks it. For a desktop-app session, the start-time name, e.g. `t0003-w0004`.
 - `branch` / `worktree_path`: printed by `state_tool.py prepare-worktree` (SKILL.md 6.2 step 2); copy them from its output, never guess them.
 - `task.id`: `T-NNNN`. `worker.id`: `w-NNNN`. `user_actions[].id`: `UA-NNNN` (kinds `ask` and `auto`). `agent_actions[].id`: `AA-NNNN` (kind `req`, the user's requests to the agent). `UA-` and `AA-` share one number sequence, so `UA-0241` and `AA-0241` never both exist, and `commit` rejects a prefix that does not match the kind; "user-action numbers" below covers both. Allocate the next number after the highest one in the current `tasks` / `workers` / `user_actions`; for task ids also count the `archived` stubs, which keep their task id (a revived task reuses its stub's id, see archived[]). Stubs keep no worker or user-action ids, so those numbers may be reused after a task is archived; uniqueness is checked only within the current state. User-action numbers are allocated across the user actions of `tasks` and `projects` together, so a task and a project never share one, and never reused: the next number is above both the highest open one and `supervisor.last_ua_number` (which covers user actions already acked in the notes).
 - `project.id`: `P-NNNN`, allocated as `supervisor.last_project_number + 1`; the counter is raised in the same candidate and never reused, even after the project is removed.
@@ -225,11 +225,11 @@ Optional (absent counts as an empty list). A project groups tasks under one proj
 
 | Field | Meaning |
 | :--- | :--- |
-| `runtime`, `session_id`, `started_by`, `handle`, `title` | As for workers. `handle` is `m-p-NNNN` (`pNNNN-manager` for a desktop-app manager of an earlier version), `title` is `P-NNNN <name>`. |
+| `runtime`, `session_id`, `started_by`, `handle`, `title` | As for workers. `handle` is `p-NNNN` (`m-p-NNNN` for a herdr manager started before 0.66.0, `pNNNN-manager` for a desktop-app manager of an earlier version), `title` is `P-NNNN <name>`. |
 | `intended_state`, `observed_state`, `observed_at` | Same ranges as for workers. The manager becomes `intended_state: archived` only when the project has `close` or the manager is observed `archived` or `missing`. |
 | `model` | Optional, as for workers. |
 | `last_report` | `null`, `{message_ref, status, summary, at}` with `status` `idle` or `needs_input`, or `{message_ref, status: "unparsed", error, at}`. `message_ref` makes the manager's turn-end handling idempotent (SKILL.md 6.11). |
-| `previous_session_ids[]` | Session ids (conversation uuids) of earlier managers of this project. Their turns and reports are ignored. A replacement reuses the handle `m-p-NNNN`. |
+| `previous_session_ids[]` | Session ids (conversation uuids) of earlier managers of this project. Their turns and reports are ignored. A replacement sets the handle `p-NNNN` (it was `m-p-NNNN` before 0.66.0) and otherwise reuses it. |
 | `replacements` | Integer >= 0: how many times the manager was replaced (SKILL.md 6.12). |
 
 ### tasks[]

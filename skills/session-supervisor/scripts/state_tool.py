@@ -162,7 +162,7 @@ GUARD_WORD_RE = re.compile(r"(?<![\w./-])(git|jj|gh|hc)(?![\w.-])")
 HC_DENY = frozenset({"keys", "exec", "attach", "server", "update", "machine", "file", "put", "connect"})
 # Catches the denied hc subcommands also where tokens cannot see them, e.g. a Python list ['hc', 'keys', ...].
 HC_DENY_RE = re.compile(r"(?<![\w./-])hc(?![\w.-])['\"]?\s*,?\s*['\"]?(" + "|".join(sorted(HC_DENY)) + r")(?![\w-])")
-HC_TARGET_RE = re.compile(r"^(w-\d+|m-p-\d+|sv-watch)$")
+HC_TARGET_RE = re.compile(r"^(w-\d+|(?:m-)?p-\d+|sv-watch)$")
 # The chat session (role chat) only reads hc and state; its requests reach sv through state_tool chat-send.
 CHAT_HC_ALLOW = frozenset({"ls", "get", "read", "events", "wait"})
 CHAT_TOOL_ALLOW = frozenset({"chat-send", "chat-wait", "digest", "note-show", "version"})
@@ -436,7 +436,7 @@ def _hc_violation(sub, args, role=None):
     if sub in ("kill", "rm"):
         pos = _positionals(args)
         if not pos or not HC_TARGET_RE.match(pos[0]):
-            return f"{sub} {pos[0] if pos else ''} (only terminals named w-NNNN, m-p-NNNN or sv-watch)".replace("  ", " ")
+            return f"{sub} {pos[0] if pos else ''} (only terminals named w-NNNN, p-NNNN, m-p-NNNN or sv-watch)".replace("  ", " ")
     if sub == "send" and _has_flag(args, ("--force",)):
         return "send --force (never answer a blocked dialog for the user)"
     return None
@@ -825,9 +825,11 @@ def _review_shape_errors(prefix, review):
     return errors
 
 
-def manager_handle(project_id):
-    # hc terminal names are lowercase: m-p-0006 for P-0006.
-    return f"m-{str(project_id).lower()}"
+def manager_handle(project):
+    """The hc terminal name of the project's manager: p-0006 for P-0006 (lowercase). A herdr manager started before
+    0.66.0 keeps the name it was started with, m-p-0006, until its next replacement (SKILL.md 6.12)."""
+    new = str(project.get("id")).lower()
+    return f"m-{new}" if (project.get("manager") or {}).get("handle") == f"m-{new}" else new
 
 
 def _runtime_errors(prefix, obj, handle):
@@ -847,7 +849,7 @@ def _runtime_errors(prefix, obj, handle):
 
 
 def _manager_shape_errors(prefix, m, project_id=None):
-    errors = _runtime_errors(f"{prefix}: manager", m, manager_handle(project_id))
+    errors = _runtime_errors(f"{prefix}: manager", m, manager_handle({"id": project_id, "manager": m}))
     for key in ("session_id", "started_by", "handle", "observed_at"):
         if m.get(key) is not None and not isinstance(m[key], str):
             errors.append(f"{prefix}: manager.{key} must be a string or null")
@@ -4815,14 +4817,14 @@ def _session_cwd(worker):
 
 
 def _herdr_target(state, ident):
-    """(kind, session, cwd, label) for a worker id or a manager handle m-p-NNNN."""
+    """(kind, session, cwd, label) for a worker id or a manager handle p-NNNN (m-p-NNNN before 0.66.0)."""
     for w in state.get("workers", []):
         if w.get("id") == ident:
             return "worker", w, _session_cwd(w), f"task={w.get('task_id')}"
     for p in _projects(state):
-        if manager_handle(p.get("id")) == ident:
+        if manager_handle(p) == ident:
             return "manager", p.get("manager") or {}, p.get("dir"), f"project={p.get('id')}"
-    raise StateError(f"{ident} is neither a worker id nor a manager handle (m-p-NNNN)")
+    raise StateError(f"{ident} is neither a worker id nor a manager handle (p-NNNN)")
 
 
 def launch_argv(state, ident, prompt, herdr, parent=None):
@@ -4871,7 +4873,8 @@ def project_worker_parent(state, ident, runner):
     if not (task and task.get("project_id")):
         return None
     try:
-        got = _hc_json(runner, ["hc", "get", manager_handle(task["project_id"]), "--json"])
+        project = next((p for p in _projects(state) if p.get("id") == task["project_id"]), {"id": task["project_id"]})
+        got = _hc_json(runner, ["hc", "get", manager_handle(project), "--json"])
     except (StateError, OSError, ValueError):
         return None
     return got.get("address") if got.get("state") == "live" else None
@@ -4895,7 +4898,7 @@ def cmd_launch_plan(args):
 def _herdr_sessions(state):
     """(handle, session) of every herdr worker and manager in the state."""
     out = [(w.get("handle"), w) for w in state.get("workers", []) if w.get("runtime") == "herdr"]
-    out += [(manager_handle(p.get("id")), p.get("manager") or {}) for p in _projects(state)
+    out += [(manager_handle(p), p.get("manager") or {}) for p in _projects(state)
             if (p.get("manager") or {}).get("runtime") == "herdr"]
     return out
 
@@ -5158,7 +5161,7 @@ def cmd_manager_reconcile(args):
     project = _project(view, args.project)
     data = _read_json(args.from_file) if args.from_file else _hc_json(_run_hc, ["hc", "ls", "--all", "--json"])
     workers = {w.get("handle") for w in view.get("workers", []) if w.get("runtime") == "herdr"}
-    rows = manager_rows_from_hc(project["manager"], manager_handle(project["id"]), data.get("terminals", []), workers)
+    rows = manager_rows_from_hc(project["manager"], manager_handle(project), data.get("terminals", []), workers)
     events = {"last_message_ref": args.last_message_ref, "pending_approval": any(r.get("blocked") for r in rows)}
     print(json.dumps(manager_reconcile(project["manager"], rows, events), ensure_ascii=False))
     return 0
@@ -5334,7 +5337,7 @@ def watch_messages(scan, terminals, notify_address, memo):
     forwarded = memo.setdefault("sessions", {})
     for t in terminals:
         name = t.get("name") or ""
-        if not re.match(r"^(w-\d+|m-p-\d+)$", name):
+        if not re.match(r"^(w-\d+|(?:m-)?p-\d+)$", name):
             continue
         status = t.get("status")
         word = status.get("state") if isinstance(status, dict) else status
@@ -5353,11 +5356,11 @@ def watch_messages(scan, terminals, notify_address, memo):
 
 def tab_renames(state, spaces):
     """(tab id, new name) for each Herdr tab that is still named after the herdr worker or manager in it, as Herdr names
-    the tab when the user gives that terminal a pane: `w-NNNN <task title>` / `m-p-NNNN <project name>`. A tab the user
+    the tab when the user gives that terminal a pane: `w-NNNN <task title>` / `p-NNNN <project name>`. A tab the user
     named otherwise is left alone. spaces: `herdr-app ls` spaces."""
     purpose = {w.get("handle"): w.get("title") for w in state.get("workers", []) if w.get("runtime") == "herdr"}
     # A v2 state keeps the project name only in the manager's title `P-NNNN <name>` (the note holds the name).
-    purpose.update({manager_handle(p.get("id")): re.sub(r"^P-\d+\s+", "", p["manager"].get("title") or "")
+    purpose.update({manager_handle(p): re.sub(r"^P-\d+\s+", "", p["manager"].get("title") or "")
                     for p in _projects(state) if (p.get("manager") or {}).get("runtime") == "herdr"})
     out = []
     for space in spaces:
@@ -5776,14 +5779,14 @@ def build_parser():
     p = sub.add_parser("launch-plan", help="print (or with --run, run) the hc run argv that starts a herdr worker or manager")
     p.add_argument("--state", required=True)
     p.add_argument("--claude-md", required=True)
-    p.add_argument("--worker", required=True, help="a worker id (w-0123) or a manager handle (m-p-0006)")
+    p.add_argument("--worker", required=True, help="a worker id (w-0123) or a manager handle (p-0006)")
     p.add_argument("--prompt-file", required=True)
     p.add_argument("--run", action="store_true", help="run the argv and exit with its status instead of printing it")
     p.set_defaults(func=cmd_launch_plan)
 
     p = sub.add_parser("last-message", help="write the last assistant message of a herdr worker or manager from its transcript")
     p.add_argument("--state", required=True)
-    p.add_argument("--id", required=True, help="worker id (w-NNNN) or manager handle (m-p-NNNN)")
+    p.add_argument("--id", required=True, help="worker id (w-NNNN) or manager handle (p-NNNN)")
     p.add_argument("--out", required=True)
     p.set_defaults(func=cmd_last_message)
 

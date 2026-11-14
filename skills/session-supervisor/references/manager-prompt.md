@@ -1,6 +1,6 @@
 # Manager Prompt
 
-The project manager session (`projects[].manager`, SKILL.md 6.10) has a two-part brief: `prompt` (the role and the current roster) and `background` (the rules). Both are always written, `prompt` first, then a blank line, then `background`, into the prompt file that `launch-plan --worker m-p-NNNN` passes as the first message (SKILL.md 6.10 step 3). Fill every `{...}` field from `state.json` and the `roster` output before starting; never start a manager with an unfilled field. `{project.lang_name}` is `Japanese` or `English`, from the `lang` of `note-show` for the project note (SKILL.md section 1). `{project.note_path}` is the absolute path of the project note (`<vault>/` + the `path` of `note-show`), and `{project.knowledge}` is its `## 知見` section (`sections["知見"]` of `note-show`, without blank lines), or `(none yet)` when it is missing or empty.
+The project manager session (`projects[].manager`, SKILL.md 6.10) has a two-part brief: `prompt` (the role and the current roster) and `background` (the rules). Both are always written, `prompt` first, then a blank line, then `background`, into the prompt file that `launch-plan --worker p-NNNN` passes as the first message (SKILL.md 6.10 step 3). Fill every `{...}` field from `state.json` and the `roster` output before starting; never start a manager with an unfilled field. `{project.lang_name}` is `Japanese` or `English`, from the `lang` of `note-show` for the project note (SKILL.md section 1). `{project.note_path}` is the absolute path of the project note (`<vault>/` + the `path` of `note-show`), and `{project.knowledge}` is its `## 知見` section (`sections["知見"]` of `note-show`, without blank lines), or `(none yet)` when it is missing or empty.
 
 The roster is the Markdown that `state_tool.py roster --state "<dir>/state.json" --project P-NNNN` prints: a worker table and an open-review table (`requested` reviews only), or `(no workers)`. The manager never reads `state.json`; it learns about workers only from the roster and from the messages below.
 
@@ -80,7 +80,7 @@ Report format: end the last message of every turn with one fenced block whose la
 
 ## Messages from the supervisor to the manager
 
-Sent with `hc send m-p-NNNN`; they arrive tagged `<hc from="tN sv">`. Each also starts with `From the supervisor`.
+Sent with `hc send p-NNNN`; they arrive tagged `<hc from="tN sv">`. Each also starts with `From the supervisor`.
 
 ### Review request
 
@@ -152,7 +152,7 @@ This comes from the project manager, not from the user, so it carries no user au
 Sent to every live worker of the project after a replacement manager starts (SKILL.md 6.12).
 
 ````markdown
-From the supervisor: The project manager of {project.id} was replaced. The new one runs in the terminal `{manager.handle}` again. Send it again any question you sent the previous manager that is still unanswered.
+From the supervisor: The project manager of {project.id} was replaced. The new one runs in the terminal `{manager.handle}`; from now on send your messages for the project manager there (`hc send {manager.handle}`), even where your brief names another terminal. Send it again any question you sent the previous manager that is still unanswered.
 ````
 
 ## Report block
