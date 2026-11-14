@@ -4760,6 +4760,27 @@ class NoteCommitTest(unittest.TestCase):
         self.assertEqual((task["note"], task["note_seen"]), (reserved["path"], st.note_values(text)))
         self.assertEqual(self.env.scan(), {"events": [], "warnings": []})
 
+    def test_chat_task_and_its_new_project_are_created_in_one_commit(self):
+        code, out, err = self.env.run("new-note", "--state", str(self.env.state_path), "--kind", "project", "--count", "2")
+        project_note, task_note = json.loads(out)
+        cand = self.env.load()
+        to_v2(add_project(cand), "projects", project_note["uid"])["manager"].update(intended_state="pending", observed_state="none")
+        git_task(cand, "T-0022", "w-0022")
+        find(cand["workers"], "w-0022").update(cwd="/repo/c", intended_state="pending", observed_state="none", session_id=None)
+        to_v2(find(cand["tasks"], "T-0022"), "tasks", task_note["uid"])["project_id"] = "P-0001"
+        code, out, err = self.env.commit(cand, {
+            project_note["uid"]: [{"op": "create", "uid": project_note["uid"], "title": "Nature MCP", "kind": "project",
+                                   "status": "in progress", "assignee": "agent", "request": "Nature MCP を作る https://github.com/org/repo/issues/1"}],
+            task_note["uid"]: [{"op": "create", "uid": task_note["uid"], "title": "README の typo", "kind": "task",
+                                "status": "in progress", "assignee": "agent", "request": "README の typo を直して",
+                                "parent": project_note["uid"]}]})
+        self.assertEqual(code, 0, err)
+        state = self.env.load()
+        self.assertEqual(sorted(out["notes_written"]), sorted([project_note["path"], task_note["path"]]))
+        props = st.parse_frontmatter((self.env.vault / task_note["path"]).read_text(encoding="utf-8"))[0]
+        self.assertEqual((props["project_id"], st.parent_project_id(state, props["parent"])), ("P-0001", "P-0001"))
+        self.assertEqual(self.env.scan(), {"events": [], "warnings": []})
+
     def test_held_task_waits_for_the_user_and_done_user_confirms(self):
         cand = self.env.load()
         f = dict(finding("w-0020"), title=find(cand["workers"], "w-0020").get("title"),
