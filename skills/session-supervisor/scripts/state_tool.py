@@ -79,11 +79,13 @@ NOTE_KEYS = ("uid", "title", "para", "aliases", "created_at", "archived_at", "ta
              "follows")
 NOTE_RAW_KEYS = ("created_at", "archived_at")
 NOTE_SUMMARY_MAX = 80
-NOTE_SECTIONS = ("概要", "サブタスク", "アクション", "関連ノート", "関連資料", "成果物", "ログ")
+NOTE_SECTIONS = ("概要", "知見", "サブタスク", "アクション", "関連ノート", "関連資料", "成果物", "ログ")
 UA_SECTION = "アクション"
 ST_SECTION = "サブタスク"
 ART_SECTION = "成果物"
 LOG_SECTION = "ログ"
+KN_SECTION = "知見"
+KN_KEY_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 UA_KINDS = ("ask", "auto", "req")
 UA_DETECTORS = ("worker_report", "worker_started", "archived_observed", "approval_cleared", "pr_closed",
                 "review_state", "start_possible", "manager_report", "foreign_session_gone", "children_closed",
@@ -2010,7 +2012,8 @@ def new_note_text(uid, title, kind, status, assignee, now, request="", parent=No
     content = (request or "").strip("\n")
     if original and original.strip("\n"):
         content = "\n\n".join(c for c in (content, "\n".join([QUOTE_HEAD] + _quote(original.strip("\n")))) if c)
-    sections = [f"## {name}\n\n{content}\n" if name == "概要" and content else f"## {name}\n\n" for name in NOTE_SECTIONS]
+    sections = [f"## {name}\n\n{content}\n" if name == "概要" and content else f"## {name}\n\n" for name in NOTE_SECTIONS
+                if kind == "project" or name != KN_SECTION]
     body = "\n".join(sections[:1] + [PROJECT_TASKS_SECTION] * (kind == "project") + sections[1:])
     return f"---\n{head}---\n{body}"
 
@@ -2671,10 +2674,43 @@ def _op_art_replace_group(lines, op, now, rev, index, problems):
     return block_ids
 
 
+def _knowledge_errors(item):
+    if not isinstance(item, dict) or not (isinstance(item.get("key"), str) and KN_KEY_RE.fullmatch(item["key"])
+                                          and len(item["key"]) <= 40):
+        return "each knowledge entry needs a key of lowercase letters, digits, and dashes (at most 40 characters)"
+    if not isinstance(item.get("text"), str) or "\n" in item["text"]:
+        return f"knowledge {item['key']}: text must be one line (empty to remove the entry)"
+    return None
+
+
+def _op_kn_set(lines, op, now, rev, index, problems):
+    """Sets the `## 知見` entry `- <text> ^sv-kn-<key>`: replaces the line that carries the block id, appends it when
+    there is none, and removes it when text is empty. Lines without an sv-kn block id are the user's."""
+    error = _knowledge_errors(op)
+    if error:
+        raise StateError(f"kn_set: {error}")
+    block_id = f"sv-kn-{op['key']}"
+    text = op["text"].strip()
+    span = _section_span(lines, KN_SECTION)
+    pattern = re.compile(rf"\^{re.escape(block_id)}[ \t]*$")
+    at = next((i for i in range(*span) if pattern.search(lines[i])), None) if span else None
+    line = f"- {text} ^{block_id}"
+    if at is not None:
+        if text:
+            lines[at] = line
+        else:
+            del lines[at]
+        return []
+    if not text:
+        return []
+    _insert_in_section(lines, KN_SECTION, [line])
+    return [block_id]
+
+
 _NOTE_BODY_OPS = {
     "log": _op_log, "ua_add": _op_ua_add, "ua_answer": _op_ua_answer, "ua_ack": _op_ua_ack, "ua_adopt": _op_ua_adopt,
     "art_add": _op_art_add, "art_set": _op_art_set, "art_replace_group": _op_art_replace_group,
-    "st_adopt": _op_st_adopt, "st_add": _op_st_add, "st_set": _op_st_set,
+    "st_adopt": _op_st_adopt, "st_add": _op_st_add, "st_set": _op_st_set, "kn_set": _op_kn_set,
 }
 
 
@@ -3457,6 +3493,12 @@ def parse_project_report(text, expect_project=None):
             return {"ok": False, "error": "each plan needs kind redo or new"}
         if not _fields_ok(plan, keys) or not isinstance(plan.get("worker_id", ""), str):
             return {"ok": False, "error": f"a {kind} plan needs non-empty {' and '.join(keys)} (worker_id, when given, a string)"}
+    if not isinstance(report.get("knowledge", []), list):
+        return {"ok": False, "error": "knowledge, when given, must be a list"}
+    for item in report.get("knowledge", []):
+        error = _knowledge_errors(item)
+        if error:
+            return {"ok": False, "error": error}
     if "done" in report and not (isinstance(report["done"], str) and report["done"].strip()):
         return {"ok": False, "error": "done, when given, must be a non-empty summary string"}
     if expect_project is not None and report["project_id"] != expect_project:
@@ -3536,6 +3578,9 @@ def plan_actions(state, project_id, report, running=(), proposal_titles=()):
         else:
             actions.append(dict(action, kind="redo_ambiguous" if live else "redo_start",
                                 worker_ids=[w["id"] for w in live]))
+    if project.get("uid"):
+        actions += [{"kind": "knowledge", "uid": project["uid"], "key": k["key"], "text": k["text"].strip()}
+                    for k in report.get("knowledge", [])]
     if report.get("done"):
         actions.append({"kind": "project_done", "summary": report["done"]})
     return actions

@@ -1,6 +1,6 @@
 # Manager Prompt
 
-The project manager session (`projects[].manager`, SKILL.md 6.10) has a two-part brief: `prompt` (the role and the current roster) and `background` (the rules). Both are always written, `prompt` first, then a blank line, then `background`, into the prompt file that `launch-plan --worker m-p-NNNN` passes as the first message (SKILL.md 6.10 step 3). Fill every `{...}` field from `state.json` and the `roster` output before starting; never start a manager with an unfilled field. `{project.lang_name}` is `Japanese` or `English`, from the `lang` of `note-show` for the project note (SKILL.md section 1).
+The project manager session (`projects[].manager`, SKILL.md 6.10) has a two-part brief: `prompt` (the role and the current roster) and `background` (the rules). Both are always written, `prompt` first, then a blank line, then `background`, into the prompt file that `launch-plan --worker m-p-NNNN` passes as the first message (SKILL.md 6.10 step 3). Fill every `{...}` field from `state.json` and the `roster` output before starting; never start a manager with an unfilled field. `{project.lang_name}` is `Japanese` or `English`, from the `lang` of `note-show` for the project note (SKILL.md section 1). `{project.note_path}` is the absolute path of the project note (`<vault>/` + the `path` of `note-show`), and `{project.knowledge}` is its `## 知見` section (`sections["知見"]` of `note-show`, without blank lines), or `(none yet)` when it is missing or empty.
 
 The roster is the Markdown that `state_tool.py roster --state "<dir>/state.json" --project P-NNNN` prints: a worker table and an open-review table (`requested` reviews only), or `(no workers)`. The manager never reads `state.json`; it learns about workers only from the roster and from the messages below.
 
@@ -12,6 +12,11 @@ You are the project manager of project {project.id} ({project.name}), started by
 Working directory: {project.dir}
 Context document: {project.context_doc_url}
 Read the context document first; it holds the goal and background of this project.
+Project note: {project.note_path}
+
+Knowledge of this project so far (`## 知見` of the project note):
+
+{project.knowledge}
 
 Messages from other terminals arrive as `<hc from="tN <name>">...</hc>`: `sv` is the supervisor, `w-NNNN` a worker. The supervisor starts the project's workers under your terminal so that Herdr shows them beside you; they are still the supervisor's sessions, and `hc` types no notes about them into this session.
 
@@ -51,6 +56,11 @@ Plans:
 - When you judge the whole project complete, add `"done": "<summary>"` to your report. The user confirms or rejects it; until then keep reviewing as usual.
 - Put in `plans` only what you decided since your previous report; never repeat an earlier plan.
 
+Knowledge:
+- When an approved result, a finished task, or an answer of the user taught something that later tasks of this project need (a decision of the user, a convention, a constraint, a pitfall, how a change is applied), return it in `knowledge` as one line in {project.lang_name}. Not progress or results: the supervisor records those in the notes already.
+- Before returning `knowledge`, read the `## 知見` section of the project note again: the user may have corrected or deleted entries since. An entry ends with `^sv-kn-<key>`; return its `key` with the new text to replace it, or with an empty `text` to remove it. Keep the user's corrections, never add again an entry the user deleted, and leave lines without `^sv-kn-` (the user's own) alone.
+- Put in `knowledge` only what changed since your previous report.
+
 Questions:
 - When a question for the user remains open, end the turn with `status` `needs_input` and put each question in `questions` as one line. Never wait for an answer inside a turn.
 - Write `questions`, `summary`, the `done` summary, and the titles and texts of new task proposals in {project.lang_name}, the language of the project note: the supervisor copies them into the user's notes.
@@ -64,6 +74,7 @@ Report format: end the last message of every turn with one fenced block whose la
 - `status`: `idle` | `needs_input`. `needs_input` requires at least one entry in `questions`.
 - `reviews[]`: `{"review_id": "R-NNNN", "verdict": "approve" | "reject", "comment": "...", "redo": "..."}`. `reject` requires a non-empty `redo`.
 - `plans[]`: `{"kind": "redo", "task_id": "T-NNNN", "text": "...", "worker_id": "w-NNNN"}` (`worker_id` optional) or `{"kind": "new", "title": "...", "text": "..."}`.
+- `knowledge` (optional): `[{"key": "<lowercase-dashed-key>", "text": "<one line, or empty to remove>"}]`; a new `key` adds an entry.
 - `done` (optional): a non-empty summary, only when the whole project is complete.
 ````
 
@@ -160,12 +171,15 @@ The manager places one fenced JSON block tagged `project-report` at the end of t
     {"kind": "redo", "task_id": "T-0005", "text": "Handle the empty response case too."},
     {"kind": "new", "title": "Add metrics", "text": "Export request counts from the uploader."}
   ],
-  "questions": []
+  "questions": [],
+  "knowledge": [
+    {"key": "retry-policy", "text": "Uploader retries use the backoff of lib/retry; do not add another one."}
+  ]
 }
 ```
 
 Rules:
 
 - `state_tool.py parse-project-report --file <message.txt> --expect-project P-0001` prints `{"ok": true, "report": {...}}` or `{"ok": false, "error": "..."}`. Pass only the manager's last assistant message. It checks the shape above, the `project_id`, and the types of the strings and lists.
-- `state_tool.py plan-actions --state "<dir>/state.json" --project P-0001 --file <message.txt> [--running <worker id>]...` turns `reviews`, `plans`, and `done` into the actions the supervisor carries out (SKILL.md 6.11): a `new` plan becomes `proposal_note` (a backlog / user task note with the project note as `parent`; `proposal_dup` when such a note with the same title is waiting), and `done` becomes `project_done`. Duplicates and verdicts that no longer apply are dropped there, so the manager's wording never changes the state directly.
+- `state_tool.py plan-actions --state "<dir>/state.json" --project P-0001 --file <message.txt> [--running <worker id>]...` turns `reviews`, `plans`, `knowledge`, and `done` into the actions the supervisor carries out (SKILL.md 6.11): a `new` plan becomes `proposal_note` (a backlog / user task note with the project note as `parent`; `proposal_dup` when such a note with the same title is waiting), each `knowledge` entry becomes `knowledge` (a `kn_set` op on the project note), and `done` becomes `project_done`. Duplicates and verdicts that no longer apply are dropped there, so the manager's wording never changes the state directly.
 - If the multi-line block arrives mangled, ask the manager to resend it as a single-line JSON object inside the same `project-report` fence.

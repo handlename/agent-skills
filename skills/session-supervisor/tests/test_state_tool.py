@@ -3580,7 +3580,7 @@ class NoteTemplateTest(unittest.TestCase):
         self.assertEqual((props["status"], props["assignee"], props["parent"]), ("in progress", "agent", "[[20261101_090000]]"))
         self.assertFalse(re.search(r"^# ", body, re.M))
         sections = st.parse_sections(body)
-        self.assertEqual(list(sections), list(st.NOTE_SECTIONS))
+        self.assertEqual(list(sections), [n for n in st.NOTE_SECTIONS if n != st.KN_SECTION])
         self.assertEqual(sections["概要"].strip(), "typo を直してください。\n\n- README.md")
 
     def test_project_note_and_optional_links(self):
@@ -3751,7 +3751,7 @@ class ActionSectionTest(unittest.TestCase):
         created, _, problems = st.apply_note_ops("", [create, {"op": "ua_add", "ua": {"id": "UA-0001", "kind": "ask", "description": "q"}},
                                                       {"op": "log", "text": "受領"}], NOTE_NOW, 1)
         self.assertEqual(problems, [])
-        self.assertEqual(list(st.parse_sections(st.parse_frontmatter(created)[1])), list(st.NOTE_SECTIONS))
+        self.assertEqual(list(st.parse_sections(st.parse_frontmatter(created)[1])), [n for n in st.NOTE_SECTIONS if n != st.KN_SECTION])
         self.assertEqual(st._request_text(note_section(created, "概要")), "原文 <!-- 閉じない\n続き")
         self.assertEqual(list(note_uas(created)), ["UA-0001"])
 
@@ -5439,6 +5439,34 @@ class ProposalNoteTest(unittest.TestCase):
                                    {"kind": "proposal_dup", "title": "Add docs", "text": "again"}])
         self.assertEqual([a["kind"] for a in self.plan([{"kind": "new", "title": "Add docs", "text": "x"}], {"Add docs"})],
                          ["proposal_dup"])
+
+    def test_knowledge_entries_become_actions_on_the_project_note(self):
+        actions = self.plan(knowledge=[{"key": "apply-steps", "text": " restart-sv.sh で反映する "},
+                                       {"key": "old-rule", "text": ""}])
+        self.assertEqual(actions, [{"kind": "knowledge", "uid": U3, "key": "apply-steps", "text": "restart-sv.sh で反映する"},
+                                   {"kind": "knowledge", "uid": U3, "key": "old-rule", "text": ""}])
+        for bad in ([{"key": "Bad Key", "text": "x"}], [{"key": "k", "text": "a\nb"}], {"key": "k"}):
+            report = {"project_id": "P-0001", "status": "idle", "summary": "s", "reviews": [], "plans": [],
+                      "questions": [], "knowledge": bad}
+            self.assertFalse(st.parse_project_report("```project-report\n" + json.dumps(report) + "\n```")["ok"])
+
+    def test_kn_set_adds_replaces_and_removes_entries(self):
+        text = st.new_note_text(U3, "P", "project", "in progress", "agent", NOTE_NOW, "ctx")
+        sections = st.parse_sections(st.parse_frontmatter(text)[1])
+        self.assertEqual(list(sections)[:3], ["概要", "タスク", "知見"])
+        op = {"op": "kn_set", "key": "push", "text": "push はユーザーの指示があるまでしない"}
+        text, ids, _ = st.apply_note_ops(text, [op, {"op": "kn_set", "key": "lang", "text": "日本語で書く"}], NOTE_NOW, 5)
+        self.assertEqual(ids, ["sv-kn-push", "sv-kn-lang"])
+        self.assertEqual(st.apply_note_ops(text, [op], NOTE_NOW, 5)[0], text)
+        text = text.replace("日本語で書く ^sv-kn-lang", "日本語で書く(ユーザーが修正) ^sv-kn-lang") + "\n"
+        text = text.replace("## 知見\n", "## 知見\n\n- ユーザーの行\n", 1)
+        text = st.apply_note_ops(text, [{"op": "kn_set", "key": "push", "text": "push は PR #7 だけ"},
+                                        {"op": "kn_set", "key": "lang", "text": ""}], NOTE_NOW, 6)[0]
+        kn = st.parse_sections(st.parse_frontmatter(text)[1])["知見"]
+        self.assertEqual([l for l in kn.split("\n") if l.strip()], ["- ユーザーの行", "- push は PR #7 だけ ^sv-kn-push"])
+        old = "---\nuid: x\n---\n## 概要\n\nctx\n\n## アクション\n\n## ログ\n"
+        text = st.apply_note_ops(old, [op], NOTE_NOW, 7)[0]
+        self.assertEqual(list(st.parse_sections(st.parse_frontmatter(text)[1])), ["概要", "知見", "アクション", "ログ"])
 
     def test_proposal_titles_reads_backlog_user_children(self):
         child = st.new_note_text(U1, "Add docs", "task", "backlog", "user", NOTE_NOW, "write docs", parent=U3)
