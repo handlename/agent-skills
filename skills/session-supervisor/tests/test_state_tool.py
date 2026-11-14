@@ -1621,12 +1621,12 @@ class SetupTest(unittest.TestCase):
     def hooks(self, target, event="SessionStart"):
         return json.loads((target / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"][event]
 
-    def test_creates_eight_files_with_matcher(self):
+    def test_creates_ten_files_with_matcher(self):
         target = self.root / "sup"
         proc = self.setup_dir(target)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.files(target), [".claude/settings.json", ".supervisor/state_tool.py", "CLAUDE.md",
-                                              "chat/.claude/settings.json", "chat/CLAUDE.md", "state.json",
+                                              "chat/.claude/settings.json", "chat/CLAUDE.md", "state.json", "sv.sh",
                                               "vault/Supervisor.md", "vault/_templates/sv-project.md",
                                               "vault/_templates/sv-status.md"])
         entries = self.hooks(target)
@@ -6201,6 +6201,42 @@ class ChatSessionTest(unittest.TestCase):
         proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True, env=env)
         self.assertIn(f"updated: {brief}", proc.stdout)
         self.assertIn(f"exists: {target / 'chat' / '.claude' / 'settings.json'}", proc.stdout)
+
+    def test_setup_installs_the_launcher_and_restart_keeps_sv(self):
+        target = self.sup.parent / "fresh"
+        env = dict(os.environ, HOME=str(self.sup.parent / "home"))
+        proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True, env=env)
+        launcher = target / "sv.sh"
+        self.assertIn(f"created: {launcher}", proc.stdout)
+        self.assertEqual(launcher.read_bytes(), (SKILL / "assets" / "sv.sh").read_bytes())
+        self.assertTrue(os.access(launcher, os.X_OK))
+        write = {"tool_name": "Write", "tool_input": {"file_path": str(target / "sv.sh")}, "cwd": str(target)}
+        self.assertIsNotNone(st.guard_decision(write, str(target), {}))
+        launcher.write_text("old", encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True, env=env)
+        self.assertIn(f"updated: {launcher}", proc.stdout)
+        self.assertTrue(os.access(launcher, os.X_OK))
+
+        # Fake hc and herdr-app record their argv; every terminal exists, at address t9.
+        bin_dir, log = self.sup.parent / "bin", self.sup.parent / "calls.log"
+        bin_dir.mkdir()
+        for name, out in (("hc", '[ "$1" = get ] && echo \'{"address": "t9"}\''), ("herdr-app", "")):
+            (bin_dir / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{log}"\n{out}\nexit 0\n', encoding="utf-8")
+            (bin_dir / name).chmod(0o755)
+        env["PATH"] = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+        proc = subprocess.run([str(launcher), "restart"], capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        calls = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(calls[:4], ["hc kill sv-watch", "hc rm sv-watch", "hc kill sv", "hc rm sv"])
+        self.assertTrue(calls[4].startswith(f"hc run --bg --no-parent --name sv --cwd {target} env PATH="))
+        self.assertTrue(calls[5].startswith("hc run --bg --name sv-watch --parent sv"))
+        self.assertEqual(calls[6:], ["hc get sv --json", "herdr-app do terminal.keep --terminal t9", "hc ls"])
+        self.assertFalse(any("sv-chat" in c for c in calls))
+        log.unlink()
+        proc = subprocess.run([str(launcher), "start"], capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("use restart", proc.stderr)
+        self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["hc get sv"])
 
 
 class HcGuardTest(unittest.TestCase):

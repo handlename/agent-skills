@@ -148,7 +148,7 @@ PROJECT_NAME_RE = re.compile(r"^P-\d{4,}-[a-z0-9-]{1,40}$")
 
 GUARD_MATCHER = "Edit|MultiEdit|Write|NotebookEdit|Bash"
 GUARD_INPUT_KEYS = {"Edit": "file_path", "MultiEdit": "file_path", "Write": "file_path", "NotebookEdit": "notebook_path", "Bash": "command"}
-GUARD_PROTECTED = (".claude", "state.json", ".supervisor/state_tool.py")
+GUARD_PROTECTED = (".claude", "state.json", ".supervisor/state_tool.py", "sv.sh")
 GUARD_SEPARATOR_CHARS = frozenset(";&|()\n")
 GUARD_SHELLS = ("sh", "bash", "zsh")
 GUARD_WORD_RE = re.compile(r"(?<![\w./-])(git|jj|gh|hc)(?![\w.-])")
@@ -4293,6 +4293,7 @@ def cmd_setup(args):
 
     report += _setup_vault(target)
     report += _setup_chat(target, script)
+    report.append(_setup_launcher(target))
 
     if old_md is None:
         claude_md.write_text(new_md, encoding="utf-8")
@@ -4410,6 +4411,19 @@ def _setup_chat(supervisor_dir, script):
     if status != "exists":
         shutil.copyfile(src, dest)
     return report + [(status, dest)]
+
+
+def _setup_launcher(supervisor_dir):
+    """<dir>/sv.sh, the user's script that starts, restarts, and stops sv, sv-watch, and sv-chat. It is overwritten
+    when it differs, like chat/CLAUDE.md, so that it keeps starting the sessions as this version expects."""
+    src, dest = HERE.parent / "assets" / "sv.sh", Path(supervisor_dir) / "sv.sh"
+    if not src.exists():
+        return ("skipped", dest)
+    status = "exists" if dest.exists() and dest.read_bytes() == src.read_bytes() else ("updated" if dest.exists() else "created")
+    if status != "exists":
+        shutil.copyfile(src, dest)
+    dest.chmod(0o755)
+    return (status, dest)
 
 
 def guard_hook_command(script, directory, role=None):

@@ -32,6 +32,7 @@ Reference files:
 - [references/manager-prompt.md](references/manager-prompt.md): the project manager brief, the messages exchanged with the manager and with project workers, and the `project-report` block
 - [references/observer-brief.md](references/observer-brief.md): the observer subagent brief and the facts it writes per purpose
 - [assets/chat-CLAUDE.md](assets/chat-CLAUDE.md): the brief of the free-form session `sv-chat` (6.14), which `setup` copies to `<dir>/chat/CLAUDE.md`
+- [assets/sv.sh](assets/sv.sh): the user's script that starts, restarts, and stops `sv`, `sv-watch`, and `sv-chat` (section 3), which `setup` copies to `<dir>/sv.sh`
 - [references/follow-ups-format.md](references/follow-ups-format.md): the `## Follow-ups` rules in `<dir>/CLAUDE.md` that turn verified PRs into follow-up user actions
 
 In the commands below, `<skill-dir>` is the directory containing this SKILL.md and `<dir>` is the supervisor directory.
@@ -130,10 +131,10 @@ Run at the start of every supervisor session and after every recovery (section 7
    python3 "<skill-dir>/scripts/state_tool.py" version
    ```
 
-   If the two outputs differ, re-run setup (section 3), then restart `sv-watch` so it runs the new copy. Also read `<dir>/.claude/settings.json`: if no PreToolUse entry has a command that contains both `state_tool.py` and ` guard --dir`, ask the user once whether they removed it on purpose; re-run setup only if they did not, and otherwise leave it removed for this supervisor directory. Ask the user to restart `sv` (or to review hooks in `/hooks`) only when setup printed `created:` or `updated:` for `settings.json`, because hooks and the `model` setting are loaded at session start; a run that printed only `exists:` needs no restart. Likewise ask the user to restart `sv-chat` (if it runs) when setup printed `created:` or `updated:` for a file under `<dir>/chat`.
+   If the two outputs differ, re-run setup (section 3), then restart `sv-watch` so it runs the new copy. Also read `<dir>/.claude/settings.json`: if no PreToolUse entry has a command that contains both `state_tool.py` and ` guard --dir`, ask the user once whether they removed it on purpose; re-run setup only if they did not, and otherwise leave it removed for this supervisor directory. Ask the user to restart `sv` (`<dir>/sv.sh restart`, or to review hooks in `/hooks`) only when setup printed `created:` or `updated:` for `settings.json`, because hooks and the `model` setting are loaded at session start; a run that printed only `exists:` needs no restart. Likewise ask the user to restart `sv-chat` (if it runs; `<dir>/sv.sh chat`) when setup printed `created:` or `updated:` for a file under `<dir>/chat`.
 
    For each project without `close`, read `<project dir>/.claude/settings.json`: if no PreToolUse entry has a command that contains `state_tool.py`, ` guard --dir`, and `--role manager`, re-run `prepare-dir --project <name of the project dir>` (6.10; idempotent, it prints `updated:`). A running manager loads hooks only at its start, so the restored guard applies from its next replacement.
-6. Check your own model from your environment information. If it does not name opus, tell the user once per supervisor session: "This supervisor is not running on opus; restart `sv` with `claude --model opus`", and continue.
+6. Check your own model from your environment information. If it does not name opus, tell the user once per supervisor session: "This supervisor is not running on opus; restart `sv` with `<dir>/sv.sh restart`", and continue.
 7. Check the follow-up rules. This runs after step 5 so that a stale installed copy has already been replaced by one that knows the subcommand. It only reads `<dir>/CLAUDE.md` and runs no `gh`:
 
    ```bash
@@ -187,7 +188,7 @@ Values are absolute paths or start with `~`. `setup` writes the section when it 
 
 The guard (matcher `Edit|MultiEdit|Write|NotebookEdit|Bash`) runs `state_tool.py guard --dir <dir>` before each such tool call of the supervisor and its subagents:
 
-- Edits and writes are allowed under `<dir>`, in Claude's auto-memory directories (`projects/*/memory/` under `$CLAUDE_CONFIG_DIR` or `~/.claude`), and in temp directories. Everything else is blocked, and so are the protected paths inside `<dir>`: `.claude/`, `state.json`, and `.supervisor/state_tool.py` (only `setup` and `commit` write them).
+- Edits and writes are allowed under `<dir>`, in Claude's auto-memory directories (`projects/*/memory/` under `$CLAUDE_CONFIG_DIR` or `~/.claude`), and in temp directories. Everything else is blocked, and so are the protected paths inside `<dir>`: `.claude/`, `state.json`, `.supervisor/state_tool.py`, and `sv.sh` (only `setup` and `commit` write them).
 - Edits and writes under the vault are blocked (`vault notes are written only by state_tool commit`).
 - Bash commands are blocked when they run a mutating git / jj / gh command (the deny-list described in section 1), including inside `sh -c` and command substitution. Read-only forms pass.
 - `hc` commands: `hc keys`, `exec`, `attach`, `server`, `update`, `machine`, `file`, `put`, and `connect` are blocked anywhere in a command (inside `sh -c` and Python argument lists too); `hc run` is blocked without a `--label sv=...` (only the `launch-plan` argv has one); `hc kill` / `hc rm` are blocked unless the target is `w-NNNN`, `m-p-NNNN`, or `sv-watch`; `hc send --force` is blocked. `hc send`, `ls`, `get`, `read`, `events`, `wait`, and `interrupt` pass.
@@ -202,6 +203,8 @@ The guard (matcher `Edit|MultiEdit|Write|NotebookEdit|Bash`) runs `state_tool.py
 - Manual recovery: if the guard misbehaves, the user removes its PreToolUse entry from `<dir>/.claude/settings.json` by hand and starts a new session. The Capability check then asks before restoring it, so a deliberate removal sticks.
 
 `setup` also prepares `<dir>/chat`, the directory of `sv-chat` (6.14): `chat/.claude/settings.json` with the chat guard (below) and `"model": "opus"` (kept when present), and `chat/CLAUDE.md`, the session's brief, copied from `assets/chat-CLAUDE.md` (`created`, `exists`, or `updated`: a differing file is overwritten so that it matches the chat subcommands; the user's own additions go in `chat/CLAUDE.local.md`).
+
+`setup` also places `<dir>/sv.sh`, the user's script that starts, restarts, and stops the supervisor's sessions ("Starting the supervisor" below), copied from `assets/sv.sh` and made executable (`created`, `exists`, or `updated`: a differing file is overwritten like `chat/CLAUDE.md`, so a variant of the user's own goes under another name).
 
 `setup` also creates the dashboard note `<vault>/<dashboard>` when it is missing: three Bases kanbans of the notes tagged `supervised` (outside `templates`) grouped by `status`. Task notes with `assignee: user` go under `## ユーザーの番` and those with `assignee: agent` under `## エージェントの番`, each card showing `summary`, `task_id`, and `project_id`. Project notes (tagged `project`), which stay in progress / agent until the project closes, go under `## プロジェクト` instead, each card showing `summary`, `project_id`, and `assignee`. `setup` never overwrites a dashboard the user edited; it replaces one only when it is exactly what an earlier `setup` generated (reported as `updated`). Dragging a card between kanban columns changes the note's `status`, which 6.13 handles like any other change. Each project note also has its own kanban: `state_tool` writes a `## タスク` section after `## 概要` into the project notes it creates, a Bases block filtered by `'parent == this'` that shows the project's task notes the same way, and project notes made from the user's template get it from the template (Vault interview step 4). Besides it, `setup` writes only the two Templater scripts `sv-status.md` and `sv-project.md` (Vault interview step 5) and, when the vault has `.obsidian/` (Obsidian has opened it; `setup` never creates it), the CSS snippet `.obsidian/snippets/sv-kanban.css` from `assets/sv-kanban.css` (`created`, `exists`, or `updated`, overwritten like `sv-status.md`); note templates come from the Vault interview. A Bases kanban shows each card property on one line and gives every card the same height; the snippet lets the title and `summary` wrap onto up to 3 lines each and makes every card tall enough for both, so a card with shorter text has space at its bottom. The user changes the counts in a snippet of their own (`body { --sv-kanban-title-lines: 2; --sv-kanban-summary-lines: 3; }`), because `setup` overwrites `sv-kanban.css`. The user turns it on once in Obsidian's Settings > Appearance > CSS snippets; the supervisor never changes Obsidian settings. Without it the cards cut both at one line.
 
@@ -241,18 +244,35 @@ Optional jj tracking is a manual step, never done by `setup`, and only for a vau
 
 #### Starting the supervisor
 
-Tell the user to open a terminal in Herdr and run, from `<dir>`:
+Tell the user to open a terminal in Herdr (any terminal but `sv`) and run:
 
 ```bash
-hc run --bg --name sv --cwd "<dir>" claude --model opus --permission-mode auto
-hc run --bg --name sv-watch --parent sv --label sv=watch --outlive-parent --cwd "<dir>" python3 .supervisor/state_tool.py watch-vault --state state.json --notify sv --interval 10
-hc run --bg --name sv-chat --cwd "<dir>/chat" claude --model opus --permission-mode auto
+"<dir>/sv.sh" start
 ```
+
+`sv.sh` takes one subcommand and prints `hc ls` at the end:
+
+| Subcommand | What it does |
+| :--- | :--- |
+| `start` | Starts `sv`, `sv-watch`, and `sv-chat`. It refuses when `sv` exists (use `restart`); `sv-chat` starts only when it does not exist. |
+| `restart` | Ends and removes `sv-watch` and `sv` (`hc kill`, `hc rm`), then starts them again. `sv-chat` is left as it is. |
+| `stop` | Ends and removes `sv-watch`, `sv`, and `sv-chat`. Workers and managers keep running (`--outlive-parent`); the next `sv` takes them over (section 7). |
+| `chat` | Ends and removes `sv-chat`, then starts it again (for example after `setup` updated `chat/CLAUDE.md`). |
+
+It runs these commands from `<dir>`, and after starting `sv` or `sv-chat` gives that terminal a pane with `herdr-app do terminal.keep --terminal <address>` (a warning, not an error, when there is no Herdr window):
+
+```bash
+hc run --bg --no-parent --name sv --cwd "<dir>" env PATH="$PATH" claude --model opus --permission-mode auto "session-supervisor skill で監督を再開してください"
+hc run --bg --name sv-watch --parent sv --label sv=watch --outlive-parent --cwd "<dir>" python3 .supervisor/state_tool.py watch-vault --state state.json --notify sv --interval 10
+hc run --bg --no-parent --name sv-chat --cwd "<dir>/chat" env PATH="$PATH" claude --model opus --permission-mode auto
+```
+
+`sv.sh` is the user's: `sv` never runs it (it would end `sv` itself), and restarts `sv-watch` by itself only as the Capability check says.
 
 - `sv` is the supervisor; the user talks to it by focusing its tab in Herdr (or `hc attach sv`). Its name must be `sv`: workers report to that name.
 - `sv-watch` runs `notes-scan` every 10 seconds and sends `notes: <uid> ...` to `sv` when the set of note events changes, so a note set to `backlog` / `agent` is picked up within seconds. It also forwards a worker or manager becoming blocked or finished when that session's parent is not the current `sv` (after `sv` was re-created, and for a project worker, which runs under its manager, section 2). And when the Herdr window is open, it renames the tab of a worker or manager the user gave a pane (`terminal.keep`, which names the tab after the terminal) to `w-NNNN <task title>` / `m-p-NNNN <project name>`, so the agents list shows what the session is for; a tab the user named otherwise is left alone, and the terminal names stay `w-NNNN` / `m-p-NNNN`. It writes nothing of the supervisor.
 - Trust: before the first worker in a git repository, the user opens that repository once with `claude` (in Herdr or a shell) and answers the trust dialog. Worktrees of a trusted repository need nothing more; non-git work directories never ask. The supervisor never answers the dialog itself (6.2 step 5).
-- `sv-chat` (optional, 6.14) is where the user talks: focus its tab in Herdr and ask for tasks to be added, changed, paused, cancelled, or answered in ordinary conversation. It hands each request to `sv` and shows `sv`'s answer. The user starts and ends it; `sv` never does. Its name must be `sv-chat`, its `cwd` `<dir>/chat`.
+- `sv-chat` (optional, 6.14) is where the user talks: focus its tab in Herdr and ask for tasks to be added, changed, paused, cancelled, or answered in ordinary conversation. It hands each request to `sv` and shows `sv`'s answer. The user starts and ends it (`sv.sh start`, `chat`, `stop`); `sv` never does. Its name must be `sv-chat`, its `cwd` `<dir>/chat`.
 - Typing: the user writes long instructions in `sv-chat` or in notes (`## 概要`, `#### 回答`, `### @agent`), not in `sv`, because `hc` signals are typed into the same input box and can submit a half-written message (C3).
 - The dashboard is the kanban note `<vault>/<dashboard>` (open the vault in Obsidian). Herdr shows `sv`, `sv-watch`, and each worker (`w-NNNN`) and manager (`m-p-NNNN`) as its own terminal. A session without a pane shows as its terminal name under its parent; give it a pane to see its purpose in the tab name (`sv-watch` above).
 - Each worker's report and each forwarded change starts a turn of `sv`, which uses some usage; the `/loop` fallback runs about every 30 minutes while workers run.
@@ -973,7 +993,7 @@ Then:
 
 ### 9. Uninstall
 
-1. Confirm no worker or manager is `running`, `idle`, or `needs_input` (reconcile first), stop periodic reconciliation, and end `sv-watch` (`hc kill sv-watch`, `hc rm sv-watch`). Ask the user to end `sv-chat` themselves.
+1. Confirm no worker or manager is `running`, `idle`, or `needs_input` (reconcile first), stop periodic reconciliation, and end `sv-watch` (`hc kill sv-watch`, `hc rm sv-watch`). Ask the user to end `sv-chat` themselves, or `sv` and `sv-chat` together with `<dir>/sv.sh stop` once this turn is over.
 2. Ask the user to delete the supervisor directory themselves. The agent never deletes it.
 3. Leftover worktrees (kept for uncommitted changes, or from desktop-app workers of earlier versions) can be listed and removed by the user:
 
@@ -995,7 +1015,7 @@ python3 "<dir>/.supervisor/state_tool.py" migrate-v2 --state "<dir>/state.json"
 
 The dry run lists the notes it would write. The real run writes one note per task, project, and stub (a revived task and its stub share one; project proposal user actions become backlog/user proposal notes; read user actions become `held`), then `state.json`. Rerun it after an interruption; it refuses a note that exists with other content. Rollback: write the v1 form with `export-v1 --state "<dir>/state.json" --out "<dir>/state.v1.json"`, check it (it prints `tasks_without_workers`: the previous version rejects a task without workers, so cancel those tasks or let their workers start first, and export again), and replace `state.json` with it from a supervisor on the previous skill version (`setup` from that version reinstalls its script). Held workers come back as read user actions; follow-ups stay quoted in the notes.
 
-Moving a supervisor from the desktop app to Herdr needs no state migration: run `setup` again, start `sv` and `sv-watch` in Herdr (section 3), and leave the remaining desktop-app workers and managers to the user (6.4, section 7).
+Moving a supervisor from the desktop app to Herdr needs no state migration: run `setup` again, start `sv` and `sv-watch` in Herdr (`<dir>/sv.sh start`, section 3), and leave the remaining desktop-app workers and managers to the user (6.4, section 7).
 
 ## Verification
 
