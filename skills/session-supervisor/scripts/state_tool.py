@@ -2252,11 +2252,13 @@ def _answer_lines(text):
 
 
 def _agent_lines(text, at):
-    return [f"> [!sv-agent] {at}" if at else "> [!sv-agent]"] + _quote(text.strip("\n"))
+    """A `[!sv-agent]` callout, closed by an empty `>` line like the mark, so text typed right below it stays outside."""
+    return [f"> [!sv-agent] {at}" if at else "> [!sv-agent]"] + _quote(text.strip("\n")) + [">"]
 
 
 def _input_lines(options):
-    return UA_INPUT_MARK + ([""] + [f"- [ ] {o}" for o in options] if options else [])
+    """The options (above the mark, so that a line typed below the mark does not continue the list) and the mark."""
+    return ([f"- [ ] {o}" for o in options] + [""] if options else []) + UA_INPUT_MARK
 
 
 def _ua_content(ua):
@@ -2556,7 +2558,9 @@ def _op_ua_add(lines, op, now, rev, index, problems):
         raise StateError("ua_add: only a user action takes options")
     if _find_ua(lines, ua["id"]):
         return []
-    _put_block(lines, _open_end(lines), render_ua_block(dict(ua, options=options)))
+    block = render_ua_block(dict(ua, options=options))
+    # An empty line to type in below the mark, besides the blank line that separates the next block.
+    _put_block(lines, _open_end(lines), block + ([""] if block[-1] == UA_INPUT_MARK[-1] else []))
     _reply(lines, op, ua["id"], now, rev, problems)
     return [ua["id"].lower()]
 
@@ -2648,7 +2652,9 @@ def _op_ua_answer(lines, op, now, rev, index, problems):
     if e["done"]:
         lines[e["first"]:e["stop"]] = _callout_lines(content)
     else:
-        lines[e["first"]:e["stop"]] = content + (tail or ([""] if e["stop"] < len(lines) and lines[e["stop"]].strip() else []))
+        # After the supervisor's message the user writes next: leave an empty line to type in and one before the next block.
+        tail = ["", ""] if who == "agent" else tail or ([""] if e["stop"] < len(lines) and lines[e["stop"]].strip() else [])
+        lines[e["first"]:e["stop"]] = content + tail
     return []
 
 
