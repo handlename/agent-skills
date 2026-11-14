@@ -37,7 +37,7 @@ if (!tags.includes("supervised")) {
   new tp.obsidian.Notice("編集表示で実行してください");
 } else {
   const lines = editor.getValue().split("\n");
-  let close = lines[0] === "---" ? lines.indexOf("---", 1) : -1;
+  const close = lines[0] === "---" ? lines.indexOf("---", 1) : -1;
   const find = (key) => lines.slice(1, close).findIndex((line) => line.startsWith(key + ":")) + 1;
   const value = (key) => (find(key) > 0 ? unquote(lines[find(key)].slice(key.length + 1)) : "");
   const kind = tags.includes("project") ? "project" : "task";
@@ -69,16 +69,15 @@ if (!tags.includes("supervised")) {
     const move = await tp.system.suggester(moves.map((m) => `${m.label}(${m.to})`), moves);
     if (move) {
       const [status, assignee] = move.to.split("/");
-      for (const [key, v] of [["status", status], ["assignee", assignee]]) {
+      const changes = [["status", status], ["assignee", assignee]].map(([key, v]) => {
         const at = find(key);
-        if (at > 0) {
-          editor.setLine(at, `${key}: "${v}"`);
-        } else {
-          editor.replaceRange(`${key}: "${v}"\n`, { line: close, ch: 0 });
-          lines.splice(close, 0, `${key}: "${v}"`);
-          close += 1;
-        }
-      }
+        return at > 0
+          ? { from: { line: at, ch: 0 }, to: { line: at, ch: lines[at].length }, text: `${key}: "${v}"` }
+          : { from: { line: close, ch: 0 }, text: `${key}: "${v}"\n` };
+      });
+      // Origin "set" (Obsidian's own for programmatic edits) skips Live Preview's properties filter, which drops a
+      // frontmatter change while the cursor is in the frontmatter or at the start of the line right below it.
+      editor.transaction({ changes }, "set");
     }
   }
 }
