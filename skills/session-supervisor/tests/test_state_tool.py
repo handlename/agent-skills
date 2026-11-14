@@ -3698,8 +3698,9 @@ class ActionSectionTest(unittest.TestCase):
         self.assertEqual(st.render_ua_block(note_uas(note("task_sample"))["UA-0240"])[:3], [
             "### [UA-0240] @user Decide whether to push branch `claude/t0999-readme-typo-1a2b3c` of `agent-skills` (and whether to open a PR)",
             "<!-- sv ask answer since=2026-11-11T22:40:00+09:00 -->", ""])
-        self.assertIn("\n".join(st.render_ua_done(note_uas(note("task_sample"))["UA-0238"])),
-                      note("task_sample").replace("#### 回答\n>     handlename", "#### やりとり\n>     handlename"))
+        # A user action's body is the supervisor's first message: a callout titled with its since.
+        self.assertEqual(st.render_ua_done(note_uas(note("task_sample"))["UA-0238"])[1:4], [
+            ">     > [!sv-agent] 2026-11-11 22:10", ">     > どのリポジトリ (owner/repo) の README ですか。", ">     >"])
 
     def test_layout_rules(self):
         lines = [
@@ -3768,7 +3769,7 @@ class ActionSectionTest(unittest.TestCase):
         self.assertIn("> [!done]- 完了 (3)\n", section)
         self.assertNotIn("### [UA-0300]", section)
         self.assertTrue(section.rstrip().endswith(f"> - [UA-0300] @user q <!-- sv ask since={NOTE_NOW} done={NOTE_NOW} r14 -->\n"
-                                                  ">     > [!done]- 完了 (1)\n>     > 書式の説明\n>\n>     #### やりとり"))
+                                                  ">     > [!sv-agent] 2026-11-10 09:00\n>     > [!done]- 完了 (1)\n>     > 書式の説明\n>     >\n>\n>     #### やりとり"))
         self.assertEqual(note_uas(acked)["UA-0300"]["body"], "[!done]- 完了 (1)\n書式の説明")
 
     def test_a_request_below_the_callout_is_read_and_adopted(self):
@@ -3805,7 +3806,8 @@ class ActionSectionTest(unittest.TestCase):
         self.assertEqual(ids, ["ua-0165"])
         block = "\n".join(st.render_ua_block(note_uas(out)["UA-0165"]))
         self.assertEqual(block, "### [UA-0165] @user Answer w-0120 in Herdr\n<!-- sv auto=worker_report since=2026-11-10T09:00:00+09:00 -->\n\n"
-                                "> which file?\n>\n> [w-0120](https://example.com)\n\n#### やりとり\n> [!sv-input] この下に書いてください\n>")
+                                "> [!sv-agent] 2026-11-10 09:00\n> which file?\n>\n> [w-0120](https://example.com)\n>\n\n#### やりとり\n"
+                                "> [!sv-input] この下に書いてください\n>")
         self.assertIn("- [ ] 自分用のチェック(メタデータなし)\n\n" + block + "\n\n\n> [!done]- 完了 (1)\n", out)
         self.assertEqual(out.replace(block + "\n\n\n", ""), text)
         for bad in ({"id": "UA-0166", "kind": "auto", "detector": "nope", "description": "x"},
@@ -3960,6 +3962,10 @@ class ActionSectionTest(unittest.TestCase):
         self.assertEqual([m["from"] for m in ua["thread"]], ["agent", "agent", "user"])
         sent, _, _ = apply_twice(self, follow, [{"op": "ua_answer", "id": "AA-0001", "text": "w-0001 に送りました。"}])
         self.assertEqual(note_uas(sent)["AA-0001"]["answer"], "")
+        # The body of an agent action is the user's request: quoted, not a callout of the supervisor.
+        added = st.apply_note_ops(actions_note([]), [{"op": "ua_add", "ua": {"id": "AA-0002", "kind": "req", "description": "r", "body": "b"}}],
+                                  NOTE_NOW, 13)[0]
+        self.assertIn(f"<!-- sv req since={NOTE_NOW} -->\n\n> b\n", added)
 
     def test_ua_check_is_gone_and_missing_items_are_problems(self):
         text = note("task_managed")

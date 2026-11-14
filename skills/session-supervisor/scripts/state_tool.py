@@ -2141,11 +2141,22 @@ def _pending(thread, req):
     return "\n\n".join(tail)
 
 
+def _body_of(lines):
+    """Body text of an action: the `[!sv-agent]` callout of a user action (0.65.2 and later) without its title, or a
+    plain quote (older notes, agent actions) with one quote level removed."""
+    i = next((j for j, line in enumerate(lines) if line.strip()), None)
+    if i is None or not UA_AGENT_RE.match(lines[i]):
+        return _text_of(lines)
+    j = _mark_end(lines, i)
+    rest = _text_of(lines[j:])
+    return "\n".join(_unquote(lines[i + 1:j])).strip("\n") + ("\n\n" + rest if rest else "")
+
+
 def _ua_full(ua, ua_id, description, content):
     k = _answer_at(content)
     thread = [] if k is None else _thread(content[k + 1:], ua["kind"] == "req")
     return {"id": ua_id, "assignee": "agent" if ua["kind"] == "req" else "user", "description": description, **ua,
-            "body": _text_of(content if k is None else content[:k]), "answer": _pending(thread, ua["kind"] == "req"),
+            "body": _body_of(content if k is None else content[:k]), "answer": _pending(thread, ua["kind"] == "req"),
             "thread": thread}
 
 
@@ -2261,8 +2272,16 @@ def _input_lines(options):
     return ([f"- [ ] {o}" for o in options] + [""] if options else []) + UA_INPUT_MARK
 
 
+def _short_time(at):
+    return f"{at[:10]} {at[11:16]}" if isinstance(at, str) and len(at) >= 16 else None
+
+
 def _ua_content(ua):
-    lines = (_quote(ua["body"]) + [""]) if ua.get("body") else []
+    # The supervisor's body of a user action is its first message, a callout like its replies; the body of an agent
+    # action is the user's request, quoted.
+    lines = []
+    if ua.get("body"):
+        lines = (_quote(ua["body"]) if ua["kind"] == "req" else _agent_lines(ua["body"], _short_time(ua.get("since")))) + [""]
     thread = ua.get("thread") or []
     if thread or ua["kind"] == "ask" or ua.get("detector") in UA_ANSWER_DETECTORS:
         lines.append(UA_THREAD_HEAD)
@@ -2646,7 +2665,7 @@ def _op_ua_answer(lines, op, now, rev, index, problems):
     if _answer_at(content) is None:
         content += ([""] if content or not e["done"] else []) + [UA_THREAD_HEAD]
     content += ([""] if _answer_at(content) != len(content) - 1 else []) + (
-        _agent_lines(text, f"{now[:10]} {now[11:16]}") if who == "agent" else _answer_lines(text))
+        _agent_lines(text, _short_time(now)) if who == "agent" else _answer_lines(text))
     if who == "agent" and not e["done"] and ua["kind"] != "req":
         content += [""] + _input_lines(options)
     if e["done"]:

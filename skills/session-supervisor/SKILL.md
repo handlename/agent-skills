@@ -347,9 +347,11 @@ The note's `## アクション` holds user actions (things the user must do: `@u
 ### [UA-0240] @user Decide whether to push branch `claude/fix-typo` of `repo-a` (and whether to open a PR)
 <!-- sv ask answer since=2026-11-11T22:40:00+09:00 -->
 
-Fixed 3 typos in README.md in e9d32372d6.
-
-[compare](https://github.com/org/repo-a/compare/main...claude/fix-typo)
+> [!sv-agent] 2026-11-11 22:40
+> Fixed 3 typos in README.md in e9d32372d6.
+>
+> [compare](https://github.com/org/repo-a/compare/main...claude/fix-typo)
+>
 
 #### やりとり
 - [ ] push して PR を作る
@@ -391,7 +393,7 @@ The user's own request, not numbered yet, in the user's words.
 ```
 
 - **Open item**: `### [UA-NNNN] @user <short title>` or `### [AA-NNNN] @agent <short title>`, then the metadata line `<!-- sv ... -->` (kind, `since`; never edited by hand), a blank line, and the body. The heading is the `description`: one short line, the wording this file gives. Details go in the body.
-- **Body**: `ua_add` always writes the `body` quoted with `> `, so no line of outside text (a chat message, a worker's blocker) can act as a heading or a separator; put your own summary and links in the same `body`. A multi-line answer is quoted too.
+- **Body**: `ua_add` always writes the `body` with every line behind `> `, so no line of outside text (a chat message, a worker's blocker) can act as a heading or a separator; put your own summary and links in the same `body`. The body of a user action is the supervisor's first message: a `[!sv-agent]` callout titled with its `since`, like the messages of its thread (0.65.2; older notes have a plain quote, read the same way). The body of an agent action is the user's request and stays a plain quote. A multi-line answer is quoted too.
 - **Thread**: a user action of kind `ask`, `auto=worker_report`, or `auto=pr_closed` ends with `#### やりとり`, the exchange about the item up to the next heading of level 1-3 or the done callout. Other `auto` items have none (`ua_answer` adds it); under an agent action it appears with the first reply. The supervisor's messages are callouts `> [!sv-agent] <YYYY-MM-DD HH:MM>` with the text quoted and a closing empty `>` line, so that text typed right below one does not join it (Markdown lazy continuation); the user's messages are the plain text (any Markdown) between them. After writing a message of the supervisor into an open item, `ua_answer` leaves two blank lines before the next block: one to type in, one to separate. Under an agent action, plain text before its first `[!sv-agent]` is a reply written before 0.65.0 (the agent's). Notes written before 0.65.0 have `#### 回答` instead; it is read the same way, and new items get `#### やりとり`.
 - **Where the user writes**: while a user action waits for the user (open, and no user text after the supervisor's last message), its thread ends with the mark `> [!sv-input] この下に書いてください` (closed by an empty `>` line like a message) and an empty line to type in, preceded by the options of the question as unchecked lines `- [ ] <option>` when it has any (`options` of `ua_add` / `ua_answer`; above the mark, so that a line typed below the mark does not continue the list). The user checks an option or writes below the mark. The mark and unchecked lines are not text: `ua_answer` and `ua_ack` remove them, and the next `[!sv-agent]` message writes a new mark. Only a checked line (`- [x] push しない`) counts as the answer. An agent action gets no mark.
 - **Answer**: `note-show` and `notes-scan` print each item's `thread` (`[{from: user|agent, text, at}]`) and its `answer`: the user's text after the supervisor's last message (for a user action with no message of the supervisor, all of the user's text). For an agent action, `answer` is the user's follow-up written after the supervisor's last reply; empty until the supervisor has replied once.
