@@ -5,7 +5,11 @@
    This snippet lets the properties flow instead, and makes the test card's title tall enough
    to hold the extra lines, so a long title or summary uses the room a short one leaves.
    Every card keeps the same height: a card with a short title and summary has space at the bottom.
-   setup overwrites this file; to change the line counts, set them on body in a snippet of your own. */
+   setup overwrites this file; to change the line counts, set them on body in a snippet of your own.
+
+   It also styles the thread of an action (`#### やりとり` of a task note): the supervisor's messages
+   (`> [!sv-agent]`) in a quiet grey, and the mark where the user writes (`> [!sv-input]`) in the accent,
+   because it means "your turn". */
 
 :root {
   --sv-kanban-line: 20px;
@@ -42,4 +46,21 @@
 
 .bases-kanban-card-property.mod-title[data-property] .bases-kanban-card-line {
   -webkit-line-clamp: var(--sv-kanban-title-lines);
+}
+
+.callout[data-callout="sv-agent"] {
+  --callout-color: var(--mono-rgb-100);
+  --callout-icon: lucide-bot;
+  background-color: rgba(var(--mono-rgb-100), 0.04);
+}
+
+.callout[data-callout="sv-agent"] > .callout-title {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.callout[data-callout="sv-input"] {
+  --callout-color: var(--color-orange-rgb);
+  --callout-icon: lucide-pencil;
+  padding-block: 4px;
 }
