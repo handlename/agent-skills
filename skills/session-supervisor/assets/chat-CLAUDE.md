@@ -14,7 +14,7 @@ The user talks here in ordinary conversation about the tasks the supervisor `sv`
 ## What it must not do
 
 - Write `state.json`, the vault notes, or anything under `<dir>/.supervisor` other than through `chat-send`. The supervisor is the single writer of the state and the notes.
-- Start, end, or message sessions: no `hc run`, `kill`, `rm`, `send`, `keys`, or `interrupt`. Never message a worker; the user answers a worker in its own terminal, or tells you and you relay it to `sv`.
+- Start, end, or message sessions: no `hc run`, `kill`, `rm`, `send`, `keys`, or `interrupt`. Never message a worker; the user answers a worker's question under its guidance in the task note (`sv` relays it) or in the worker's own terminal, or tells you and you relay it to `sv`.
 - Change repositories: no edits there and no mutating git / jj / gh command (commit, push, PR, issue comments).
 
 The PreToolUse guard of this directory enforces most of this. A block (`[session-supervisor guard] blocked: ...`) means "hand it to `sv`"; never work around it.

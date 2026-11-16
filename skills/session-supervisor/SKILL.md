@@ -7,7 +7,7 @@ description: Run a single supervisor session (Claude Code in a Herdr terminal na
 
 ## Overview
 
-One supervisor session, Claude Code running in the Herdr terminal `sv` in a dedicated non-git directory (the supervisor directory, default `~/supervisor`), is the user's point of contact for tasks; the user answers a worker's questions in that worker's terminal (6.3 step 4). Workers and project managers are Claude Code sessions in `hc` terminals that the supervisor starts as its children. For each task the user gives it, the supervisor:
+One supervisor session, Claude Code running in the Herdr terminal `sv` in a dedicated non-git directory (the supervisor directory, default `~/supervisor`), is the user's point of contact for tasks; the user answers a worker's questions in the task note (the supervisor relays them) or in that worker's terminal (6.3 step 4). Workers and project managers are Claude Code sessions in `hc` terminals that the supervisor starts as its children. For each task the user gives it, the supervisor:
 
 1. splits the task by directory and starts one worker session per directory (git: inside a worktree under `worktree_root`; non-git: at most one running worker per directory tree), in any turn, as soon as the rules allow it,
 2. detects when a worker's turn ends (the worker's `hc send sv` report signal, `hc`'s notes about blocked and exited children, the `sv-watch` forwarder, and a slow `/loop` fallback),
@@ -443,7 +443,7 @@ Reserved headings: the user actions below are recognized by their heading, by th
 
 | English | Japanese |
 | :--- | :--- |
-| `Answer w-NNNN (T-xxxx <title>) in Herdr` (6.3 step 4) | `回答待ち w-NNNN (T-xxxx <title>): Herdr のセッションで回答してください` |
+| `Answer w-NNNN (T-xxxx <title>) in the note or in Herdr` (6.3 step 4; written before 0.67.0 as `... in Herdr` / `...: Herdr のセッションで回答してください`, read the same by its prefix) | `回答待ち w-NNNN (T-xxxx <title>): ノートか Herdr のセッションで回答してください` |
 | `Answer the pending approval of w-NNNN in Herdr: <status.msg>` (6.4) | `承認待ち w-NNNN: Herdr で承認してください: <status.msg>` |
 | `Hub wait w-NNNN (T-xxxx <title>): ...` (6.4) | `マネージャーの回答待ち w-NNNN (T-xxxx <title>): ...` |
 | `Review wait w-NNNN (T-xxxx <title>): ...` (6.4) | `レビュー待ち w-NNNN (T-xxxx <title>): ...` |
@@ -457,7 +457,7 @@ Reserved headings: the user actions below are recognized by their heading, by th
 
 | User action | Kind | Added in | Resolved by (ack it in that candidate) |
 | :--- | :--- | :--- | :--- |
-| Report-blocker guidance "Answer w-xxxx (T-xxxx <worker title>) in Herdr: <blocker>" (the blocker quoted in the body) | `auto=worker_report` | 6.3 step 4, 6.4 | The user's answer sent to the worker (6.3 step 4, "Answers"), an `answered` entry of the worker's next report (6.3 step 1), the worker's next report processed in 6.3 (step 4 updates the guidance by difference), or the candidate that sets the worker archived, `missing`, or replaced |
+| Report-blocker guidance "Answer w-xxxx (T-xxxx <worker title>) in the note or in Herdr" (the blocker quoted in the body) | `auto=worker_report` | 6.3 step 4, 6.4 | The user's answer sent to the worker (6.3 step 4, "Answers"), an `answered` entry of the worker's next report (6.3 step 1), the worker's next report processed in 6.3 (step 4 updates the guidance by difference), or the candidate that sets the worker archived, `missing`, or replaced |
 | Unparsed report summary, "w-xxxx is not progressing" | `ask answer` | 6.3 | Relaying the user's answer with send |
 | Report blockers recorded as free text before session-supervisor 0.27.0 | `ask answer` | migration only | The user mentioning it; see "Old blocker wording" below |
 | Failed verification of a `done` report | `ask answer` | 6.3 step 5 | Relaying the user's instruction, or a later report that verifies |
@@ -541,9 +541,9 @@ Every fact from outside `<dir>` reaches the supervisor as a result file written 
    - "Find the cause and fix it" → not set
    - "Make a comparison table and leave it there" → not set
 
-   **Interactive**: set `interactive: true` on each worker of the task when the request asks to work it out with the agent in the session (「対話で進めたい」「相談しながら」「一緒に決めたい」, "interactively"), or when much of it is unclear to you: several plausible readings, an unstated goal, scope, or done criterion, or a design choice only the user can make. Choose it over guessing for such requests, and for large or intricate changes. The worker starts at once, asks its questions in its first turn (`needs_input`), and its guidance (6.3 step 4) shows the note as `in progress` / `user`, telling the user to talk to it in its terminal. An `investigation` task may be interactive too. Examples:
+   **Interactive**: set `interactive: true` on each worker of the task only when the request asks to work it out with the agent in the session (「対話で進めたい」「相談しながら」「一緒に決めたい」, "interactively"), or plainly needs many small back-and-forth exchanges with the user. An unclear request (several plausible readings, an unstated goal, scope, or done criterion, or a design choice only the user can make) does not set it by itself: every worker asks its concrete questions with options in `blockers` instead of guessing ([references/worker-prompt.md](references/worker-prompt.md)), and the user answers them in the note. An interactive worker starts at once and asks its questions in its first turn (`needs_input`), in `blockers` too where it can, and asks for a conversation in its session only when that is really needed; its guidance (6.3 step 4) shows the note as `in progress` / `user`. An `investigation` task may be interactive too. Examples:
    - "uploader のリトライを直して" with the issue and the log → not set
-   - "認証まわりをいい感じに整理したい" → set (goal and scope unstated)
+   - "認証まわりをいい感じに整理したい" → not set (the worker asks about goal and scope in `blockers`)
    - "対話しながら設計を詰めたい" → set
 6. Record push consent only when the request contains explicit wording, copying the exact phrase into `push_consent.text` (it must be a substring of `request`). A negated phrase is not consent even though it contains the words:
    - "README を直して。push して PR を作ってよい" → consent, text `push して PR を作ってよい`, delivery `push_pr`
@@ -632,10 +632,10 @@ Called only with workers that reconciliation (6.4) found changed; on a signal (a
 3. `in_progress`: if `summary` and `next_action` differ from the previous `last_report`, set `worker.continues` to 0. If `continues` is below 3, send "continue" and increment it; otherwise add the user action "w-xxxx is not progressing" and send nothing. A worker that is not progressing is never replaced automatically (6.8 is only for missing and unverified workers). Update `last_report`. Do not let rewording defeat the cap: once you have sent 3 nudges in total while the worker is on the same step of the task, add that user action even if the wording changed.
 
    `awaiting_manager` (project workers only): the worker sent its questions in `blockers` to the project manager. Update `last_report`, set `continues` to 0, and set `awaiting_since` to now, keeping the previous value when the previous report was also `awaiting_manager` with the same `blockers`. Send nothing and add no user action; 6.4 (`waits`) reports a wait that lasts too long.
-4. `needs_input` / `blocked` / `failed`: the worker asked the user in its own session. The user answers there, in the guidance's thread in the note, or in this chat; the supervisor relays only the last two (Answers, below).
-   - Guidance: for each entry of `blockers`, the user action with heading "Answer w-xxxx (T-xxxx <worker title>) in Herdr" and the blocker quoted as its body (a link, if any, as the last paragraph), with `<worker title>` = `workers[].title`. A `failed` report with empty `blockers` gets one guidance built from `summary`.
+4. `needs_input` / `blocked` / `failed`: the worker asked the user. The user answers in the guidance's thread in the note, in this chat, or in the worker's own session; the supervisor relays the first two (Answers, below).
+   - Guidance: for each entry of `blockers`, the user action with heading "Answer w-xxxx (T-xxxx <worker title>) in the note or in Herdr" and the blocker quoted as its body (a link, if any, as the last paragraph), with `<worker title>` = `workers[].title`. A `failed` report with empty `blockers` gets one guidance built from `summary`.
    - Update by difference: compare the worker's existing guidance (description starting with `Answer <worker id> (`) with the guidance built from this report by the blocker, i.e. the body without its link paragraph (read with `note-show`). Keep each one whose blocker is identical, so its id and `since` stay. Remove the other existing ones (matching `answered` first, step 1) and add only the new ones.
-   - Send the worker nothing about its blockers. In this turn's reply, name the worker as `w-NNNN (T-xxxx <title>)` and tell the user to answer in that terminal (its tab in Herdr, or `hc attach w-NNNN`) or under the guidance in the note.
+   - Send the worker nothing about its blockers. In this turn's reply, name the worker as `w-NNNN (T-xxxx <title>)` and tell the user to answer under the guidance in the note, or else in that terminal (its tab in Herdr, or `hc attach w-NNNN`); when the blocker asks to talk in the session (for example `このセッションで相談させてください: ...`), point to the terminal first.
    - Answers: when the user answers a guidance in the note (its `answer`, read at `resume`, 6.13) or in this chat, send the worker the Answer message ([references/worker-prompt.md](references/worker-prompt.md)) with the answers verbatim, and in the candidate of that turn ack each answered guidance (`ua_ack`; for a chat answer `ua_answer` first). A guidance without an answer stays. The note shows in progress / agent again once nothing else is open; if the worker asks again, its next report adds a new guidance.
    - An answer the user gave in the worker's own session reaches the supervisor only through the worker's next report, signaled by its `hc send sv` or found by reconciliation. Guidance and "Answer the pending approval of w-xxxx in Herdr: ..." may exist for the same worker at once; each resolves by its own rule, so do not fix them by hand.
    - The guidance of a worker on a push brief (title `push <branch>`) contains `push` and its branch, so `commit` also treats it as a push decision. This is harmless: a push decision is resolved only with a consent `message`, which only 6.3 step 7 writes.
@@ -803,7 +803,7 @@ Decide from the content of each user message whether it continues an existing ta
 - A follow-up: a fix, addition, review response, or redo of the same deliverable; a mention of its T-ID, PR, branch, or files; a request on the same subject in the same directory as the previous one.
 - Undecidable: a new task (6.1).
 
-**Interactive follow-up**: a follow-up is interactive when it asks to talk it over with the worker, or when much of it is unclear to you (the criteria of 6.1 step 5). For (a), send the Interactive message ([references/worker-prompt.md](references/worker-prompt.md)) instead of the Follow-up message and set `interactive: true` on the worker in the same candidate; for (b) and (c), add the new worker with `interactive: true`. Either way the note shows `in progress` / `user` once the worker asks (6.3 step 4).
+**Interactive follow-up**: a follow-up is interactive when it asks to talk it over with the worker, or plainly needs many small exchanges (the criteria of 6.1 step 5); one that is merely unclear goes as a normal follow-up, and the worker asks in `blockers`. For (a), send the Interactive message ([references/worker-prompt.md](references/worker-prompt.md)) instead of the Follow-up message and set `interactive: true` on the worker in the same candidate; for (b) and (c), add the new worker with `interactive: true`. Either way the note shows `in progress` / `user` once the worker asks (6.3 step 4).
 
 Record a follow-up from this chat as an agent action (section 5): `ua_add {ua: {kind: req, description: <short title>, body: <the whole message verbatim>}, reply: <what was started>}`. A follow-up from the note is the user's `### @agent` request, numbered with `ua_adopt` (6.13). The request's body is the `{followup.text}` of the Follow-up message. Never change `request`.
 
@@ -1063,7 +1063,7 @@ Moving a supervisor from the desktop app to Herdr needs no state migration: run 
 - Every agent action got a `reply` when it was numbered or added, and a `ua_answer` reply saying what was done (or why not) when its work was verified; no agent action's heading or body was changed.
 - The only user actions about delegation were "w-xxxx is not progressing" and the replacement limit of 6.8 (push decisions, archives, "Open repo", pending approvals, report-blocker guidance, and failed verifications are not about delegation).
 - No replacement or follow-up worker got a failed-verification user action.
-- Every report blocker became a guidance user action "Answer w-xxxx (...) in Herdr: ...", and nothing about a blocker was sent to a worker.
+- Every report blocker became a guidance user action "Answer w-xxxx (...) in the note or in Herdr", and nothing about a blocker was sent to a worker.
 - Every guidance was removed in the candidate that processed the worker's next report, or that set the worker archived, `missing`, or replaced.
 - A blocker reported again with the same text kept the id and `since` of its existing guidance.
 - Every push / PR was made by a worker, either with `push_consent` recorded from the user's words in this chat or on the user's own instruction in that worker's session (observed as in 6.3 step 6).
@@ -1081,4 +1081,4 @@ Moving a supervisor from the desktop app to Herdr needs no state migration: run 
 - Every worker or manager named in a reply or in `findings` was named by its handle (`w-NNNN`, `p-NNNN`).
 - Every task whose work finished in this session was archived only after the user confirmed it (the completion ask, or `confirmed` from this chat), or by cancel.
 - Every user action heading and body, agent reply, `summary`, and `log` entry written to a note in this session is in that note's `lang`, and every reserved heading uses the fixed form of that language.
-- Every request that asked to work it out in the session, or that was unclear to the supervisor, went to a worker with `interactive: true` (or to a running worker with the Interactive message), not to a worker told to proceed on a guess.
+- Every request that asked to work it out in the session, or plainly needed many small exchanges, went to a worker with `interactive: true` (or to a running worker with the Interactive message); a request that was only unclear went to a worker that asks its questions in `blockers`, not to an interactive one.
