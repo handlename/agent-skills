@@ -6293,7 +6293,7 @@ class ChatSessionTest(unittest.TestCase):
         self.assertIn(f"updated: {brief}", proc.stdout)
         self.assertIn(f"exists: {target / 'chat' / '.claude' / 'settings.json'}", proc.stdout)
 
-    def test_setup_installs_the_launcher_and_restart_keeps_sv(self):
+    def test_setup_installs_the_launcher_and_restart_keeps_sv_and_managers(self):
         target = self.sup.parent / "fresh"
         env = dict(os.environ, HOME=str(self.sup.parent / "home"))
         proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True, env=env)
@@ -6308,12 +6308,15 @@ class ChatSessionTest(unittest.TestCase):
         self.assertIn(f"updated: {launcher}", proc.stdout)
         self.assertTrue(os.access(launcher, os.X_OK))
 
-        # Fake hc and herdr-app record their argv; every terminal exists, at address t9. herdr-app fails on its first
-        # call, as when the window does not know a terminal started a moment ago.
+        # Fake hc and herdr-app record their argv; every terminal exists, at address t9, and `hc ls --json` lists two
+        # managers (p-NNNN and one from before 0.66.0) and a worker. herdr-app fails on its first call, as when the
+        # window does not know a terminal started a moment ago.
         bin_dir, log = self.sup.parent / "bin", self.sup.parent / "calls.log"
         bin_dir.mkdir()
         flag = self.sup.parent / "herdr-app-called"
-        for name, out in (("hc", '[ "$1" = get ] && echo \'{"address": "t9"}\''),
+        terminals = '{"terminals": [{"address": "t1", "name": "p-0001"}, {"address": "t2", "name": "m-p-0002"}, ' \
+                    '{"address": "t3", "name": "w-0003"}, {"address": "t4"}]}'
+        for name, out in (("hc", f'[ "$1" = get ] && echo \'{{"address": "t9"}}\'\n[ "$*" = "ls --json" ] && echo \'{terminals}\''),
                           ("herdr-app", f'[ -e "{flag}" ] || {{ touch "{flag}"; echo \'{{"error": "not yet"}}\'; exit 1; }}')):
             (bin_dir / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{log}"\n{out}\nexit 0\n', encoding="utf-8")
             (bin_dir / name).chmod(0o755)
@@ -6324,7 +6327,9 @@ class ChatSessionTest(unittest.TestCase):
         self.assertEqual(calls[:4], ["hc kill sv-watch", "hc rm sv-watch", "hc kill sv", "hc rm sv"])
         self.assertTrue(calls[4].startswith(f"hc run --bg --no-parent --name sv --cwd {target} env PATH="))
         self.assertTrue(calls[5].startswith("hc run --bg --name sv-watch --parent sv"))
-        self.assertEqual(calls[6:], ["hc get sv --json"] + ["herdr-app do terminal.keep --terminal t9"] * 2 + ["hc ls"])
+        keep = "herdr-app do terminal.keep --terminal t9"
+        self.assertEqual(calls[6:], ["hc get sv --json", keep, keep, "hc ls --json", "hc get p-0001 --json", keep,
+                                     "hc get m-p-0002 --json", keep, "hc ls"])
         self.assertNotIn("warning", proc.stderr)
         self.assertFalse(any("sv-chat" in c for c in calls))
         log.unlink()

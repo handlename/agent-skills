@@ -32,7 +32,7 @@ Reference files:
 - [references/manager-prompt.md](references/manager-prompt.md): the project manager brief, the messages exchanged with the manager and with project workers, and the `project-report` block
 - [references/observer-brief.md](references/observer-brief.md): the observer subagent brief and the facts it writes per purpose
 - [assets/chat-CLAUDE.md](assets/chat-CLAUDE.md): the brief of the free-form session `sv-chat` (6.14), which `setup` copies to `<dir>/chat/CLAUDE.md`
-- [assets/sv.sh](assets/sv.sh): the user's script that starts, restarts, and stops `sv`, `sv-watch`, and `sv-chat` (section 3), which `setup` copies to `<dir>/sv.sh`
+- [assets/sv.sh](assets/sv.sh): the user's script that starts, restarts, and stops `sv`, `sv-watch`, and `sv-chat` and gives them and the project managers a pane (section 3), which `setup` copies to `<dir>/sv.sh`
 - [references/follow-ups-format.md](references/follow-ups-format.md): the `## Follow-ups` rules in `<dir>/CLAUDE.md` that turn verified PRs into follow-up user actions
 
 In the commands below, `<skill-dir>` is the directory containing this SKILL.md and `<dir>` is the supervisor directory.
@@ -254,12 +254,12 @@ Tell the user to open a terminal in Herdr (any terminal but `sv`) and run:
 
 | Subcommand | What it does |
 | :--- | :--- |
-| `start` | Starts `sv`, `sv-watch`, and `sv-chat`. It refuses when `sv` exists (use `restart`); `sv-chat` starts only when it does not exist. |
-| `restart` | Ends and removes `sv-watch` and `sv` (`hc kill`, `hc rm`), then starts them again. `sv-chat` is left as it is. |
+| `start` | Starts `sv`, `sv-watch`, and `sv-chat`, then gives each live project manager a pane. It refuses when `sv` exists (use `restart`); `sv-chat` starts only when it does not exist. |
+| `restart` | Ends and removes `sv-watch` and `sv` (`hc kill`, `hc rm`), then starts them again and gives each live project manager a pane. `sv-chat` is left as it is. |
 | `stop` | Ends and removes `sv-watch`, `sv`, and `sv-chat`. Workers and managers keep running (`--outlive-parent`); the next `sv` takes them over (section 7). |
 | `chat` | Ends and removes `sv-chat`, then starts it again (for example after `setup` updated `chat/CLAUDE.md`). |
 
-It runs these commands from `<dir>`, and after starting `sv` or `sv-chat` gives that terminal a pane with `herdr-app do terminal.keep --terminal <address>`. The window may not know a terminal started a moment ago, so it retries for about 5 seconds; then it prints `herdr-app`'s answer as a warning (not an error, for example when there is no Herdr window) and the user runs that command by hand:
+It runs these commands from `<dir>`, and after starting `sv` or `sv-chat` gives that terminal a pane with `herdr-app do terminal.keep --terminal <address>`. `start` and `restart` do the same for every live terminal named `p-NNNN` (or `m-p-NNNN`, a manager started before 0.66.0) in `hc ls`: managers run under `sv`, so ending `sv` takes their panes away from the Herdr window. The window may not know a terminal started a moment ago, so it retries for about 5 seconds; then it prints `herdr-app`'s answer as a warning (not an error, for example when there is no Herdr window) and the user runs that command by hand:
 
 ```bash
 hc run --bg --no-parent --name sv --cwd "<dir>" env PATH="$PATH" claude --model opus --permission-mode auto "session-supervisor skill で監督を再開してください"

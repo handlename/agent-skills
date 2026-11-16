@@ -7,8 +7,10 @@ dir=$(cd "$(dirname "$0")" && pwd)
 usage() {
   cat >&2 <<'EOF'
 usage: sv.sh start|restart|stop|chat
-  start    start sv, sv-watch, and sv-chat (sv must not exist; sv-chat only when it does not exist)
-  restart  end sv-watch and sv, then start them again (sv-chat is left as it is)
+  start    start sv, sv-watch, and sv-chat (sv must not exist; sv-chat only when it does not exist),
+           and give the live project managers a pane
+  restart  end sv-watch and sv, then start them again (sv-chat is left as it is),
+           and give the live project managers a pane
   stop     end sv-watch, sv, and sv-chat (workers and managers keep running)
   chat     end sv-chat, then start it again
 EOF
@@ -34,6 +36,15 @@ keep() {
   echo "warning: give $1 a pane in Herdr (run the command above by hand)" >&2
 }
 
+# Project managers run under sv, so their panes go with it; give each live one (p-NNNN, or m-p-NNNN from before 0.66.0) a pane again.
+keep_managers() {
+  for t in $(hc ls --json | python3 -c 'import json, re, sys
+for t in json.load(sys.stdin)["terminals"]:
+    if re.fullmatch(r"(m-)?p-[0-9]{4}", t.get("name", "")): print(t["name"])'); do
+    keep "$t"
+  done
+}
+
 start_sv() {
   hc run --bg --no-parent --name sv --cwd "$dir" env PATH="$PATH" claude --model opus --permission-mode auto \
     "session-supervisor skill で監督を再開してください"
@@ -57,10 +68,12 @@ case "$1" in
     end sv-watch
     start_sv
     hc get sv-chat >/dev/null 2>&1 || start_chat
+    keep_managers
     ;;
   restart)
     end sv-watch sv
     start_sv
+    keep_managers
     ;;
   stop)
     end sv-watch sv sv-chat
