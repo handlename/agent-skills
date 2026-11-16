@@ -443,7 +443,7 @@ Reserved headings: the user actions below are recognized by their heading, by th
 
 | English | Japanese |
 | :--- | :--- |
-| `Answer w-NNNN (T-xxxx <title>) in the note or in Herdr` (6.3 step 4; written before 0.67.0 as `... in Herdr` / `...: Herdr のセッションで回答してください`, read the same by its prefix) | `回答待ち w-NNNN (T-xxxx <title>): ノートか Herdr のセッションで回答してください` |
+| `Answer w-NNNN (T-xxxx <title>)` (6.3 step 4; written before 0.69.0 as `... in the note or in Herdr` / `...: ノートか Herdr のセッションで回答してください`, and before 0.67.0 as `... in Herdr` / `...: Herdr のセッションで回答してください`, read the same by its prefix) | `回答待ち w-NNNN (T-xxxx <title>)` |
 | `Answer the pending approval of w-NNNN in Herdr: <status.msg>` (6.4) | `承認待ち w-NNNN: Herdr で承認してください: <status.msg>` |
 | `Hub wait w-NNNN (T-xxxx <title>): ...` (6.4) | `マネージャーの回答待ち w-NNNN (T-xxxx <title>): ...` |
 | `Review wait w-NNNN (T-xxxx <title>): ...` (6.4) | `レビュー待ち w-NNNN (T-xxxx <title>): ...` |
@@ -457,7 +457,7 @@ Reserved headings: the user actions below are recognized by their heading, by th
 
 | User action | Kind | Added in | Resolved by (ack it in that candidate) |
 | :--- | :--- | :--- | :--- |
-| Report-blocker guidance "Answer w-xxxx (T-xxxx <worker title>) in the note or in Herdr" (the blocker quoted in the body) | `auto=worker_report` | 6.3 step 4, 6.4 | The user's answer sent to the worker (6.3 step 4, "Answers"), an `answered` entry of the worker's next report (6.3 step 1), the worker's next report processed in 6.3 (step 4 updates the guidance by difference), or the candidate that sets the worker archived, `missing`, or replaced |
+| Report-blocker guidance "Answer w-xxxx (T-xxxx <worker title>)" (the blocker quoted in the body) | `auto=worker_report` | 6.3 step 4, 6.4 | The user's answer sent to the worker (6.3 step 4, "Answers"), an `answered` entry of the worker's next report (6.3 step 1), the worker's next report processed in 6.3 (step 4 updates the guidance by difference), or the candidate that sets the worker archived, `missing`, or replaced |
 | Unparsed report summary, "w-xxxx is not progressing" | `ask answer` | 6.3 | Relaying the user's answer with send |
 | Report blockers recorded as free text before session-supervisor 0.27.0 | `ask answer` | migration only | The user mentioning it; see "Old blocker wording" below |
 | Failed verification of a `done` report | `ask answer` | 6.3 step 5 | Relaying the user's instruction, or a later report that verifies |
@@ -633,7 +633,7 @@ Called only with workers that reconciliation (6.4) found changed; on a signal (a
 
    `awaiting_manager` (project workers only): the worker sent its questions in `blockers` to the project manager. Update `last_report`, set `continues` to 0, and set `awaiting_since` to now, keeping the previous value when the previous report was also `awaiting_manager` with the same `blockers`. Send nothing and add no user action; 6.4 (`waits`) reports a wait that lasts too long.
 4. `needs_input` / `blocked` / `failed`: the worker asked the user. The user answers in the guidance's thread in the note, in this chat, or in the worker's own session; the supervisor relays the first two (Answers, below).
-   - Guidance: for each entry of `blockers`, the user action with heading "Answer w-xxxx (T-xxxx <worker title>) in the note or in Herdr" and the blocker quoted as its body (a link, if any, as the last paragraph), with `<worker title>` = `workers[].title`. A `failed` report with empty `blockers` gets one guidance built from `summary`.
+   - Guidance: for each entry of `blockers`, the user action with heading "Answer w-xxxx (T-xxxx <worker title>)" and the blocker quoted as its body (a link, if any, as the last paragraph), with `<worker title>` = `workers[].title`. A `failed` report with empty `blockers` gets one guidance built from `summary`.
    - Update by difference: compare the worker's existing guidance (description starting with `Answer <worker id> (`) with the guidance built from this report by the blocker, i.e. the body without its link paragraph (read with `note-show`). Keep each one whose blocker is identical, so its id and `since` stay. Remove the other existing ones (matching `answered` first, step 1) and add only the new ones.
    - Send the worker nothing about its blockers. In this turn's reply, name the worker as `w-NNNN (T-xxxx <title>)` and tell the user to answer under the guidance in the note, or else in that terminal (its tab in Herdr, or `hc attach w-NNNN`); when the blocker asks to talk in the session (for example `このセッションで相談させてください: ...`), point to the terminal first.
    - Answers: when the user answers a guidance in the note (its `answer`, read at `resume`, 6.13) or in this chat, send the worker the Answer message ([references/worker-prompt.md](references/worker-prompt.md)) with the answers verbatim, and in the candidate of that turn ack each answered guidance (`ua_ack`; for a chat answer `ua_answer` first). A guidance without an answer stays. The note shows in progress / agent again once nothing else is open; if the worker asks again, its next report adds a new guidance.
@@ -1063,7 +1063,7 @@ Moving a supervisor from the desktop app to Herdr needs no state migration: run 
 - Every agent action got a `reply` when it was numbered or added, and a `ua_answer` reply saying what was done (or why not) when its work was verified; no agent action's heading or body was changed.
 - The only user actions about delegation were "w-xxxx is not progressing" and the replacement limit of 6.8 (push decisions, archives, "Open repo", pending approvals, report-blocker guidance, and failed verifications are not about delegation).
 - No replacement or follow-up worker got a failed-verification user action.
-- Every report blocker became a guidance user action "Answer w-xxxx (...) in the note or in Herdr", and nothing about a blocker was sent to a worker.
+- Every report blocker became a guidance user action "Answer w-xxxx (...)", and nothing about a blocker was sent to a worker.
 - Every guidance was removed in the candidate that processed the worker's next report, or that set the worker archived, `missing`, or replaced.
 - A blocker reported again with the same text kept the id and `since` of its existing guidance.
 - Every push / PR was made by a worker, either with `push_consent` recorded from the user's words in this chat or on the user's own instruction in that worker's session (observed as in 6.3 step 6).
