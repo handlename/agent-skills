@@ -5,7 +5,11 @@
    This snippet lets the properties flow instead, and makes the test card's title tall enough
    to hold the extra lines, so a long title or summary uses the room a short one leaves.
    Every card keeps the same height: a card with a short title and summary has space at the bottom.
-   setup overwrites this file; to change the line counts, set them on body in a snippet of your own.
+   setup overwrites this file; to change the line counts or the height below, set them on body in a snippet of your own.
+
+   A kanban in a note grows to its longest column, and Bases has no per-column item limit (the view's
+   `limit` counts every card, so a column can lose all of its cards). This snippet caps the height
+   of a kanban in a note instead; each column then scrolls on its own and still renders every card.
 
    It also styles the thread of an action (`#### やりとり` of a task note): the supervisor's messages
    (`> [!sv-agent]`) in a quiet grey.
@@ -18,6 +22,11 @@
   --sv-kanban-line: 20px;
   --sv-kanban-title-lines: 3;
   --sv-kanban-summary-lines: 3;
+  --sv-kanban-max-height: 80vh;
+}
+
+.block-language-base .bases-kanban-container {
+  max-height: var(--sv-kanban-max-height);
 }
 
 .bases-kanban-card {
