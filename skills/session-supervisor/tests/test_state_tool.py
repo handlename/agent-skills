@@ -5229,7 +5229,8 @@ def pair_values(value):
 class StatusShortcutTest(unittest.TestCase):
     CTX = {"unmanaged": {"managed": False}, "active": dict(LIVE, active=True), "idle": LIVE, "paused": PAUSED, "stub": STUB,
            "project": dict(PROJ, active=True), "project_idle": PROJ, "project_paused": dict(PROJ, hold="pause"),
-           "held": dict(LIVE, open_ua=True, held_only=True), "unheld": dict(LIVE, open_ua=True, unheld=True), "project_done": dict(PROJ, active=True, open_ua=True, done_proposed=True)}
+           "held": dict(LIVE, open_ua=True, held_only=True), "unheld": dict(LIVE, open_ua=True, unheld=True), "project_done": dict(PROJ, active=True, open_ua=True, done_proposed=True),
+           "project_open": dict(PROJ, active=True, not_proposed=True), "project_open_paused": dict(PROJ, hold="pause", not_proposed=True)}
     CANCEL_FROM = ("backlog/user", "backlog/agent", "in progress/user", "in progress/agent", "pending/user", "pending/agent")
     CASES = [
         # (kind, label, from, ctx, event, row)
@@ -5282,6 +5283,9 @@ class StatusShortcutTest(unittest.TestCase):
         ("project", "保留", "backlog/agent", "unmanaged", "none", 2),
         ("project", "完了確認", "in progress/user", "project_done", "confirm", 14),
         ("project", "完了確認", "done/agent", "project", "confirm", 14),
+        ("project", "完了", "in progress/agent", "project_open", "confirm", 14),
+        ("project", "完了", "in progress/user", "project_open", "confirm", 14),
+        ("project", "完了", "in progress/user", "project_open_paused", "confirm", 14),
         *[("project", "取り消す", f, "project", "close", 18) for f in CANCEL_FROM],
         ("project", "取り消す", "backlog/agent", "unmanaged", "none", 2),
     ]

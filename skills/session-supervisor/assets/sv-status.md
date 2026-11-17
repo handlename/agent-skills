@@ -23,6 +23,7 @@ const MOVES = [
   {"kind": "project", "label": "保留", "from": ["backlog/user", "backlog/agent"], "managed": false, "to": "pending/user"},
   {"kind": "project", "label": "完了確認", "from": ["in progress/user"], "when": "done_proposed", "to": "done/user"},
   {"kind": "project", "label": "完了確認", "from": ["done/agent"], "to": "done/user"},
+  {"kind": "project", "label": "完了", "from": ["in progress/agent", "in progress/user"], "managed": true, "when": "not_proposed", "to": "done/user"},
   {"kind": "project", "label": "取り消す", "from": ["backlog/user", "backlog/agent", "in progress/user", "in progress/agent", "pending/user", "pending/agent"], "to": "archived/user"}
 ];
 
@@ -61,6 +62,8 @@ if (!tags.includes("supervised")) {
     done_proposed: managed && body.some((line) => line.startsWith("### [UA-")
       && (line.includes("@user プロジェクトの完了を確認してください") || line.includes("@user Confirm that the project is done"))),
   };
+  // A project the manager has not proposed as done can still be closed by the user (notes-scan row 14).
+  when.not_proposed = managed && !when.done_proposed;
   const moves = close < 0 ? [] : MOVES.filter((m) => m.kind === kind && m.from.includes(now)
     && (m.managed === undefined || m.managed === managed) && (m.when === undefined || when[m.when]));
   if (!moves.length) {
