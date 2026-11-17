@@ -3004,27 +3004,37 @@ def note_summary(text):
     return line if len(line) <= NOTE_SUMMARY_MAX else line[:NOTE_SUMMARY_MAX - 1] + "…"
 
 
-_CODE_OR_COMMENT_MARK_RE = re.compile(r"(`+).+?(?<!`)\1(?!`)|%{2,}")
+_CODE_OR_COMMENT_MARK_RE = re.compile(r"(`+).+?(?<!`)\1(?!`)|%{2,}|(?<!\\)<(/?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>\n]*)?/?)>")
 _FENCE_RE = re.compile(r"^[ \t>]*(```|~~~)")
 
 
+def _escape_mark(m):
+    if m.group(1):
+        return m.group(0)
+    if m.group(2) is not None:
+        return f"\\<{m.group(2)}\\>"
+    return f"`{m.group(0)}`"
+
+
 def escape_comment_marks(value):
-    """Wrap each bare `%%` of the texts in value (a string, or lists and dicts of them) in backticks.
+    """Wrap each bare `%%` of the texts in value (a string, or lists and dicts of them) in backticks, and escape the
+    `<` and `>` of each bare HTML-tag-like text (`<target>`, `</b>`, `<a href="x">`) with backslashes.
     Obsidian hides everything from a `%%` to the next one (to the end of the note when there is none), so a `%%` in
-    a report or a log would hide the rest of the note. Code spans and fenced code blocks are left alone, which also
-    makes this idempotent."""
+    a report or a log would hide the rest of the note, and it renders a tag-like text as HTML, which hides it or
+    breaks the layout. Autolinks (`<https://...>`) and HTML comments are not tags and stay. Code spans and fenced code
+    blocks are left alone, which also makes this idempotent."""
     if isinstance(value, dict):
         return {key: escape_comment_marks(item) for key, item in value.items()}
     if isinstance(value, list):
         return [escape_comment_marks(item) for item in value]
-    if not isinstance(value, str) or "%%" not in value:
+    if not isinstance(value, str) or ("%%" not in value and "<" not in value):
         return value
     lines, fenced = [], False
     for line in value.split("\n"):
         if _FENCE_RE.match(line):
             fenced = not fenced
         elif not fenced:
-            line = _CODE_OR_COMMENT_MARK_RE.sub(lambda m: m.group(0) if m.group(1) else f"`{m.group(0)}`", line)
+            line = _CODE_OR_COMMENT_MARK_RE.sub(_escape_mark, line)
         lines.append(line)
     return "\n".join(lines)
 

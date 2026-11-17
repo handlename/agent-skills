@@ -5570,7 +5570,7 @@ class ProposalNoteTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(st.StateError):
                 st.apply_note_ops(text, [{"op": "done_when_set", "text": bad}], NOTE_NOW, 2)
 
-    def test_bare_comment_marks_are_wrapped_in_backticks(self):
+    def test_bare_comment_marks_and_tags_are_escaped(self):
         cases = {"a %% b": "a `%%` b", "50%%%": "50`%%%`", "`%%` and ``x %% y``": "`%%` and ``x %% y``",
                  "```\n%%\n```\n%%": "```\n%%\n```\n`%%`", "50% only": "50% only"}
         for raw, want in cases.items():
@@ -5579,9 +5579,18 @@ class ProposalNoteTest(unittest.TestCase):
                 self.assertEqual(st.escape_comment_marks(want), want)
         text = st.new_note_text("u", "t", "task", "in progress", "agent", NOTE_NOW, "x")
         text = apply_twice(self, text, [{"op": "log", "text": "依頼 (%% を含む行)"},
-                                        {"op": "report_set", "text": "- %% も隠れる"}])[0]
+                                        {"op": "report_set", "text": "- %% も隠れる"},
+                                        {"op": "log", "text": "<branch> を作った"}])[0]
+        self.assertIn("\\<branch\\> を作った", text)
         self.assertIn("依頼 (`%%` を含む行)", text)
         self.assertIn("- `%%` も隠れる", text)
+        cases = {"<target> を見る": "\\<target\\> を見る", "a </b> <br/> <a href=\"x\">": "a \\</b\\> \\<br/\\> \\<a href=\"x\"\\>",
+                 "`<target>` と\n```\n<target>\n```": "`<target>` と\n```\n<target>\n```",
+                 "<https://example.com> <!-- sv --> a < b > c <1>": "<https://example.com> <!-- sv --> a < b > c <1>"}
+        for raw, want in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(st.escape_comment_marks(raw), want)
+                self.assertEqual(st.escape_comment_marks(want), want)
         created = st.apply_note_ops("", [{"op": "create", "uid": "u", "title": "t %%", "kind": "task", "status": "backlog",
                                           "assignee": "agent", "request": "r %%", "original": "o %%"}], NOTE_NOW, 1)[0]
         self.assertIn("title: \"t %%\"", created)
