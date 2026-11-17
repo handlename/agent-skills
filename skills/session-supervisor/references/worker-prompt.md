@@ -12,6 +12,7 @@ You are worker {worker.id} of task {task.id}, started by the supervisor, which r
 Working directory: {worker.cwd}
 {git only: You are in a git worktree created for this worker. Commit on the branch checked out in it; do not switch branches.}
 {git, follow-up worker only: replace the line above with: You are in a git worktree created for this worker. This worktree starts at `{source_branch or the default branch}`. Commit on the branch checked out in it; do not switch branches.}
+{git, queued task with a `base` only (SKILL.md 6.15): replace the line above with: You are in a git worktree created for this worker. This worktree starts at `{base}`, the result of task {predecessor id}, which ran before this one; build on it. Commit on the branch checked out in it; do not switch branches.}
 
 What to do:
 {the part of the user's request assigned to this worker, scoped to this directory}
@@ -23,6 +24,7 @@ What to do:
 
 Done when:
 {completion criteria, for example: change implemented, tests pass, committed with a clean working tree}
+{task with `## 完了条件` only: the body of that section (`sections["完了条件"]` of `note-show`) comes first, as the user's own done criteria, followed by the delivery's own criteria (committed, pushed, ...)}
 {investigation only: for example: the conclusion is reported in `summary`}
 
 Delivery:

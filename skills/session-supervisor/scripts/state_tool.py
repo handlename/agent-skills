@@ -50,6 +50,7 @@ MANAGER_REPORT_STATUSES = ("idle", "needs_input")
 HUB_WAIT_MINUTES = 30
 REVIEW_WAIT_MINUTES = 120
 PROJECT_ID_RE = re.compile(r"^P-(\d{4,})$")
+TASK_ID_RE = re.compile(r"^T-(\d{4,})$")
 REVIEW_ID_RE = re.compile(r"^R-(\d{4,})$")
 PROJECT_REPORT_RE = re.compile(r"```project-report[ \t]*\r?\n(.*?)\r?\n[ \t]*```", re.S)
 REPORT_FIELDS = ("task_id", "worker_id", "status", "summary", "artifacts", "blockers", "next_action")
@@ -79,13 +80,14 @@ NOTE_KEYS = ("uid", "title", "para", "aliases", "created_at", "archived_at", "ta
              "follows")
 NOTE_RAW_KEYS = ("created_at", "archived_at")
 NOTE_SUMMARY_MAX = 80
-NOTE_SECTIONS = ("概要", "知見", "サブタスク", "完了報告", "アクション", "関連ノート", "関連資料", "成果物", "ログ")
+NOTE_SECTIONS = ("概要", "完了条件", "知見", "サブタスク", "完了報告", "アクション", "関連ノート", "関連資料", "成果物", "ログ")
 UA_SECTION = "アクション"
 ST_SECTION = "サブタスク"
 ART_SECTION = "成果物"
 LOG_SECTION = "ログ"
 KN_SECTION = "知見"
 REPORT_SECTION = "完了報告"
+DONE_WHEN_SECTION = "完了条件"
 KN_KEY_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 UA_KINDS = ("ask", "auto", "req")
 UA_DETECTORS = ("worker_report", "worker_started", "archived_observed", "approval_cleared", "pr_closed",
@@ -599,6 +601,72 @@ def derive_status(task, workers_by_id):
     return "done"
 
 
+def _work_finished(task, workers_by_id):
+    """Every worker of a live task has a verified result: kept, held, or intended archived after it was recorded."""
+    done = set(task.get("kept", [])) | set(task.get("held", [])) | _held_ids(task)
+    workers = [workers_by_id.get(wid, {}) for wid in task.get("worker_ids", [])]
+    return bool(workers) and all(w.get("id") in done or w.get("intended_state") == "archived" for w in workers)
+
+
+def serial_status(state, task_id, cwd=None):
+    """{task, ready, waiting_for, base} of a task of a serial queue (`after`, SKILL.md 6.15). It is ready once its
+    nearest predecessor that is not cancelled has finished its work (or is archived or gone); `base` is the branch of
+    the nearest finished predecessor with a `branch` artifact in the repository cwd, from which its git worker starts."""
+    tasks = {t.get("id"): t for t in state.get("tasks", [])}
+    stubs = {s.get("id"): s for s in state.get("archived", [])}
+    workers_by_id = {w.get("id"): w for w in state.get("workers", [])}
+    if task_id not in tasks:
+        raise StateError(f"no live task {task_id}")
+    out = {"task": task_id, "ready": True, "waiting_for": None, "base": None}
+    checked, seen, pred = False, {task_id}, tasks[task_id].get("after")
+    while pred and pred not in seen:
+        seen.add(pred)
+        item = tasks.get(pred) or stubs.get(pred)
+        if item is None:
+            break
+        if not (item.get("cancel") or item.get("cancelled")):
+            if not checked and pred in tasks and not _work_finished(item, workers_by_id):
+                out.update(ready=False, waiting_for=pred)
+                return out
+            checked = True
+            refs = [a.get("ref") for a in item.get("artifacts", []) if a.get("kind") == "branch"]
+            mine = [r for r in refs if cwd and isinstance(r, str) and "#" in r and _real(r.split("#", 1)[0]) == _real(cwd)]
+            if mine:
+                out["base"] = mine[-1].split("#", 1)[1]
+                return out
+        pred = item.get("after")
+    return out
+
+
+def _after_errors(state):
+    errors = []
+    tasks = {t["id"]: t for t in state["tasks"]}
+    for t in state["tasks"]:
+        after = t.get("after")
+        if after is None:
+            continue
+        if not (isinstance(after, str) and TASK_ID_RE.match(after)) or after == t["id"]:
+            errors.append(f"task {t['id']}: after must be the T-id of another task")
+            continue
+        seen, cur = {t["id"]}, after
+        while cur in tasks and cur not in seen:
+            seen.add(cur)
+            cur = tasks[cur].get("after")
+        if cur == t["id"]:
+            errors.append(f"task {t['id']}: after must not form a cycle")
+    return errors
+
+
+def _after_change_errors(current, candidate):
+    """A task joins or moves in a serial queue only while none of its workers has started."""
+    cur = {t["id"]: t.get("after") for t in current["tasks"]}
+    workers = {w["id"]: w for w in candidate["workers"]}
+    return [f"task {t['id']}: after may change only while no worker of the task has started"
+            for t in candidate["tasks"]
+            if t.get("after") and t["id"] in cur and t.get("after") != cur[t["id"]]
+            and any(workers.get(wid, {}).get("observed_state") != "none" for wid in t.get("worker_ids", []))]
+
+
 def _validate_artifact(prefix, artifact, cwds):
     errors = []
     kind = artifact.get("kind")
@@ -758,6 +826,7 @@ def _shape_errors(state):
         derived = t.get("derived_from")
         if derived is not None and not (isinstance(derived, dict) and all(_str(derived.get(k)) for k in ("task_id", "context"))):
             errors.append(f"task {t['id']}: derived_from must be {{task_id, context}} with non-empty strings")
+    errors += _after_errors(state)
     for w in state["workers"]:
         for key in ("task_id", "cwd"):
             if not isinstance(w.get(key), str):
@@ -1422,7 +1491,7 @@ def next_state(current, candidate, now):
     if errors:
         raise StateError(errors)
     errors = (_deletion_errors(current, state) + _transition_errors(current, state) + _consent_request_errors(current, state)
-              + _consent_message_errors(current, state))
+              + _consent_message_errors(current, state) + _after_change_errors(current, state))
     if errors:
         raise StateError(errors)
 
@@ -1456,7 +1525,7 @@ def next_state(current, candidate, now):
         project = projects_by_id.get(t.get("project_id"))
         if project is not None:
             stub["project"] = {"id": project["id"], "name": project["name"]}
-        for key in ("proposal", "redos", "uid", "last_artifact_number"):
+        for key in ("proposal", "redos", "uid", "last_artifact_number", "after"):
             if t.get(key):
                 stub[key] = t[key]
         stubs.append(stub)
@@ -1549,7 +1618,8 @@ def digest(state, state_path, limit=DIGEST_LIMIT):
             for wid in t.get("worker_ids", [])
         )
         project = f"[{t['project_id']}] " if t.get("project_id") else ""
-        task_lines.append(f"- {project}{t.get('id')} [{t.get('status')}] {t.get('title')} | next: {t.get('next_action')} | workers: {ws}")
+        after = f" | after {t['after']}" if t.get("after") else ""
+        task_lines.append(f"- {project}{t.get('id')} [{t.get('status')}] {t.get('title')} | next: {t.get('next_action')}{after} | workers: {ws}")
     lines += task_lines or ["- (none)"]
     text = "\n".join(lines)
     if len(text) <= limit:
@@ -2025,7 +2095,7 @@ def new_note_text(uid, title, kind, status, assignee, now, request="", parent=No
     if original and original.strip("\n"):
         content = "\n\n".join(c for c in (content, "\n".join([QUOTE_HEAD] + _quote(original.strip("\n")))) if c)
     sections = [f"## {name}\n\n{content}\n" if name == "概要" and content else f"## {name}\n\n" for name in NOTE_SECTIONS
-                if name != (KN_SECTION if kind == "task" else REPORT_SECTION)]
+                if name not in ((KN_SECTION,) if kind == "task" else (REPORT_SECTION, DONE_WHEN_SECTION))]
     body = "\n".join(sections[:1] + [PROJECT_TASKS_SECTION] * (kind == "project") + sections[1:])
     return f"---\n{head}---\n{body}"
 
@@ -2905,11 +2975,24 @@ def _op_report_set(lines, op, now, rev, index, problems):
     return []
 
 
+def _op_done_when_set(lines, op, now, rev, index, problems):
+    """Replaces the body of `## 完了条件` with text: what has to hold for the task's work to count as finished."""
+    text = op.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise StateError("done_when_set needs text")
+    body = text.strip("\n").split("\n")
+    if any(re.match(r"#{1,2}\s", line) for line in body):
+        raise StateError("done_when_set: text must not contain # or ## headings")
+    head, end = _ensure_section(lines, DONE_WHEN_SECTION)
+    lines[head + 1:end] = [""] + body + [""]
+    return []
+
+
 _NOTE_BODY_OPS = {
     "log": _op_log, "ua_add": _op_ua_add, "ua_answer": _op_ua_answer, "ua_ack": _op_ua_ack, "ua_adopt": _op_ua_adopt,
     "art_add": _op_art_add, "art_set": _op_art_set, "art_replace_group": _op_art_replace_group,
     "st_adopt": _op_st_adopt, "st_add": _op_st_add, "st_set": _op_st_set, "kn_set": _op_kn_set,
-    "report_set": _op_report_set,
+    "report_set": _op_report_set, "done_when_set": _op_done_when_set,
 }
 
 
@@ -4462,6 +4545,11 @@ def cmd_parse_report(args):
     return 0 if result["ok"] else 1
 
 
+def cmd_serial_check(args):
+    print(json.dumps(serial_status(_load_view(args.state), args.task, args.cwd), ensure_ascii=False))
+    return 0
+
+
 def cmd_check_cwd(args):
     print("busy" if cwd_busy(_load_view(args.state), _real(args.cwd)) else "free")
     return 0
@@ -4971,6 +5059,12 @@ def launch_argv(state, ident, prompt, herdr, parent=None):
                    and w.get("observed_state") not in ("archived", "missing") and w.get("id") not in kept]
         if len(running) >= limit:
             raise StateError(f"max_workers {limit} reached ({', '.join(running)}); start {ident} after one finishes")
+        task_id = session.get("task_id")
+        if any(t.get("id") == task_id and t.get("after") for t in state.get("tasks", [])):
+            serial = serial_status(state, task_id)
+            if not serial["ready"]:
+                raise StateError(f"{task_id} runs after {serial['waiting_for']} (serial queue); start {ident} once "
+                                 f"{serial['waiting_for']} has finished its work")
     argv = ["hc", "run", "--bg", "--json", "--name", ident, "--cwd", cwd, "--label", f"sv={kind}", "--label", label,
             "--outlive-parent"]
     if parent:
@@ -5972,6 +6066,11 @@ def build_parser():
     p.add_argument("--timeout", type=float, default=120)
     p.set_defaults(func=cmd_chat_wait)
 
+    p = sub.add_parser("serial-check", help="print whether a task of a serial queue may start and the branch to start from (JSON)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--task", required=True)
+    p.add_argument("--cwd", help="repository root of the git worker to start (for base)")
+    p.set_defaults(func=cmd_serial_check)
     p = sub.add_parser("check-cwd", help="print busy or free for a non-git cwd")
     p.add_argument("--state", required=True)
     p.add_argument("--cwd", required=True)

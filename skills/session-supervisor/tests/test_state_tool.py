@@ -3590,7 +3590,8 @@ class NoteTemplateTest(unittest.TestCase):
         self.assertNotIn("parent", props)
         self.assertNotIn("follows", props)
         sections = st.parse_sections(st.parse_frontmatter(text)[1])
-        self.assertEqual(list(sections), ["概要", "タスク", *[n for n in st.NOTE_SECTIONS[1:] if n != st.REPORT_SECTION]])
+        self.assertEqual(list(sections), ["概要", "タスク", *[n for n in st.NOTE_SECTIONS[1:]
+                                                          if n not in (st.REPORT_SECTION, st.DONE_WHEN_SECTION)]])
         self.assertIn("    - 'parent == this'\n", sections["タスク"])
         self.assertNotIn("inFolder", sections["タスク"])
         self.assertIn("    sort:\n      - property: file.mtime\n        direction: DESC\n", sections["タスク"])
@@ -5550,11 +5551,24 @@ class ProposalNoteTest(unittest.TestCase):
         for base in (text, old):
             once = st.apply_note_ops(base, [{"op": "report_set", "text": "- 古い根拠"}], NOTE_NOW, 2)[0]
             twice = st.apply_note_ops(once, [REPORT_OP, REPORT_OP], NOTE_NOW, 3)[0]
-            self.assertEqual(list(sections(twice))[1:4], ["サブタスク", "完了報告", "アクション"])
+            self.assertEqual(list(sections(twice))[2:5], ["サブタスク", "完了報告", "アクション"])
             self.assertEqual(sections(twice)["完了報告"], "\n" + REPORT_OP["text"] + "\n")
         for bad in ("", "## 見出し", "# 見出し"):
             with self.subTest(bad=bad), self.assertRaises(st.StateError):
                 st.apply_note_ops(text, [{"op": "report_set", "text": bad}], NOTE_NOW, 2)
+
+    def test_done_when_set_replaces_the_done_criteria(self):
+        text = st.new_note_text("u", "t", "task", "in progress", "agent", NOTE_NOW, "x")
+        old = text.replace("## 完了条件\n\n", "")
+        sections = lambda t: st.parse_sections(st.parse_frontmatter(t)[1])
+        for base in (text, old):
+            once = st.apply_note_ops(base, [{"op": "done_when_set", "text": "- 古い条件"}], NOTE_NOW, 2)[0]
+            twice = st.apply_note_ops(once, [{"op": "done_when_set", "text": "- テストが通る"}], NOTE_NOW, 3)[0]
+            self.assertEqual(list(sections(twice))[:3], ["概要", "完了条件", "サブタスク"])
+            self.assertEqual(sections(twice)["完了条件"], "\n- テストが通る\n")
+        for bad in ("", "## 見出し"):
+            with self.subTest(bad=bad), self.assertRaises(st.StateError):
+                st.apply_note_ops(text, [{"op": "done_when_set", "text": bad}], NOTE_NOW, 2)
 
     def test_bare_comment_marks_are_wrapped_in_backticks(self):
         cases = {"a %% b": "a `%%` b", "50%%%": "50`%%%`", "`%%` and ``x %% y``": "`%%` and ``x %% y``",
@@ -5914,6 +5928,87 @@ def herdr_worker(state, task_id="T-0030", worker_id="w-0030", **kw):
     w.update(runtime="herdr", session_id=SID, handle=worker_id, title=f"{task_id}|{worker_id} fix it",
              worktree_path="/trees/a/fix", model="sonnet", **kw)
     return w
+
+
+class SerialQueueTest(unittest.TestCase):
+    """Tasks the user asked to run one after another (`after`, SKILL.md 6.15)."""
+
+    def queue(self, observed="idle"):
+        state = fixture_state()
+        git_task(state, "T-0030", "w-0030", observed=observed)
+        git_task(state, "T-0031", "w-0031", intended="pending", observed="none")
+        find(state["tasks"], "T-0031")["after"] = "T-0030"
+        return state
+
+    def test_waits_until_the_predecessor_has_finished_its_work(self):
+        state = self.queue()
+        self.assertEqual(st.serial_status(state, "T-0031", "/repo/a"),
+                         {"task": "T-0031", "ready": False, "waiting_for": "T-0030", "base": None})
+        # Verified and kept (approved for a project task): the next task starts from its branch.
+        commit_artifacts(state, "T-0030")
+        find(state["tasks"], "T-0030")["kept"] = ["w-0030"]
+        self.assertEqual(st.serial_status(state, "T-0031", "/repo/a"),
+                         {"task": "T-0031", "ready": True, "waiting_for": None, "base": "claude/license-x1"})
+        # Another repository does not get that branch.
+        self.assertIsNone(st.serial_status(state, "T-0031", "/repo/b")["base"])
+
+    def test_cancelled_predecessor_is_skipped_and_archived_one_counts_as_finished(self):
+        state = self.queue()
+        state["archived"].insert(0, {"id": "T-0029", "title": "t", "request": "r", "archived_at": NOW,
+                                     "artifacts": [{"kind": "branch", "ref": "/repo/a#claude/prev"},
+                                                   {"kind": "commit", "ref": "def456"}]})
+        t30 = find(state["tasks"], "T-0030")
+        t30.update(after="T-0029", cancel={"at": NOW, "reason": "不要"})
+        self.assertEqual(st.serial_status(state, "T-0031", "/repo/a"),
+                         {"task": "T-0031", "ready": True, "waiting_for": None, "base": "claude/prev"})
+        # A predecessor no longer in the state does not block.
+        state["archived"].pop(0)
+        self.assertEqual(st.serial_status(state, "T-0031", "/repo/a")["ready"], True)
+
+    def test_after_is_validated(self):
+        state = self.queue()
+        self.assertEqual(st.validate(state), [])
+        for bad, needle in (("T-0031", "another task"), ("x", "another task"), (31, "another task")):
+            find(state["tasks"], "T-0031")["after"] = bad
+            self.assertTrue(any(needle in e for e in st.validate(state)), bad)
+        find(state["tasks"], "T-0031")["after"] = "T-0030"
+        find(state["tasks"], "T-0030")["after"] = "T-0031"
+        self.assertTrue(any("cycle" in e for e in st.validate(state)))
+
+    def test_after_changes_only_before_the_start(self):
+        current = self.queue()
+        cand = copy.deepcopy(current)
+        find(cand["tasks"], "T-0030")["after"] = "T-0003"
+        with self.assertRaisesRegex(st.StateError, "after may change only"):
+            st.next_state(current, cand, NOW)
+        cand = copy.deepcopy(current)
+        find(cand["tasks"], "T-0031")["after"] = "T-0003"
+        self.assertEqual(find(st.next_state(current, cand, NOW)["tasks"], "T-0031")["after"], "T-0003")
+        # Leaving the queue is allowed at any time.
+        cand = copy.deepcopy(current)
+        find(cand["workers"], "w-0031").update(intended_state="running", observed_state="running")
+        current2 = st.next_state(current, cand, NOW)
+        cand = copy.deepcopy(current2)
+        find(cand["tasks"], "T-0031").pop("after")
+        st.next_state(current2, cand, NOW)
+
+    def test_stub_keeps_after(self):
+        current = self.queue()
+        cand = copy.deepcopy(current)
+        find(cand["tasks"], "T-0031")["cancel"] = {"at": NOW, "reason": "やめる"}
+        new = st.next_state(current, cand, NOW)
+        self.assertEqual(find(new["archived"], "T-0031")["after"], "T-0030")
+
+    def test_launch_refuses_before_the_predecessor_finishes(self):
+        state = self.queue()
+        find(state["workers"], "w-0031").update(runtime="herdr", session_id=SID, handle="w-0031", worktree_path="/trees/b")
+        with self.assertRaisesRegex(st.StateError, "T-0031 runs after T-0030"):
+            st.launch_argv(state, "w-0031", "Fix it.", {})
+        find(state["tasks"], "T-0030")["cancel"] = {"at": NOW, "reason": "不要"}
+        self.assertEqual(st.launch_argv(state, "w-0031", "Fix it.", {})[:2], ["hc", "run"])
+
+    def test_digest_shows_the_predecessor(self):
+        self.assertIn("| after T-0030 |", st.digest(self.queue(), "/s/state.json"))
 
 
 class FakeHc:
@@ -6789,7 +6884,7 @@ class SubtaskTest(unittest.TestCase):
         # A note without the section gets it in the template order.
         bare = st.new_note_text("u6", "t", "task", "in progress", "agent", NOTE_NOW, "x").replace("## サブタスク\n\n", "")
         added = st.apply_note_ops(bare, [{"op": "st_add", "st": {"id": "ST-0001", "text": "足す"}}], NOTE_NOW, 2)[0]
-        self.assertEqual(list(st.parse_sections(st.parse_frontmatter(added)[1]))[:3], ["概要", "サブタスク", "完了報告"])
+        self.assertEqual(list(st.parse_sections(st.parse_frontmatter(added)[1]))[:4], ["概要", "完了条件", "サブタスク", "完了報告"])
 
     def test_numbers_share_the_action_counter(self):
         ops = st.number_note_ops({"u": [{"op": "st_adopt", "st": {"text": "x"}}, {"op": "ua_add", "ua": {"kind": "ask", "description": "q"}},
