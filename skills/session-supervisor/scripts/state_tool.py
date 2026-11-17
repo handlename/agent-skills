@@ -79,12 +79,13 @@ NOTE_KEYS = ("uid", "title", "para", "aliases", "created_at", "archived_at", "ta
              "follows")
 NOTE_RAW_KEYS = ("created_at", "archived_at")
 NOTE_SUMMARY_MAX = 80
-NOTE_SECTIONS = ("概要", "知見", "サブタスク", "アクション", "関連ノート", "関連資料", "成果物", "ログ")
+NOTE_SECTIONS = ("概要", "知見", "サブタスク", "完了報告", "アクション", "関連ノート", "関連資料", "成果物", "ログ")
 UA_SECTION = "アクション"
 ST_SECTION = "サブタスク"
 ART_SECTION = "成果物"
 LOG_SECTION = "ログ"
 KN_SECTION = "知見"
+REPORT_SECTION = "完了報告"
 KN_KEY_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 UA_KINDS = ("ask", "auto", "req")
 UA_DETECTORS = ("worker_report", "worker_started", "archived_observed", "approval_cleared", "pr_closed",
@@ -1336,8 +1337,8 @@ WAITING_START = {"en": "Waiting task {task_id} can start now: send any message t
                  "ja": "待機中のタスク {task_id} を開始できます: supervisor に何かメッセージを送ると開始します。"}
 
 
-COMPLETION_ASK = {"en": "The work is done: check the results and set this note to done / user",
-                  "ja": "作業が完了しました。結果を確認して done / user にしてください"}
+COMPLETION_ASK = {"en": "The work is done: check the grounds in 完了報告 and the results, then set this note to done / user",
+                  "ja": "作業が完了しました。完了報告の根拠と結果を確認して done / user にしてください"}
 
 
 def note_lang(text):
@@ -2024,7 +2025,7 @@ def new_note_text(uid, title, kind, status, assignee, now, request="", parent=No
     if original and original.strip("\n"):
         content = "\n\n".join(c for c in (content, "\n".join([QUOTE_HEAD] + _quote(original.strip("\n")))) if c)
     sections = [f"## {name}\n\n{content}\n" if name == "概要" and content else f"## {name}\n\n" for name in NOTE_SECTIONS
-                if kind == "project" or name != KN_SECTION]
+                if name != (KN_SECTION if kind == "task" else REPORT_SECTION)]
     body = "\n".join(sections[:1] + [PROJECT_TASKS_SECTION] * (kind == "project") + sections[1:])
     return f"---\n{head}---\n{body}"
 
@@ -2891,10 +2892,24 @@ def _op_kn_set(lines, op, now, rev, index, problems):
     return [block_id]
 
 
+def _op_report_set(lines, op, now, rev, index, problems):
+    """Replaces the body of `## 完了報告` with text: why the supervisor judged the task's work finished."""
+    text = op.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise StateError("report_set needs text")
+    body = text.strip("\n").split("\n")
+    if any(re.match(r"#{1,2}\s", line) for line in body):
+        raise StateError("report_set: text must not contain # or ## headings")
+    head, end = _ensure_section(lines, REPORT_SECTION)
+    lines[head + 1:end] = [""] + body + [""]
+    return []
+
+
 _NOTE_BODY_OPS = {
     "log": _op_log, "ua_add": _op_ua_add, "ua_answer": _op_ua_answer, "ua_ack": _op_ua_ack, "ua_adopt": _op_ua_adopt,
     "art_add": _op_art_add, "art_set": _op_art_set, "art_replace_group": _op_art_replace_group,
     "st_adopt": _op_st_adopt, "st_add": _op_st_add, "st_set": _op_st_set, "kn_set": _op_kn_set,
+    "report_set": _op_report_set,
 }
 
 
@@ -4330,6 +4345,14 @@ def _commit_v2(args, current):
 
     # 6. Storage form, the ops commit itself adds, note_seen and the journal.
     state_new, ops_all = split_view(view_cand, view_new, ops)
+    # The completion ask points the user at 完了報告, so the commit that adds it must write the grounds.
+    task_ids = {t.get("uid"): t["id"] for t in view_new["tasks"]}
+    unreported = [task_ids.get(uid, uid) for uid, items in ops_all.items()
+                  if any(o.get("op") == "ua_add" and o["ua"].get("detector") == "task_done" for o in items[len(ops.get(uid, [])):])
+                  and not any(o.get("op") == "report_set" for o in ops.get(uid, []))]
+    if unreported:
+        raise StateError(f"the work of {', '.join(sorted(unreported))} is finished: add report_set {{text}} with the grounds "
+                         "for completion to the ops of its note (SKILL.md section 4, Completion report)")
     for uid, items in ops_all.items():
         extra = items[len(ops.get(uid, [])):]
         if extra and after.get(uid):

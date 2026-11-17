@@ -3590,7 +3590,7 @@ class NoteTemplateTest(unittest.TestCase):
         self.assertNotIn("parent", props)
         self.assertNotIn("follows", props)
         sections = st.parse_sections(st.parse_frontmatter(text)[1])
-        self.assertEqual(list(sections), ["概要", "タスク", *st.NOTE_SECTIONS[1:]])
+        self.assertEqual(list(sections), ["概要", "タスク", *[n for n in st.NOTE_SECTIONS[1:] if n != st.REPORT_SECTION]])
         self.assertIn("    - 'parent == this'\n", sections["タスク"])
         self.assertNotIn("inFolder", sections["タスク"])
         follows = st.parse_frontmatter(st.new_note_text("u", "t", "task", "backlog", "agent", NOTE_NOW, follows="20261101_000000"))[0]
@@ -4696,6 +4696,9 @@ class ArtifactDependencyTest(unittest.TestCase):
 
 
 
+REPORT_OP = {"op": "report_set", "text": "- 依頼の LICENSE の年を直した (abc123 を確認)\n- テストは通っている"}
+
+
 def confirm_finished(test, env, uid, task_id):
     """A finished task waits in progress / user with the completion ask; the user's done / user confirms it."""
     test.assertEqual(st._pair(env.values(uid)), ("in progress", "user"))
@@ -4856,10 +4859,16 @@ class NoteCommitTest(unittest.TestCase):
         find(cand["workers"], "w-0020")["last_report"] = {"message_ref": "m1", "status": "done", "summary": "s",
                                                            "next_action": "", "at": NOW}
         find(cand["tasks"], "T-0020").update(kept=["w-0020"], no_result=[{"worker_id": "w-0020", "summary": "s", "at": NOW}])
+        before = self.env.state_path.read_bytes()
         code, _, err = self.env.commit(cand)
+        self.assertEqual(code, 1)
+        self.assertIn("the work of T-0020 is finished: add report_set", err)
+        self.assertEqual(self.env.state_path.read_bytes(), before)
+        code, _, err = self.env.commit(cand, {U1: [REPORT_OP]})
         self.assertEqual(code, 0, err)
         self.assertEqual(st._pair(self.env.values(U1)), ("in progress", "user"))
         self.assertIn(st.COMPLETION_ASK["en"], self.env.text(U1))
+        self.assertEqual(note_section(self.env.text(U1), "完了報告").strip(), REPORT_OP["text"])
         self.env.put(U1, self.env.text(U1).replace('status: "in progress"', 'status: "done"'))
         events = self.env.scan()["events"]
         self.assertEqual([(e["uid"], e["event"], e["row"]) for e in events], [(U1, "confirm", 13)])
@@ -4992,7 +5001,7 @@ class NoteCommitTest(unittest.TestCase):
         self.env.save()
         cand = self.env.load()
         find(cand["workers"], "w-0030")["observed_state"] = "archived"
-        code, out, err = self.env.commit(cand)
+        code, out, err = self.env.commit(cand, {U3: [REPORT_OP]})
         self.assertEqual(code, 0, err)
         self.assertEqual(find(self.env.load()["tasks"], "T-0030")["uid"], U3)
         confirm_finished(self, self.env, U3, "T-0030")
@@ -5528,6 +5537,19 @@ class ProposalNoteTest(unittest.TestCase):
                       "questions": [], "knowledge": bad}
             self.assertFalse(st.parse_project_report("```project-report\n" + json.dumps(report) + "\n```")["ok"])
 
+    def test_report_set_replaces_the_completion_report(self):
+        text = st.new_note_text("u", "t", "task", "in progress", "agent", NOTE_NOW, "x")
+        old = text.replace("## 完了報告\n\n", "")
+        sections = lambda t: st.parse_sections(st.parse_frontmatter(t)[1])
+        for base in (text, old):
+            once = st.apply_note_ops(base, [{"op": "report_set", "text": "- 古い根拠"}], NOTE_NOW, 2)[0]
+            twice = st.apply_note_ops(once, [REPORT_OP, REPORT_OP], NOTE_NOW, 3)[0]
+            self.assertEqual(list(sections(twice))[1:4], ["サブタスク", "完了報告", "アクション"])
+            self.assertEqual(sections(twice)["完了報告"], "\n" + REPORT_OP["text"] + "\n")
+        for bad in ("", "## 見出し", "# 見出し"):
+            with self.subTest(bad=bad), self.assertRaises(st.StateError):
+                st.apply_note_ops(text, [{"op": "report_set", "text": bad}], NOTE_NOW, 2)
+
     def test_kn_set_adds_replaces_and_removes_entries(self):
         text = st.new_note_text(U3, "P", "project", "in progress", "agent", NOTE_NOW, "ctx")
         sections = st.parse_sections(st.parse_frontmatter(text)[1])
@@ -5730,7 +5752,7 @@ class MigrateExportTest(unittest.TestCase):
         self.assertEqual(json.loads(out)["tasks_without_workers"], [])
         exported = json.loads(out_path.read_text(encoding="utf-8"))
         self.assertEqual([t["title"] for t in exported["tasks"]], [t["title"] for t in self.v1["tasks"]])
-        code, _, err = env.commit()
+        code, _, err = env.commit(None, {find(env.load()["tasks"], "T-0095")["uid"]: [REPORT_OP]})
         self.assertEqual(code, 0, err)
         state = env.load()
         state["tasks"][0]["worker_ids"] = []
@@ -5793,7 +5815,7 @@ class VerifyFixesTest(unittest.TestCase):
         cand = self.env.load()
         find(cand["workers"], "w-0020").update(intended_state="archived", observed_state="archived")
         commit_ops = {U1: [{"op": "art_add", "items": [{"kind": "branch", "ref": "/repo/a#claude/license-x1"}, {"kind": "commit", "ref": "abc123",
-                                                                                                                  "url": "https://github.com/org/repo-a/commit/abc123"}]}]}
+                                                                                                                  "url": "https://github.com/org/repo-a/commit/abc123"}]}, REPORT_OP]}
         self.assertEqual(self.env.commit(cand, commit_ops)[0], 0)
         confirm_finished(self, self.env, U1, "T-0020")
         state = self.env.load()
@@ -6724,7 +6746,7 @@ class SubtaskTest(unittest.TestCase):
         # A note without the section gets it in the template order.
         bare = st.new_note_text("u6", "t", "task", "in progress", "agent", NOTE_NOW, "x").replace("## サブタスク\n\n", "")
         added = st.apply_note_ops(bare, [{"op": "st_add", "st": {"id": "ST-0001", "text": "足す"}}], NOTE_NOW, 2)[0]
-        self.assertEqual(list(st.parse_sections(st.parse_frontmatter(added)[1]))[:3], ["概要", "サブタスク", "アクション"])
+        self.assertEqual(list(st.parse_sections(st.parse_frontmatter(added)[1]))[:3], ["概要", "サブタスク", "完了報告"])
 
     def test_numbers_share_the_action_counter(self):
         ops = st.number_note_ops({"u": [{"op": "st_adopt", "st": {"text": "x"}}, {"op": "ua_add", "ua": {"kind": "ask", "description": "q"}},
