@@ -5556,6 +5556,24 @@ class ProposalNoteTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(st.StateError):
                 st.apply_note_ops(text, [{"op": "report_set", "text": bad}], NOTE_NOW, 2)
 
+    def test_bare_comment_marks_are_wrapped_in_backticks(self):
+        cases = {"a %% b": "a `%%` b", "50%%%": "50`%%%`", "`%%` and ``x %% y``": "`%%` and ``x %% y``",
+                 "```\n%%\n```\n%%": "```\n%%\n```\n`%%`", "50% only": "50% only"}
+        for raw, want in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(st.escape_comment_marks(raw), want)
+                self.assertEqual(st.escape_comment_marks(want), want)
+        text = st.new_note_text("u", "t", "task", "in progress", "agent", NOTE_NOW, "x")
+        text = apply_twice(self, text, [{"op": "log", "text": "依頼 (%% を含む行)"},
+                                        {"op": "report_set", "text": "- %% も隠れる"}])[0]
+        self.assertIn("依頼 (`%%` を含む行)", text)
+        self.assertIn("- `%%` も隠れる", text)
+        created = st.apply_note_ops("", [{"op": "create", "uid": "u", "title": "t %%", "kind": "task", "status": "backlog",
+                                          "assignee": "agent", "request": "r %%", "original": "o %%"}], NOTE_NOW, 1)[0]
+        self.assertIn("title: \"t %%\"", created)
+        self.assertIn("r `%%`", created)
+        self.assertIn("o `%%`", created)
+
     def test_kn_set_adds_replaces_and_removes_entries(self):
         text = st.new_note_text(U3, "P", "project", "in progress", "agent", NOTE_NOW, "ctx")
         sections = st.parse_sections(st.parse_frontmatter(text)[1])

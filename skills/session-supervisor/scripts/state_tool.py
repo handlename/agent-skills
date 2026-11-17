@@ -2921,6 +2921,31 @@ def note_summary(text):
     return line if len(line) <= NOTE_SUMMARY_MAX else line[:NOTE_SUMMARY_MAX - 1] + "…"
 
 
+_CODE_OR_COMMENT_MARK_RE = re.compile(r"(`+).+?(?<!`)\1(?!`)|%{2,}")
+_FENCE_RE = re.compile(r"^[ \t>]*(```|~~~)")
+
+
+def escape_comment_marks(value):
+    """Wrap each bare `%%` of the texts in value (a string, or lists and dicts of them) in backticks.
+    Obsidian hides everything from a `%%` to the next one (to the end of the note when there is none), so a `%%` in
+    a report or a log would hide the rest of the note. Code spans and fenced code blocks are left alone, which also
+    makes this idempotent."""
+    if isinstance(value, dict):
+        return {key: escape_comment_marks(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [escape_comment_marks(item) for item in value]
+    if not isinstance(value, str) or "%%" not in value:
+        return value
+    lines, fenced = [], False
+    for line in value.split("\n"):
+        if _FENCE_RE.match(line):
+            fenced = not fenced
+        elif not fenced:
+            line = _CODE_OR_COMMENT_MARK_RE.sub(lambda m: m.group(0) if m.group(1) else f"`{m.group(0)}`", line)
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def apply_note_ops(text, ops, now, rev):
     """Apply note ops to a note's text. Returns (text, new_ids, problems).
     Re-applying the same ops with the same rev is a no-op: lines are added once per block id, and edits of existing
@@ -2933,7 +2958,8 @@ def apply_note_ops(text, ops, now, rev):
         if name == "create":
             if not text.strip():
                 text = new_note_text(op["uid"], op["title"], op["kind"], op["status"], op["assignee"], now,
-                                     op.get("request", ""), op.get("parent"), op.get("follows"), op.get("original"),
+                                     escape_comment_marks(op.get("request", "")), op.get("parent"), op.get("follows"),
+                                     escape_comment_marks(op.get("original")),
                                      op.get("proposed_by"), op.get("parent_title"))
             continue
         if name == "assign_uid":
@@ -2950,7 +2976,7 @@ def apply_note_ops(text, ops, now, rev):
             raise StateError(f"unknown note op {name!r}")
         head, body = _split_note(text)
         lines = body.split("\n")
-        new_ids += _NOTE_BODY_OPS[name](lines, op, now, rev, index, problems)
+        new_ids += _NOTE_BODY_OPS[name](lines, escape_comment_marks(op), now, rev, index, problems)
         text = head + "\n".join(lines)
     return text, new_ids, problems
 
