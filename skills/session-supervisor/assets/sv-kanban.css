@@ -8,7 +8,11 @@
    setup overwrites this file; to change the line counts, set them on body in a snippet of your own.
 
    It also styles the thread of an action (`#### やりとり` of a task note): the supervisor's messages
-   (`> [!sv-agent]`) in a quiet grey. */
+   (`> [!sv-agent]`) in a quiet grey.
+
+   And it hides the supervisor's metadata in Live Preview: HTML comments (`<!-- sv ... -->`) and
+   block ids (`^sv-log-1`) disappear except on the line the cursor is on, so they stay editable.
+   Reading view already hides both; comment tokens inside code blocks are left alone. */
 
 :root {
   --sv-kanban-line: 20px;
@@ -58,3 +62,7 @@
   font-size: var(--font-ui-small);
 }
 
+
+.markdown-source-view.is-live-preview .cm-line:not(.cm-active, .HyperMD-codeblock) :is(.cm-comment, .cm-blockid) {
+  display: none;
+}
