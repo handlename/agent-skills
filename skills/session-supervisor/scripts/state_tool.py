@@ -5,7 +5,8 @@ Functional core: validate, next_state, digest, parse_report, cwd_busy, serialize
 parse_project_report, plan_actions, roster, waits, manager_reconcile,
 guard_decision (bash_violations, path_violation), parse_follow_ups, new_pr_urls, follow_up_actions,
 parse_locations, default_locations, add_missing_locations, clone_url_parts,
-parse_frontmatter, set_props, new_note_text, parse_sections, parse_user_actions, ua_open, render_ua_line,
+parse_herdr, default_herdr, add_missing_herdr, launch_argv, observe_hc, watch_messages,
+parse_frontmatter, set_props, new_note_text, parse_sections, parse_user_actions, ua_open, render_ua_block, render_ua_done,
 apply_note_ops, parse_artifacts, render_artifact_line, artifacts_view, art_sha,
 join_view, split_view, note_props, user_transition, artifact_needs, note_values, journal_reflected, number_note_ops,
 proposal_titles, migrate_v2, export_v1.
@@ -23,7 +24,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import textwrap
+import time
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -48,15 +50,17 @@ MANAGER_REPORT_STATUSES = ("idle", "needs_input")
 HUB_WAIT_MINUTES = 30
 REVIEW_WAIT_MINUTES = 120
 PROJECT_ID_RE = re.compile(r"^P-(\d{4,})$")
+TASK_ID_RE = re.compile(r"^T-(\d{4,})$")
 REVIEW_ID_RE = re.compile(r"^R-(\d{4,})$")
 PROJECT_REPORT_RE = re.compile(r"```project-report[ \t]*\r?\n(.*?)\r?\n[ \t]*```", re.S)
 REPORT_FIELDS = ("task_id", "worker_id", "status", "summary", "artifacts", "blockers", "next_action")
 REPORT_ARTIFACT_KEYS = ("branch", "commit", "pr", "ci")
 
 REPORT_RE = re.compile(r"```supervisor-report[ \t]*\r?\n(.*?)\r?\n[ \t]*```", re.S)
-UA_ID_RE = re.compile(r"^UA-(\d+)$")
-HUB_WAIT_PREFIX = "Hub wait {wid} ("
-REVIEW_WAIT_PREFIX = "Review wait {wid} ("
+UA_ID_RE = re.compile(r"^(?:UA|AA)-(\d+)$")
+# Reserved user action prefixes, in English and in Japanese (a note's actions are written in its language, note_lang).
+HUB_WAIT_PREFIXES = ("Hub wait {wid} (", "マネージャーの回答待ち {wid} (")
+REVIEW_WAIT_PREFIXES = ("Review wait {wid} (", "レビュー待ち {wid} (")
 READ_ACTION_PREFIX = "Read the result of "
 FINDING_KEYS = ("worker_id", "session_id", "title", "summary", "message_ref", "at")
 
@@ -72,20 +76,28 @@ PR_URL_RE = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)/?$", re.I)
 NOTE_STATUSES = ("backlog", "in progress", "pending", "done", "archived")
 ASSIGNEES = ("user", "agent")
 NOTE_KEYS = ("uid", "title", "para", "aliases", "created_at", "archived_at", "tags", "start_date", "due_date",
-             "pending_until", "completed_at", "status", "assignee", "task_id", "project_id", "parent", "follows")
+             "pending_until", "completed_at", "status", "assignee", "summary", "subtasks", "task_id", "project_id", "parent", "proposed_by",
+             "follows")
 NOTE_RAW_KEYS = ("created_at", "archived_at")
-NOTE_SECTIONS = ("概要", "ユーザーアクション", "サブタスク", "関連ノート", "関連資料", "成果物", "ログ")
-UA_SECTION = "ユーザーアクション"
+NOTE_SUMMARY_MAX = 80
+NOTE_SECTIONS = ("概要", "完了条件", "知見", "サブタスク", "完了報告", "アクション", "関連ノート", "関連資料", "成果物", "ログ")
+UA_SECTION = "アクション"
+ST_SECTION = "サブタスク"
 ART_SECTION = "成果物"
 LOG_SECTION = "ログ"
-UA_KINDS = ("ask", "auto", "slot")
+KN_SECTION = "知見"
+REPORT_SECTION = "完了報告"
+DONE_WHEN_SECTION = "完了条件"
+KN_KEY_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+UA_KINDS = ("ask", "auto", "req")
 UA_DETECTORS = ("worker_report", "worker_started", "archived_observed", "approval_cleared", "pr_closed",
-                "review_state", "start_possible", "manager_report", "foreign_session_gone", "children_closed")
+                "review_state", "start_possible", "manager_report", "foreign_session_gone", "children_closed",
+                "task_done")
 UA_META_KEYS = ("rule", "url", "since")
 HOLD_REASONS = ("pause", "invalid")
 SEEN_KEYS = ("status", "assignee", "ua_sha", "art_sha")
 NOTE_MOVED_KEYS = {
-    "tasks": ("title", "request", "status", "user_actions", "followups", "artifacts"),
+    "tasks": ("title", "request", "status", "user_actions", "agent_actions", "followups", "artifacts", "subtasks"),
     "projects": ("name", "context_doc_url", "user_actions"),
     "archived": ("title", "request", "followups", "artifacts"),
 }
@@ -96,15 +108,45 @@ ART_KEYS = ("n", "g", "kind", "ref", "url", "path", "label", "r")
 ART_FIELDS = ("kind", "ref", "url", "path", "label")
 FM_KEY_RE = re.compile(r"^([A-Za-z_][\w-]*):(?:[ \t]+(.*?))?[ \t]*$")
 FM_ITEM_RE = re.compile(r"^[ \t]*-(?:[ \t]+(.*?))?[ \t]*$")
-UA_LINE_RE = re.compile(r"^([ \t]*)[-*+] \[(.)\] (UA-\d+)\b(.*?)<!--[ \t]*sv[ \t]+(.*?)-->[ \t]*(?:\^([A-Za-z0-9-]+))?[ \t]*$")
+UA_HEAD_RE = re.compile(r"^### \[((?:UA|AA)-\d+)\] @(?:user|agent) (.+?)[ \t]*$")
+UA_REQ_RE = re.compile(r"^### @agent (.+?)[ \t]*$")
+UA_META_RE = re.compile(r"^<!-- sv (.*?) -->[ \t]*$")
+UA_DONE_RE = re.compile(r"^> - \[((?:UA|AA)-\d+)\] @(?:user|agent) (.*?) <!-- sv (.*?) -->[ \t]*$")
+UA_CALLOUT_RE = re.compile(r"^> \[!done\]- 完了 \((\d+)\)[ \t]*$")
+# The thread of an action is under `#### やりとり` (`#### 回答` in notes written before 0.65.0): the supervisor's messages are
+# `> [!sv-agent] <time>` callouts, the user's are the plain text between them. Notes written by 0.65.x also have a
+# `> [!sv-input]` mark where the user writes; it is read as no text and removed when the item is next written.
+UA_ANSWER_RE = re.compile(r"^#### (?:やりとり|回答)[ \t]*$")
+UA_THREAD_HEAD = "#### やりとり"
+UA_AGENT_RE = re.compile(r"^> \[!sv-agent\][ \t]*(.*?)[ \t]*$")
+UA_INPUT_RE = re.compile(r"^> \[!sv-input\]")
+UA_OPTION_OPEN_RE = re.compile(r"^[ \t]*[-*+] \[ \] ")
+UA_ANSWER_DETECTORS = ("worker_report", "pr_closed")
+ST_ID_RE = re.compile(r"^ST-(\d+)$")
+# A subtask is a top-level checklist line of `## サブタスク`: `- [ ] [ST-NNNN] @agent|@user text (w-NNNN sha)`. The id,
+# the assignee and the trailing worker mark are optional; state_tool writes the id and the mark.
+ST_LINE_RE = re.compile(r"^- \[([ xX])\] (?:\[(ST-\d+)\] )?(?:@(agent|user)(?: |$))?(.*?)"
+                        r"(?: \((w-\d+)(?: ([0-9a-f]{7,40}))?\))?[ \t]*$")
+QUOTE_HEAD = "> [!quote]- 依頼の原文"
 ART_COMMENT_RE = re.compile(r"<!--[ \t]*sv-art[ \t]+(.*?)[ \t]*-->")
 
 LOCATIONS_HEADING = "## Locations"
-LOCATION_KEYS = ("clone_root", "work_root")
-LOCATIONS_NOTE = ("`python3 .supervisor/state_tool.py prepare-dir` is the only command that writes outside this directory: "
-                  "it clones repositories into `clone_root/<host>/<owner>/<repo>` and creates work directories "
-                  "and project directories (with a guard hook) under `work_root`. "
-                  "A missing key uses its default.")
+LOCATION_KEYS = ("clone_root", "work_root", "worktree_root")
+# Optional keys that setup never adds: the vault (absolute or ~) and, relative to it, the dashboard note and template folder.
+VAULT_REL_KEYS = ("dashboard", "templates")
+LOCATIONS_NOTE = ("`python3 .supervisor/state_tool.py prepare-dir` and `prepare-worktree` are the only commands that write outside "
+                  "this directory: they clone repositories into `clone_root/<host>/<owner>/<repo>`, create work directories "
+                  "and project directories (with a guard hook) under `work_root`, and add worker worktrees under "
+                  "`worktree_root/<repo>/<slug>`. A missing key uses its default.")
+RUNTIMES = ("herdr",)
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+HERDR_HEADING = "## Herdr"
+HERDR_KEYS = ("max_workers", "worker_path")
+HERDR_NOTE = ("Settings for workers started with `hc run` (Herdr). `max_workers`: how many herdr workers may run at once. "
+              "`worker_path`: the PATH workers start with, because hc does not run them through an interactive shell. "
+              "A missing key uses its default (8; the core's PATH).")
+DEFAULT_MAX_WORKERS = 8
+MISE_SHIMS = "~/.local/share/mise/shims"
 CLONE_URL_RES = (
     re.compile(r"^https://([^/]+)/([^/]+)/([^/]+?)(?:\.git)?/?$"),
     re.compile(r"^git@([^:/]+):([^/]+)/([^/]+?)(?:\.git)?$"),
@@ -116,14 +158,25 @@ PROJECT_NAME_RE = re.compile(r"^P-\d{4,}-[a-z0-9-]{1,40}$")
 
 GUARD_MATCHER = "Edit|MultiEdit|Write|NotebookEdit|Bash"
 GUARD_INPUT_KEYS = {"Edit": "file_path", "MultiEdit": "file_path", "Write": "file_path", "NotebookEdit": "notebook_path", "Bash": "command"}
-GUARD_PROTECTED = (".claude", "state.json", ".supervisor/state_tool.py")
+GUARD_PROTECTED = (".claude", "state.json", ".supervisor/state_tool.py", "sv.sh")
 GUARD_SEPARATOR_CHARS = frozenset(";&|()\n")
 GUARD_SHELLS = ("sh", "bash", "zsh")
-GUARD_WORD_RE = re.compile(r"(?<![\w./-])(git|jj|gh)(?![\w.-])")
+GUARD_WORD_RE = re.compile(r"(?<![\w./-])(git|jj|gh|hc)(?![\w.-])")
+HC_DENY = frozenset({"keys", "exec", "attach", "server", "update", "machine", "file", "put", "connect"})
+# Catches the denied hc subcommands also where tokens cannot see them, e.g. a Python list ['hc', 'keys', ...].
+HC_DENY_RE = re.compile(r"(?<![\w./-])hc(?![\w.-])['\"]?\s*,?\s*['\"]?(" + "|".join(sorted(HC_DENY)) + r")(?![\w-])")
+HC_TARGET_RE = re.compile(r"^(w-\d+|(?:m-)?p-\d+|sv-watch)$")
+# The chat session (role chat) only reads hc and state; its requests reach sv through state_tool chat-send.
+CHAT_HC_ALLOW = frozenset({"ls", "get", "read", "events", "wait"})
+CHAT_TOOL_ALLOW = frozenset({"chat-send", "chat-wait", "digest", "note-show", "version"})
+CHAT_DIR = "chat"
+CHAT_INBOX = ".supervisor/chat"
+CHAT_ID_RE = re.compile(r"^C-(\d{4,})$")
 GUARD_VALUE_OPTIONS = {
     "git": ("-C", "-c", "--git-dir", "--work-tree", "--namespace"),
     "jj": ("-R", "--repository", "--at-op", "--at-operation", "--color", "--config", "--config-file"),
     "gh": ("-R", "--repo"),
+    "hc": (),
 }
 GIT_DENY = frozenset({
     "commit", "push", "pull", "fetch", "merge", "rebase", "reset", "add", "rm", "mv", "cherry-pick", "revert",
@@ -260,10 +313,10 @@ def cwd_busy(state, cwd):
 
 
 def _ua_ids(state):
-    """Every user action id; task and project user actions share one numbering."""
+    """Every UA-/AA- action id; user and agent actions of tasks and projects share one numbering."""
     owners = list(state.get("tasks", [])) + _projects(state)
-    return [ua.get("id") for o in owners if isinstance(o, dict) and isinstance(o.get("user_actions", []), list)
-            for ua in o.get("user_actions", []) if isinstance(ua, dict)]
+    return [ua.get("id") for o in owners if isinstance(o, dict) for key in ("user_actions", "agent_actions")
+            if isinstance(o.get(key, []), list) for ua in o.get(key, []) if isinstance(ua, dict)]
 
 
 def _next_ua_number(state):
@@ -371,7 +424,28 @@ def _gh_violation(sub, args):
     return _action_violation(sub, pos[0] if pos else None, GH_DENY_ACTIONS, {})
 
 
-GUARD_CHECKS = {"git": _git_violation, "jj": _jj_violation, "gh": _gh_violation}
+def _hc_labels(args):
+    labels = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--label"]
+    return labels + [a.split("=", 1)[1] for a in args if a.startswith("--label=")]
+
+
+def _hc_violation(sub, args, role=None):
+    if sub in HC_DENY:
+        return f"{sub} (the supervisor never types into, attaches to or manages terminals directly)"
+    if role == "chat" and sub not in CHAT_HC_ALLOW:
+        return f"{sub} (the chat session only reads terminals; requests go to sv through state_tool chat-send)"
+    if sub == "run" and not any(label.startswith("sv=") for label in _hc_labels(args)):
+        return "run without --label sv=... (start sessions only with the argv from launch-plan)"
+    if sub in ("kill", "rm"):
+        pos = _positionals(args)
+        if not pos or not HC_TARGET_RE.match(pos[0]):
+            return f"{sub} {pos[0] if pos else ''} (only terminals named w-NNNN, p-NNNN, m-p-NNNN or sv-watch)".replace("  ", " ")
+    if sub == "send" and _has_flag(args, ("--force",)):
+        return "send --force (never answer a blocked dialog for the user)"
+    return None
+
+
+GUARD_CHECKS = {"git": _git_violation, "jj": _jj_violation, "gh": _gh_violation, "hc": _hc_violation}
 
 
 def _split_subcommand(tool, args):
@@ -381,31 +455,45 @@ def _split_subcommand(tool, args):
     return (args[i], args[i + 1:]) if i < len(args) else (None, [])
 
 
-def _tool_violations(words):
+def _tool_violations(words, role=None):
     for i, tok in enumerate(words):
         tool = os.path.basename(tok)
+        if role == "chat" and tool == "state_tool.py":
+            sub = words[i + 1] if i + 1 < len(words) else None
+            if sub not in CHAT_TOOL_ALLOW:
+                return [f"state_tool.py {sub or ''} (the chat session runs only {', '.join(sorted(CHAT_TOOL_ALLOW))})"]
         if tool in GUARD_CHECKS:
             sub, args = _split_subcommand(tool, words[i + 1:])
-            found = GUARD_CHECKS[tool](sub, args) if sub else None
+            check = GUARD_CHECKS[tool]
+            found = (check(sub, args, role) if tool == "hc" else check(sub, args)) if sub else None
             return [f"{tool} {found}"] if found else []
     return []
 
 
-def _shell_c_violations(words):
+def _shell_c_violations(words, role=None):
     for i, tok in enumerate(words):
         if os.path.basename(tok) not in GUARD_SHELLS:
             continue
         has_c = False
         for opt in words[i + 1:]:
             if not opt.startswith("-"):
-                return bash_violations(opt) if has_c else []
+                return bash_violations(opt, role) if has_c else []
             has_c = has_c or (not opt.startswith("--") and "c" in opt[1:])
         return []
     return []
 
 
-def bash_violations(command):
-    """Deny-list matches of git / jj / gh in a Bash command. A guardrail, not a security boundary."""
+def _quoted_send_text(words, command):
+    """The text arguments of an `hc send` written in single quotes: literal data the shell never runs."""
+    if not words or os.path.basename(words[0]) != "hc":
+        return []
+    sub, args = _split_subcommand("hc", words[1:])
+    texts = _positionals(args)[1:] if sub == "send" else []
+    return texts if all(f"'{t}'" in command for t in texts) else []
+
+
+def bash_violations(command, role=None):
+    """Deny-list matches of git / jj / gh / hc in a Bash command. A guardrail, not a security boundary."""
     command = command.replace("\\\n", "")
     try:
         tokens = _shell_tokens(command)
@@ -413,20 +501,31 @@ def bash_violations(command):
         if GUARD_WORD_RE.search(command):
             return ["unparsable command (could not parse; quote the command correctly or split it)"]
         return []
-    violations = []
+    violations, scanned = [], command
     for segment in _segments(tokens):
-        text = " ".join(segment)
-        if ("`" in text or "$(" in text) and GUARD_WORD_RE.search(text):
-            violations.append("command substitution (split the command; command substitution around git/jj/gh is not inspected)")
-            continue
         words = _strip_redirections(segment)
-        violations += _shell_c_violations(words) + _tool_violations(words)
+        literal = _quoted_send_text(words, command)
+        for t in literal:
+            scanned = scanned.replace(f"'{t}'", "", 1)
+        text = " ".join(t for t in segment if t not in literal)
+        if ("`" in text or "$(" in text) and GUARD_WORD_RE.search(text):
+            violations.append("command substitution (split the command; command substitution around git/jj/gh/hc is not inspected)")
+            continue
+        violations += _shell_c_violations(words, role) + _tool_violations(words, role)
+    hidden = {m.group(1) for m in HC_DENY_RE.finditer(scanned)}
+    named = " ".join(violations)
+    violations += [f"hc {sub} (the supervisor never types into, attaches to or manages terminals directly)"
+                   for sub in sorted(hidden) if f"hc {sub} " not in named]
     return violations
 
 
 def path_violation(path, cwd, supervisor_dir, config_dir, tmp_dirs):
     full = _real(os.path.join(_real(cwd), os.path.expanduser(path)))
-    if _under(full, os.path.join(supervisor_dir, "vault")):
+    try:
+        vault = vault_locations(supervisor_dir)[0]
+    except (StateError, OSError):
+        vault = os.path.join(supervisor_dir, VAULT_DIR)
+    if _under(full, vault):
         return f"{full} (vault notes are written only by state_tool commit)"
     if _under(full, supervisor_dir):
         if any(_under(full, os.path.join(supervisor_dir, rel)) for rel in GUARD_PROTECTED):
@@ -445,6 +544,7 @@ def path_violation(path, cwd, supervisor_dir, config_dir, tmp_dirs):
 GUARD_TAILS = {
     None: "The supervisor does not change repositories: send it to a worker session, or ask an observer subagent for read-only facts.",
     "manager": "The project manager only reads: answer or forward through send_message, or return a plan in your project-report.",
+    "chat": "The chat session changes nothing itself: hand the user's request to sv with state_tool.py chat-send.",
 }
 
 
@@ -457,7 +557,7 @@ def guard_decision(payload, supervisor_dir, env, role=None):
     if not isinstance(value, str) or not value:
         return None
     if tool == "Bash":
-        violations = bash_violations(value)
+        violations = bash_violations(value, role)
     else:
         config_dir = env.get("CLAUDE_CONFIG_DIR") or "~/.claude"
         tmp_dirs = [d for d in (env.get("TMPDIR"), "/tmp") if d]
@@ -479,20 +579,92 @@ def derive_status(task, workers_by_id):
     # An archive the supervisor did not request must be verified before the task can finish.
     if task.get("user_actions") or any(_archived_externally(w) for w in workers):
         return "needs_user"
-    observed = ["archived" if _finished(w) else w.get("observed_state") for w in workers]
+    # A kept worker's verified result is recorded; its session only waits for follow-ups, so it counts as finished.
+    kept = set(task.get("kept", []))
+    observed = ["archived" if _finished(w) or w["id"] in kept else w.get("observed_state") for w in workers]
     if any(o in ACTIVE_OBSERVED for o in observed):
         return "running"
     if any(o == "none" for o in observed):
         return "waiting"
+    # A numbered subtask left unchecked when the workers are done (a @user one, or one the user reopened) is the user's
+    # turn: the user checks it, or hands the note back to the agent with it unchecked to have it done.
+    if any(not st.get("done") for st in task.get("subtasks", [])):
+        return "needs_user"
     # Workers given up as missing deliver nothing, and a replaced worker was never verified;
     # without one verified archive the task needs a replacement or a cancel. An investigation
     # worker that went missing while held has its verified findings, so it counts as finished.
     finding_ids = {f.get("worker_id") for f in task.get("findings", [])}
-    if not any((w.get("observed_state") == "archived"
+    if not any((w.get("observed_state") == "archived" or w["id"] in kept
                 or (w.get("observed_state") == "missing" and w.get("intended_state") == "archived" and w["id"] in finding_ids))
                and not w.get("replaced_by") for w in workers):
         return "needs_user"
     return "done"
+
+
+def _work_finished(task, workers_by_id):
+    """Every worker of a live task has a verified result: kept, held, or intended archived after it was recorded."""
+    done = set(task.get("kept", [])) | set(task.get("held", [])) | _held_ids(task)
+    workers = [workers_by_id.get(wid, {}) for wid in task.get("worker_ids", [])]
+    return bool(workers) and all(w.get("id") in done or w.get("intended_state") == "archived" for w in workers)
+
+
+def serial_status(state, task_id, cwd=None):
+    """{task, ready, waiting_for, base} of a task of a serial queue (`after`, SKILL.md 6.15). It is ready once its
+    nearest predecessor that is not cancelled has finished its work (or is archived or gone); `base` is the branch of
+    the nearest finished predecessor with a `branch` artifact in the repository cwd, from which its git worker starts."""
+    tasks = {t.get("id"): t for t in state.get("tasks", [])}
+    stubs = {s.get("id"): s for s in state.get("archived", [])}
+    workers_by_id = {w.get("id"): w for w in state.get("workers", [])}
+    if task_id not in tasks:
+        raise StateError(f"no live task {task_id}")
+    out = {"task": task_id, "ready": True, "waiting_for": None, "base": None}
+    checked, seen, pred = False, {task_id}, tasks[task_id].get("after")
+    while pred and pred not in seen:
+        seen.add(pred)
+        item = tasks.get(pred) or stubs.get(pred)
+        if item is None:
+            break
+        if not (item.get("cancel") or item.get("cancelled")):
+            if not checked and pred in tasks and not _work_finished(item, workers_by_id):
+                out.update(ready=False, waiting_for=pred)
+                return out
+            checked = True
+            refs = [a.get("ref") for a in item.get("artifacts", []) if a.get("kind") == "branch"]
+            mine = [r for r in refs if cwd and isinstance(r, str) and "#" in r and _real(r.split("#", 1)[0]) == _real(cwd)]
+            if mine:
+                out["base"] = mine[-1].split("#", 1)[1]
+                return out
+        pred = item.get("after")
+    return out
+
+
+def _after_errors(state):
+    errors = []
+    tasks = {t["id"]: t for t in state["tasks"]}
+    for t in state["tasks"]:
+        after = t.get("after")
+        if after is None:
+            continue
+        if not (isinstance(after, str) and TASK_ID_RE.match(after)) or after == t["id"]:
+            errors.append(f"task {t['id']}: after must be the T-id of another task")
+            continue
+        seen, cur = {t["id"]}, after
+        while cur in tasks and cur not in seen:
+            seen.add(cur)
+            cur = tasks[cur].get("after")
+        if cur == t["id"]:
+            errors.append(f"task {t['id']}: after must not form a cycle")
+    return errors
+
+
+def _after_change_errors(current, candidate):
+    """A task joins or moves in a serial queue only while none of its workers has started."""
+    cur = {t["id"]: t.get("after") for t in current["tasks"]}
+    workers = {w["id"]: w for w in candidate["workers"]}
+    return [f"task {t['id']}: after may change only while no worker of the task has started"
+            for t in candidate["tasks"]
+            if t.get("after") and t["id"] in cur and t.get("after") != cur[t["id"]]
+            and any(workers.get(wid, {}).get("observed_state") != "none" for wid in t.get("worker_ids", []))]
 
 
 def _validate_artifact(prefix, artifact, cwds):
@@ -564,6 +736,28 @@ def _held_ids(task):
     return {wid for wid in map(_read_action_worker, task.get("user_actions", [])) if wid}
 
 
+def _kept_errors(prefix, task, workers_by_id, held):
+    """A kept worker is a live session whose latest done is verified and recorded, kept for follow-ups until the
+    task is confirmed (SKILL.md 6.3 step 6)."""
+    kept = task.get("kept", [])
+    if not isinstance(kept, list):
+        return [f"{prefix}: kept must be a list of worker ids"]
+    errors = []
+    for i, wid in enumerate(kept):
+        w = workers_by_id.get(wid) or {}
+        report = w.get("last_report") or {}
+        review = w.get("review") or {}
+        review_ok = not task.get("project_id") or review.get("state") == "waived" or (
+            review.get("state") == "approved" and review.get("message_ref") == report.get("message_ref"))
+        recorded = wid in _no_result_ids(task) or _delivery_artifacts_ok(w.get("delivery"), task.get("artifacts", []))
+        if (wid in kept[:i] or w.get("task_id") != task.get("id") or w.get("intended_state") != "running"
+                or w.get("observed_state") not in ("running", "idle", "needs_input") or w.get("replaced_by")
+                or wid in held or report.get("status") != "done" or not recorded or not review_ok):
+            errors.append(f"{prefix}: kept {wid} needs a live, unheld worker of the task whose latest report is a "
+                          "recorded done (artifacts or no_result; an approved or waived review on a project task), once")
+    return errors
+
+
 def _no_result_ids(task):
     return {n["worker_id"] for n in task.get("no_result", [])}
 
@@ -632,6 +826,7 @@ def _shape_errors(state):
         derived = t.get("derived_from")
         if derived is not None and not (isinstance(derived, dict) and all(_str(derived.get(k)) for k in ("task_id", "context"))):
             errors.append(f"task {t['id']}: derived_from must be {{task_id, context}} with non-empty strings")
+    errors += _after_errors(state)
     for w in state["workers"]:
         for key in ("task_id", "cwd"):
             if not isinstance(w.get(key), str):
@@ -700,8 +895,31 @@ def _review_shape_errors(prefix, review):
     return errors
 
 
-def _manager_shape_errors(prefix, m):
+def manager_handle(project):
+    """The hc terminal name of the project's manager: p-0006 for P-0006 (lowercase). A herdr manager started before
+    0.66.0 keeps the name it was started with, m-p-0006, until its next replacement (SKILL.md 6.12)."""
+    new = str(project.get("id")).lower()
+    return f"m-{new}" if (project.get("manager") or {}).get("handle") == f"m-{new}" else new
+
+
+def _runtime_errors(prefix, obj, handle):
+    """A herdr session is the hc terminal named `handle` running claude with the uuid `session_id`."""
+    runtime = obj.get("runtime")
+    if runtime is None:
+        return []
+    if runtime not in RUNTIMES:
+        return [f"{prefix}: runtime must be one of {list(RUNTIMES)}, got {runtime!r}"]
     errors = []
+    sid = obj.get("session_id")
+    if sid is not None and not (isinstance(sid, str) and UUID_RE.match(sid)):
+        errors.append(f"{prefix}: a herdr session_id must be a lowercase uuid or null, got {sid!r}")
+    if obj.get("handle") != handle:
+        errors.append(f"{prefix}: a herdr handle must be {handle!r}, got {obj.get('handle')!r}")
+    return errors
+
+
+def _manager_shape_errors(prefix, m, project_id=None):
+    errors = _runtime_errors(f"{prefix}: manager", m, manager_handle({"id": project_id, "manager": m}))
     for key in ("session_id", "started_by", "handle", "observed_at"):
         if m.get(key) is not None and not isinstance(m[key], str):
             errors.append(f"{prefix}: manager.{key} must be a string or null")
@@ -772,7 +990,7 @@ def _project_shape_errors(state):
         if not isinstance(p.get("manager"), dict):
             errors.append(f"{prefix}: manager must be an object")
         else:
-            errors += _manager_shape_errors(prefix, p["manager"])
+            errors += _manager_shape_errors(prefix, p["manager"], p.get("id"))
     owners = [(f"task {t['id']}", t) for t in state["tasks"]] + [(f"archived {s['id']}", s) for s in state["archived"]]
     for prefix, owner in owners:
         if owner.get("project_id") is not None and not isinstance(owner["project_id"], str):
@@ -859,7 +1077,9 @@ def validate(state, relief=None):
         if task.get("status") is not None and task.get("status") not in TASK_STATUSES:
             errors.append(f"{prefix}: invalid status {task.get('status')!r}")
         # A task waiting for the user's answer to where it should run has no worker yet.
-        if not task.get("worker_ids") and not any(ua.get("needs_answer") for ua in task.get("user_actions", [])):
+        # A cancelled one may have none left: commit archives it.
+        if (not task.get("worker_ids") and not task.get("cancel")
+                and not any(ua.get("needs_answer") for ua in task.get("user_actions", []))):
             errors.append(f"{prefix}: worker_ids must not be empty")
         for wid in task.get("worker_ids", []):
             w = workers_by_id.get(wid)
@@ -875,12 +1095,13 @@ def validate(state, relief=None):
                     errors.append(f"{prefix}: cancelled but worker {wid} is still intended running")
         # A no_result entry exempts its worker from delivery artifacts, so it must stay tied to that finished or held worker.
         held = _held_ids(task)
+        kept = task.get("kept", [])
         seen = set()
         for entry in task.get("no_result", []):
             wid = entry["worker_id"]
             w = workers_by_id.get(wid)
             if (wid in seen or w is None or w.get("task_id") != tid
-                    or (w.get("intended_state") != "archived" and wid not in held) or w.get("replaced_by")):
+                    or (w.get("intended_state") != "archived" and wid not in held and wid not in kept) or w.get("replaced_by")):
                 errors.append(f"{prefix}: no_result {wid} must name an archived, non-replaced worker of the task once")
             seen.add(wid)
         seen = set()
@@ -891,6 +1112,7 @@ def validate(state, relief=None):
                     or w.get("session_id") != entry["session_id"]):
                 errors.append(f"{prefix}: findings {wid} must name a worker of an investigation task by its session_id, once")
             seen.add(wid)
+        errors += _kept_errors(prefix, task, workers_by_id, held)
         # A held worker stays running only while the user still has to read its verified result.
         finding_ids = {f["worker_id"] for f in task.get("findings", [])}
         seen = set()
@@ -917,6 +1139,7 @@ def validate(state, relief=None):
         task = tasks_by_id.get(w.get("task_id"))
         if task is None or wid not in task.get("worker_ids", []):
             errors.append(f"{prefix}: task {w.get('task_id')} does not list it")
+        errors += _runtime_errors(prefix, w, wid)
         for key, allowed in (
             ("kind", KINDS),
             ("delivery", DELIVERIES),
@@ -925,6 +1148,8 @@ def validate(state, relief=None):
         ):
             if w.get(key) not in allowed:
                 errors.append(f"{prefix}: invalid {key} {w.get(key)!r}")
+        if "interactive" in w and w["interactive"] is not True:
+            errors.append(f"{prefix}: interactive must be true when present")
         if not w.get("cwd") or not os.path.isabs(os.path.expanduser(w["cwd"])):
             errors.append(f"{prefix}: cwd must be an absolute path")
             continue
@@ -1081,10 +1306,22 @@ def _deletion_errors(current, candidate):
     return errors
 
 
+def _needs_push_decision(task, w):
+    return (w["delivery"] == "commit" and not task.get("cancel") and w["observed_state"] != "missing"
+            and not w.get("replaced_by") and w["id"] not in _no_result_ids(task) and not _pushed_at_head(task, w)
+            and not any(_is_push_decision(ua, w) for ua in task.get("user_actions", [])))
+
+
 def _transition_errors(current, candidate):
     errors = []
     cur_workers = {w["id"]: w for w in current["workers"]}
     tasks = {t["id"]: t for t in candidate["tasks"]}
+    cur_kept = {wid for t in current["tasks"] for wid in t.get("kept", [])}
+    for t in candidate["tasks"]:
+        for wid in t.get("kept", []):
+            w = next((x for x in candidate["workers"] if x["id"] == wid), None)
+            if wid not in cur_kept and w is not None and _needs_push_decision(t, w):
+                errors.append(f"worker {wid}: keeping a commit delivery worker requires a push-decision user_action")
     for w in candidate["workers"]:
         if w["intended_state"] != "archived":
             continue
@@ -1098,7 +1335,8 @@ def _transition_errors(current, candidate):
         if w["observed_state"] not in ("archived", "missing") and not candidate["supervisor"].get("archive_consent"):
             errors.append(f"worker {w['id']}: archive requested without supervisor.archive_consent")
         task = tasks.get(w["task_id"], {})
-        if w["delivery"] == "commit" and not task.get("cancel") and w["observed_state"] != "missing" and not w.get("replaced_by") and w["id"] not in _no_result_ids(task) and not _pushed_at_head(task, w) and not any(_is_push_decision(ua, w) for ua in task.get("user_actions", [])):
+        # A kept worker got its push decision when it was kept; the user may have resolved it since.
+        if w["id"] not in cur_kept and _needs_push_decision(task, w):
             errors.append(f"worker {w['id']}: commit delivery archive requires a push-decision user_action")
     return errors + _project_transition_errors(current, candidate)
 
@@ -1164,8 +1402,26 @@ def _consent_message_errors(current, candidate):
     return errors
 
 
-def waiting_start_description(task_id):
-    return f"Waiting task {task_id} can start now: send any message to the supervisor to start it."
+WAITING_START = {"en": "Waiting task {task_id} can start now: send any message to the supervisor to start it.",
+                 "ja": "待機中のタスク {task_id} を開始できます: supervisor に何かメッセージを送ると開始します。"}
+
+
+COMPLETION_ASK = {"en": "The work is done: check the grounds in 完了報告 and the results, then set this note to done / user",
+                  "ja": "作業が完了しました。完了報告の根拠と結果を確認して done / user にしてください"}
+
+
+def note_lang(text):
+    """ja when the text has Japanese characters, otherwise en: the language of the user actions of a note (section 5)."""
+    return "ja" if re.search(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]", text or "") else "en"
+
+
+def waiting_start_description(task_id, lang="en"):
+    return WAITING_START[lang].format(task_id=task_id)
+
+
+def _is_waiting_start(ua, task_id):
+    return ua.get("detector") == "start_possible" or ua.get("description") in {
+        waiting_start_description(task_id, lang) for lang in WAITING_START}
 
 
 def _startable_workers(state, task, workers_by_id):
@@ -1189,15 +1445,36 @@ def _sync_waiting_start_actions(current, state, now):
     next_num = _next_ua_number(state)
     workers_by_id = {w["id"]: w for w in state["workers"]}
     for task in state["tasks"]:
-        desc = waiting_start_description(task["id"])
         startable = _startable_workers(state, task, workers_by_id)
         actions = task.setdefault("user_actions", [])
         if not startable:
-            task["user_actions"] = [ua for ua in actions if ua["description"] != desc]
+            task["user_actions"] = [ua for ua in actions if not _is_waiting_start(ua, task["id"])]
             continue
         freed = any(cwd_busy(current, w["cwd"]) for w in startable)
-        if freed and not any(ua["description"] == desc for ua in actions):
+        if freed and not any(_is_waiting_start(ua, task["id"]) for ua in actions):
+            desc = waiting_start_description(task["id"], note_lang(task.get("request")))
             actions.append({"id": f"UA-{next_num:04d}", "description": desc, "since": now})
+            next_num += 1
+
+
+def _sync_completion_actions(state, now):
+    # Completion is the user's to confirm: a task of a note whose work is finished keeps an automatic completion ask
+    # (auto=task_done), which makes it needs_user (the note in progress / user) until the user confirms it (confirmed)
+    # or more work starts. A v1 state (tasks without uid) has no notes and archives a finished task at once.
+    next_num = _next_ua_number(state)
+    workers_by_id = {w["id"]: w for w in state["workers"]}
+    for task in state["tasks"]:
+        if not task.get("uid"):
+            continue
+        actions = task.setdefault("user_actions", [])
+        rest = [ua for ua in actions if ua.get("detector") != "task_done"]
+        finished = (not task.get("cancel") and not task.get("confirmed")
+                    and derive_status(dict(task, user_actions=rest), workers_by_id) == "done")
+        if not finished:
+            task["user_actions"] = rest
+        elif len(rest) == len(actions):
+            actions.append({"id": f"UA-{next_num:04d}", "description": COMPLETION_ASK[note_lang(task.get("request"))],
+                            "since": now, "detector": "task_done"})
             next_num += 1
 
 
@@ -1214,11 +1491,12 @@ def next_state(current, candidate, now):
     if errors:
         raise StateError(errors)
     errors = (_deletion_errors(current, state) + _transition_errors(current, state) + _consent_request_errors(current, state)
-              + _consent_message_errors(current, state))
+              + _consent_message_errors(current, state) + _after_change_errors(current, state))
     if errors:
         raise StateError(errors)
 
     _sync_waiting_start_actions(current, state, now)
+    _sync_completion_actions(state, now)
     workers_by_id = {w["id"]: w for w in state["workers"]}
     for task in state["tasks"]:
         task["status"] = derive_status(task, workers_by_id)
@@ -1247,7 +1525,7 @@ def next_state(current, candidate, now):
         project = projects_by_id.get(t.get("project_id"))
         if project is not None:
             stub["project"] = {"id": project["id"], "name": project["name"]}
-        for key in ("proposal", "redos", "uid", "last_artifact_number"):
+        for key in ("proposal", "redos", "uid", "last_artifact_number", "after"):
             if t.get(key):
                 stub[key] = t[key]
         stubs.append(stub)
@@ -1340,7 +1618,8 @@ def digest(state, state_path, limit=DIGEST_LIMIT):
             for wid in t.get("worker_ids", [])
         )
         project = f"[{t['project_id']}] " if t.get("project_id") else ""
-        task_lines.append(f"- {project}{t.get('id')} [{t.get('status')}] {t.get('title')} | next: {t.get('next_action')} | workers: {ws}")
+        after = f" | after {t['after']}" if t.get("after") else ""
+        task_lines.append(f"- {project}{t.get('id')} [{t.get('status')}] {t.get('title')} | next: {t.get('next_action')}{after} | workers: {ws}")
     lines += task_lines or ["- (none)"]
     text = "\n".join(lines)
     if len(text) <= limit:
@@ -1381,6 +1660,13 @@ def parse_report(text, expect_task=None, expect_worker=None, allow_awaiting_mana
         return {"ok": False, "error": "artifacts.files must be a list of strings"}
     if report["status"] in ("needs_input", "blocked", "awaiting_manager") and not report["blockers"]:
         return {"ok": False, "error": f"status {report['status']} requires at least one blocker"}
+    answered = report.get("answered", [])
+    if not isinstance(answered, list) or not all(
+            isinstance(a, dict) and all(isinstance(a.get(k), str) and a[k].strip() for k in ("question", "answer")) for a in answered):
+        return {"ok": False, "error": "answered must be a list of {question, answer} with non-empty strings"}
+    done_sts = report.get("subtasks_done", [])
+    if not isinstance(done_sts, list) or not all(isinstance(i, str) and ST_ID_RE.match(i) for i in done_sts):
+        return {"ok": False, "error": "subtasks_done must be a list of ST-NNNN ids"}
     confirmed = _read_confirmed_errors(report)
     if confirmed:
         return {"ok": False, "error": confirmed[0]}
@@ -1392,7 +1678,8 @@ def parse_report(text, expect_task=None, expect_worker=None, allow_awaiting_mana
 
 
 def _strip_ignored(lines):
-    """Blank out fenced blocks and HTML comments, keeping line numbers."""
+    """Blank out fenced blocks and HTML comments, keeping line numbers. A comment opened on a quoted (`>`) line ends with
+    that line, as an HTML block ends with its block quote: quoted outside text cannot hide the headings after it."""
     out, fence, in_comment = [], None, False
     for line in lines:
         if fence is None and not in_comment:
@@ -1420,6 +1707,8 @@ def _strip_ignored(lines):
                     kept, rest = kept + rest, ""
                 else:
                     kept, rest, in_comment = kept + rest[:start], rest[start + 4:], True
+        if in_comment and line.lstrip().startswith(">"):
+            in_comment = False
         out.append(kept)
     return out
 
@@ -1528,10 +1817,18 @@ def parse_locations(text):
         if not m:
             continue
         key, value = m.group(1), m.group(2).strip()
-        if key not in LOCATION_KEYS:
-            errors.append(f"CLAUDE.md:{i + 1}: unknown key {key!r} (use {list(LOCATION_KEYS)})")
+        if key not in LOCATION_KEYS + VAULT_REL_KEYS + ("vault",):
+            errors.append(f"CLAUDE.md:{i + 1}: unknown key {key!r} (use {list(LOCATION_KEYS + ('vault',) + VAULT_REL_KEYS)})")
         elif key in values:
             errors.append(f"CLAUDE.md:{i + 1}: duplicate key {key!r}")
+        elif key in VAULT_REL_KEYS:
+            parts = value.split("/")
+            if not value or value.startswith(("/", "~")) or any(p in ("", ".", "..") for p in parts) or \
+                    (key == "dashboard") != value.endswith(".md"):
+                errors.append(f"CLAUDE.md:{i + 1}: {key} must be a path relative to the vault without '..'"
+                              f"{' ending in .md' if key == 'dashboard' else ''}, got {value!r}")
+            else:
+                values[key] = value
         elif not (os.path.isabs(value) or value == "~" or value.startswith("~/")):
             errors.append(f"CLAUDE.md:{i + 1}: {key} must be an absolute path or start with ~, got {value!r}")
         else:
@@ -1541,7 +1838,8 @@ def parse_locations(text):
 
 def default_locations(supervisor_dir):
     sup = os.path.normpath(supervisor_dir)
-    return {"clone_root": "~/src", "work_root": os.path.join(os.path.dirname(sup), os.path.basename(sup) + "-work")}
+    return {"clone_root": "~/src", "work_root": os.path.join(os.path.dirname(sup), os.path.basename(sup) + "-work"),
+            "worktree_root": "~/.claude-worktrees"}
 
 
 def add_missing_locations(text, supervisor_dir):
@@ -1551,11 +1849,60 @@ def add_missing_locations(text, supervisor_dir):
         raise StateError(errors)
     defaults = default_locations(supervisor_dir)
     missing = [f"- {key}: {defaults[key]}\n" for key in LOCATION_KEYS if key not in values]
+    return _add_section_lines(text, LOCATIONS_HEADING, LOCATIONS_NOTE, missing)
+
+
+def parse_herdr(text):
+    """Parse the `## Herdr` section of CLAUDE.md. Returns (values, errors); max_workers is an int, worker_path a string."""
+    lines = _strip_ignored(text.splitlines())
+    heads = _section_heads(lines, HERDR_HEADING)
+    if not heads:
+        return {}, []
+    if len(heads) > 1:
+        return {}, [f"CLAUDE.md:{i + 1}: duplicate '{HERDR_HEADING}' heading" for i in heads[1:]]
+    values, errors = {}, []
+    for i in range(heads[0] + 1, _section_end(lines, heads[0])):
+        m = re.match(r"^- ([A-Za-z_]+):(.*)$", lines[i].rstrip())
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2).strip()
+        if key not in HERDR_KEYS:
+            errors.append(f"CLAUDE.md:{i + 1}: unknown key {key!r} (use {list(HERDR_KEYS)})")
+        elif key in values:
+            errors.append(f"CLAUDE.md:{i + 1}: duplicate key {key!r}")
+        elif key == "max_workers" and not re.match(r"^[1-9]\d*$", value):
+            errors.append(f"CLAUDE.md:{i + 1}: max_workers must be a positive integer, got {value!r}")
+        elif key == "worker_path" and not value:
+            errors.append(f"CLAUDE.md:{i + 1}: worker_path must not be empty")
+        else:
+            values[key] = int(value) if key == "max_workers" else value
+    return ({}, errors) if errors else (values, [])
+
+
+def default_herdr(env_path, shims_dir):
+    """Defaults for `## Herdr`. worker_path is set only when mise shims exist and are missing from the given PATH."""
+    defaults = {"max_workers": DEFAULT_MAX_WORKERS}
+    if shims_dir and shims_dir not in (env_path or "").split(os.pathsep):
+        defaults["worker_path"] = os.pathsep.join(p for p in (shims_dir, env_path) if p)
+    return defaults
+
+
+def add_missing_herdr(text, env_path, shims_dir):
+    """Return CLAUDE.md text with each missing `## Herdr` key added at its default. Existing values are kept."""
+    values, errors = parse_herdr(text)
+    if errors:
+        raise StateError(errors)
+    defaults = default_herdr(env_path, shims_dir)
+    missing = [f"- {key}: {defaults[key]}\n" for key in HERDR_KEYS if key in defaults and key not in values]
+    return _add_section_lines(text, HERDR_HEADING, HERDR_NOTE, missing)
+
+
+def _add_section_lines(text, heading, note, missing):
     if not missing:
         return text
-    heads = _section_heads(_strip_ignored(text.splitlines()), LOCATIONS_HEADING)
+    heads = _section_heads(_strip_ignored(text.splitlines()), heading)
     if not heads:
-        section = f"{LOCATIONS_HEADING}\n\n{LOCATIONS_NOTE}\n\n" + "".join(missing)
+        section = f"{heading}\n\n{note}\n\n" + "".join(missing)
         return text.rstrip("\n") + "\n\n" + section if text.strip() else section
     lines = text.splitlines(keepends=True)
     end = _section_end(_strip_ignored(text.splitlines()), heads[0])
@@ -1711,21 +2058,45 @@ def set_props(text, changes):
     return "".join(out)
 
 
-def new_note_text(uid, title, kind, status, assignee, now, request="", parent=None, follows=None):
-    """Text of a new task or project note in the create-task format. parent and follows are note uids."""
+SUPERVISED_TAG = "supervised"
+# A project note also carries `task` so that daily notes listing `task` notes show the project, not its tasks.
+NOTE_TAGS = {"task": (SUPERVISED_TAG,), "project": (SUPERVISED_TAG, "project", "task")}
+
+
+def note_kind(props):
+    """task / project for a note with the supervised tag, else None (the user's own notes are never picked up)."""
+    tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]
+    if SUPERVISED_TAG not in tags:
+        return None
+    return "project" if "project" in tags else "task"
+
+
+def new_note_text(uid, title, kind, status, assignee, now, request="", parent=None, follows=None, original=None,
+                  proposed_by=None, parent_title=None):
+    """Text of a new task or project note in the create-task format. parent and follows are note uids; parent_title (the
+    project's title) becomes the alias of the parent link, as sv-project.md writes it. original (the
+    chat message the request was written from) follows the request as a folded 依頼の原文 callout. proposed_by is the
+    P-id of the project manager whose proposal the note holds."""
     if kind not in ("task", "project"):
         raise StateError(f"note kind must be task or project, got {kind!r}")
     if status not in NOTE_STATUSES or assignee not in ASSIGNEES:
         raise StateError(f"invalid status/assignee {status!r}/{assignee!r}")
+    alias = "|" + re.sub(r'[|\]"]', " ", parent_title) if parent_title else ""
     values = {
         "uid": uid, "title": title, "para": "Project", "aliases": [], "created_at": f"{now[:10]} {now[11:19]}",
-        "archived_at": None, "tags": [kind], "start_date": None, "due_date": None, "pending_until": None,
-        "completed_at": None, "status": status, "assignee": assignee,
-        "parent": f"[[{parent}]]" if parent else None, "follows": f"[[{follows}]]" if follows else None,
+        "archived_at": None, "tags": list(NOTE_TAGS[kind]), "start_date": None, "due_date": None, "pending_until": None,
+        "completed_at": None, "status": status, "assignee": assignee, "summary": None,
+        "parent": f"[[{parent}{alias}]]" if parent else None, "follows": f"[[{follows}]]" if follows else None,
+        "proposed_by": proposed_by,
     }
-    head = "".join(_prop_line(k, values[k]) + "\n" for k in NOTE_KEYS if k in values and (values[k] is not None or k not in ("parent", "follows")))
+    head = "".join(_prop_line(k, values[k]) + "\n" for k in NOTE_KEYS
+                   if k in values and (values[k] is not None or k not in ("parent", "proposed_by", "follows")))
     content = (request or "").strip("\n")
-    body = "\n".join(f"## {name}\n\n{content}\n" if name == "概要" and content else f"## {name}\n\n" for name in NOTE_SECTIONS)
+    if original and original.strip("\n"):
+        content = "\n\n".join(c for c in (content, "\n".join([QUOTE_HEAD] + _quote(original.strip("\n")))) if c)
+    sections = [f"## {name}\n\n{content}\n" if name == "概要" and content else f"## {name}\n\n" for name in NOTE_SECTIONS
+                if name not in ((KN_SECTION,) if kind == "task" else (REPORT_SECTION, DONE_WHEN_SECTION))]
+    body = "\n".join(sections[:1] + [PROJECT_TASKS_SECTION] * (kind == "project") + sections[1:])
     return f"---\n{head}---\n{body}"
 
 
@@ -1742,35 +2113,16 @@ def parse_sections(body):
     return sections
 
 
-def _indent(line):
-    return len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip())
-
-
-def _sub_end(lines, i, limit):
-    """End (exclusive) of the sub-items of the list item at lines[i]: following lines indented deeper than it.
-    Blank lines count only when a deeper line follows them."""
-    base, last = _indent(lines[i]), i
-    for j in range(i + 1, limit):
-        if not lines[j].strip():
-            continue
-        if _indent(lines[j]) <= base:
-            break
-        last = j
-    return last + 1
-
-
 def _ua_meta(meta):
     ua = {"kind": None, "detector": None, "answer_required": False, "since": None, "rule": None, "url": None,
-          "done": None, "done_rev": None, "chk_rev": None}
+          "done": None, "done_rev": None}
     for token in meta.split():
-        if token in ("ask", "slot"):
+        if token in ("ask", "req"):
             ua["kind"] = token
         elif token.startswith("auto="):
             ua["kind"], ua["detector"] = "auto", token[5:]
         elif token == "answer":
             ua["answer_required"] = True
-        elif re.fullmatch(r"chk=r\d+", token):
-            ua["chk_rev"] = int(token[5:])
         elif re.fullmatch(r"r\d+", token):
             ua["done_rev"] = int(token[1:])
         elif "=" in token:
@@ -1780,54 +2132,267 @@ def _ua_meta(meta):
     return ua
 
 
+def _quote(text):
+    return [f"> {line}" if line.strip() else ">" for line in text.split("\n")]
+
+
+def _unquote(lines):
+    return [line[2:] if line.startswith("> ") else line[1:] for line in lines]
+
+
+def _text_of(lines):
+    """Text of a body or an answer: one quote level is removed from each blank-line separated run whose lines are all
+    quoted, so a quoted text followed by a plain link or a later answer reads back as written."""
+    out, run = [], []
+    for line in list(lines) + [""]:
+        if line.strip():
+            run.append(line)
+            continue
+        out += (_unquote(run) if all(r.startswith(">") for r in run) else run) + [""]
+        run = []
+    while out and not out[-1].strip():
+        out.pop()
+    while out and not out[0].strip():
+        out.pop(0)
+    return "\n".join(out)
+
+
+def _answer_at(content):
+    """Index of the `#### 回答` line in an item's content lines (fenced lines do not count), or None."""
+    return next((k for k, line in enumerate(_strip_ignored(content)) if UA_ANSWER_RE.match(line)), None)
+
+
+def _callout_plain(line):
+    return line[6:] if line.startswith(">     ") else ""
+
+
+def _mark_end(content, k):
+    """End of the callout or mark that starts at content[k]: it runs while the lines are quoted."""
+    j = k + 1
+    while j < len(content) and content[j].startswith(">"):
+        j += 1
+    return j
+
+
+def _thread(content, req):
+    """Messages [{from, text, at}] of the lines under `#### やりとり`. Plain text is the user's, except under an agent
+    action before its first `[!sv-agent]` callout, where it is a reply written before 0.65.0. The `[!sv-input]` mark and
+    unchecked option lines (`- [ ] ...`) are not text."""
+    msgs, plain, seen, k = [], [], False, 0
+
+    def flush():
+        text = _text_of([line for line in plain if not UA_OPTION_OPEN_RE.match(line)])
+        if text:
+            msgs.append({"from": "agent" if req and not seen else "user", "text": text, "at": None})
+        plain.clear()
+
+    while k < len(content):
+        m = UA_AGENT_RE.match(content[k])
+        if not m and not UA_INPUT_RE.match(content[k]):
+            plain.append(content[k])
+            k += 1
+            continue
+        j = _mark_end(content, k)
+        flush()
+        if m:
+            seen = True
+            msgs.append({"from": "agent", "text": "\n".join(_unquote(content[k + 1:j])).strip("\n"), "at": m.group(1) or None})
+        k = j
+    flush()
+    return msgs
+
+
+def _pending(thread, req):
+    """The user's text after the supervisor's last message: the answer of a user action, the follow-up of an agent action
+    (which needs a reply of the supervisor first)."""
+    if req and not any(m["from"] == "agent" for m in thread):
+        return ""
+    tail = []
+    for m in reversed(thread):
+        if m["from"] == "agent":
+            break
+        tail.insert(0, m["text"])
+    return "\n\n".join(tail)
+
+
+def _body_of(lines):
+    """Body text of an action: the `[!sv-agent]` callout of a user action (0.65.2 and later) without its title, or a
+    plain quote (older notes, agent actions) with one quote level removed."""
+    i = next((j for j, line in enumerate(lines) if line.strip()), None)
+    if i is None or not UA_AGENT_RE.match(lines[i]):
+        return _text_of(lines)
+    j = _mark_end(lines, i)
+    rest = _text_of(lines[j:])
+    return "\n".join(_unquote(lines[i + 1:j])).strip("\n") + ("\n\n" + rest if rest else "")
+
+
+def _ua_full(ua, ua_id, description, content):
+    k = _answer_at(content)
+    thread = [] if k is None else _thread(content[k + 1:], ua["kind"] == "req")
+    return {"id": ua_id, "assignee": "agent" if ua["kind"] == "req" else "user", "description": description, **ua,
+            "body": _body_of(content if k is None else content[:k]), "answer": _pending(thread, ua["kind"] == "req"),
+            "thread": thread}
+
+
+def _ua_layout(lines, start, end):
+    """(entries, callout) of the action section lines[start:end]. An entry is {ua, at, first, stop, done}: at is the
+    heading or callout item line, lines[first:stop] its content. callout is (head, end) of the 完了 callout or None.
+    An open item runs to the next H1-H3 heading or the callout; headings inside fenced blocks do not count."""
+    stripped = [""] * start + _strip_ignored(lines[start:end])
+    # A quoted `[!done]- 完了 (N)` line of outside text is not the callout: the real one starts with an item.
+    head = next((k for k in range(start, end - 1) if UA_CALLOUT_RE.match(stripped[k]) and UA_DONE_RE.match(lines[k + 1])), None)
+    callout = None if head is None else (head, next((k for k in range(head + 1, end) if not lines[k].startswith(">")), end))
+    entries = []
+    # Items are read above the callout and, for requests the user appended at the end, below it.
+    for lo, hi in ((start, end),) if callout is None else ((start, callout[0]), (callout[1], end)):
+        heads = [k for k in range(lo, hi) if re.match(r"^#{1,3} ", stripped[k])]
+        for n, k in enumerate(heads):
+            stop = heads[n + 1] if n + 1 < len(heads) else hi
+            # The metadata line is right below the heading (before 0.65.3) or after one blank line.
+            at = k + 2 if k + 2 < stop and not lines[k + 1].strip() and UA_META_RE.match(lines[k + 2]) else k + 1
+            meta = UA_META_RE.match(lines[at]) if at < stop else None
+            ua = _ua_meta(meta.group(1)) if meta else None
+            m, req = UA_HEAD_RE.match(stripped[k]), UA_REQ_RE.match(stripped[k])
+            if m and ua and ua["kind"]:
+                entries.append({"ua": _ua_full(ua, m.group(1), m.group(2), lines[at + 1:stop]), "at": k,
+                                "meta": at, "first": at + 1, "stop": stop, "done": False})
+            elif req and not meta:
+                entries.append({"ua": _ua_full(dict(_ua_meta(""), kind="req"), None, req.group(1), lines[k + 1:stop]),
+                                "at": k, "first": k + 1, "stop": stop, "done": False})
+    if callout is not None:
+        k = head + 1
+        while k < callout[1]:
+            m = UA_DONE_RE.match(lines[k])
+            ua = _ua_meta(m.group(3)) if m else {}
+            if not ua.get("kind"):
+                k += 1
+                continue
+            # Content lines are `>     ` lines; a bare `>` counts only when one follows it.
+            last = k
+            for j in range(k + 1, callout[1]):
+                if lines[j].startswith(">     "):
+                    last = j
+                elif not re.fullmatch(r">[ \t]*", lines[j]):
+                    break
+            content = [_callout_plain(line) for line in lines[k + 1:last + 1]]
+            entries.append({"ua": _ua_full(ua, m.group(1), m.group(2), content), "at": k, "first": k + 1,
+                            "stop": last + 1, "done": True})
+            k = last + 1
+    return entries, callout
+
+
 def parse_user_actions(section_text):
-    """User action items of a `## ユーザーアクション` section. Lines without `<!-- sv ... -->` metadata are the user's
-    and are skipped. answer is the item's sub-items, dedented but otherwise verbatim."""
-    lines = section_text.split("\n")
-    items = []
-    for i, line in enumerate(lines):
-        m = UA_LINE_RE.match(line)
-        if not m:
-            continue
-        ua = _ua_meta(m.group(5))
-        if ua["kind"] is None:
-            continue
-        sub = lines[i + 1:_sub_end(lines, i, len(lines))]
-        items.append({"id": m.group(3), "description": m.group(4).strip(), "checked": m.group(2) in "xX",
-                      **ua, "block": m.group(6), "answer": textwrap.dedent("\n".join(sub)).strip()})
-    return items
+    """Action items of a `## アクション` section: open `### [UA|AA-NNNN] @user|@agent` headings with a
+    `<!-- sv ... -->` line, unnumbered `### @agent` requests (id None, kind req), then the items of the 完了 callout.
+    Anything else is the user's and is skipped. body and answer are read with one quote level removed."""
+    lines = (section_text or "").split("\n")
+    return [e["ua"] for e in _ua_layout(lines, 0, len(lines))[0]]
 
 
 def ua_open(ua):
-    """True for an unresolved user action: anything but a slot that has no done mark."""
-    return ua.get("kind") != "slot" and not ua.get("done")
+    """True for an action without a done mark."""
+    return not ua.get("done")
 
 
-def render_ua_line(ua):
+def _st_match(line):
+    m = ST_LINE_RE.match(line)
+    return m if m and m.group(4).strip() else None
+
+
+def _st_item(m):
+    return {"id": m.group(2), "done": m.group(1) != " ", "assignee": m.group(3) or "agent", "text": m.group(4).strip(),
+            "worker": m.group(5), "commit": m.group(6)}
+
+
+def parse_subtasks(section_text):
+    """Subtasks of a `## サブタスク` section in line order: {id, done, assignee, text, worker, commit}. id is None for a
+    line the supervisor has not numbered yet, and a line without @ is the agent's. Indented lines, fenced blocks and
+    comments are the user's notes."""
+    return [_st_item(m) for m in map(_st_match, _strip_ignored((section_text or "").split("\n"))) if m]
+
+
+def subtask_progress(text):
+    """The subtasks prop of a note (checked/all, e.g. 2/5), or None when its `## サブタスク` has no checklist line."""
+    sts = parse_subtasks(parse_sections(parse_frontmatter(text)[1]).get(ST_SECTION, ""))
+    return f"{sum(st['done'] for st in sts)}/{len(sts)}" if sts else None
+
+
+def _ua_tokens(ua):
     meta = [f"auto={ua['detector']}" if ua["kind"] == "auto" else ua["kind"]]
     if ua.get("answer_required"):
         meta.append("answer")
     meta += [f"{key}={ua[key]}" for key in UA_META_KEYS if ua.get(key)]
-    if ua.get("chk_rev") is not None:
-        meta.append(f"chk=r{ua['chk_rev']}")
     if ua.get("done"):
         meta.append(f"done={ua['done']}")
         if ua.get("done_rev") is not None:
             meta.append(f"r{ua['done_rev']}")
-    box = "x" if ua.get("checked") else " "
-    return f"- [{box}] {ua['id']} {ua['description']} <!-- sv {' '.join(meta)} --> ^{ua.get('block') or ua['id'].lower()}"
+    return " ".join(meta)
+
+
+def _ua_title(ua):
+    return f"[{ua['id']}] @{'agent' if ua['kind'] == 'req' else 'user'} {ua['description']}"
+
+
+def _answer_lines(text):
+    text = text.strip("\n")
+    return [text] if "\n" not in text and not text.lstrip().startswith(("#", ">", "```", "~~~")) else _quote(text)
+
+
+def _agent_lines(text, at):
+    """A `[!sv-agent]` callout, closed by an empty `>` line, so text typed right below it stays outside (lazy continuation)."""
+    return [f"> [!sv-agent] {at}" if at else "> [!sv-agent]"] + _quote(text.strip("\n")) + [">"]
+
+
+def _short_time(at):
+    return f"{at[:10]} {at[11:16]}" if isinstance(at, str) and len(at) >= 16 else None
+
+
+def _ua_content(ua):
+    # The supervisor's body of a user action is its first message, a callout like its replies; the body of an agent
+    # action is the user's request, quoted.
+    lines = []
+    if ua.get("body"):
+        lines = (_quote(ua["body"]) if ua["kind"] == "req" else _agent_lines(ua["body"], _short_time(ua.get("since")))) + [""]
+    thread = ua.get("thread") or []
+    if thread or ua["kind"] == "ask" or ua.get("detector") in UA_ANSWER_DETECTORS:
+        lines.append(UA_THREAD_HEAD)
+        for m in thread:
+            lines += [""] + (_agent_lines(m["text"], m["at"]) if m["from"] == "agent" else _answer_lines(m["text"]))
+        if ua.get("options") and not ua.get("done") and ua["kind"] != "req" and (not thread or thread[-1]["from"] == "agent"):
+            lines += [""] + [f"- [ ] {o}" for o in ua["options"]]
+    return lines[:-1] if lines and not lines[-1] else lines
+
+
+def _callout_lines(content):
+    return [f">     {line}" if line.strip() else ">" for line in content]
+
+
+def render_ua_block(ua):
+    """Lines of an open action: heading, metadata, a blank line, the quoted body and the `#### やりとり` thread."""
+    content = _ua_content(ua)
+    return [f"### {_ua_title(ua)}", "", f"<!-- sv {_ua_tokens(ua)} -->"] + ([""] + content if content else [])
+
+
+def render_ua_done(ua):
+    """Lines of an item of the 完了 callout."""
+    return [f"> - {_ua_title(ua)} <!-- sv {_ua_tokens(ua)} -->"] + _callout_lines(_ua_content(ua))
 
 
 def _ua_errors(ua):
     errors = []
-    if not isinstance(ua.get("id"), str) or not UA_ID_RE.match(ua["id"]):
+    valid_id = isinstance(ua.get("id"), str) and UA_ID_RE.match(ua["id"])
+    if not valid_id:
         errors.append(f"invalid user action id {ua.get('id')!r}")
     if ua.get("kind") not in UA_KINDS:
         errors.append(f"user action kind must be one of {list(UA_KINDS)}")
-    elif (ua["kind"] == "auto") != (ua.get("detector") in UA_DETECTORS):
+    elif (ua["kind"] == "auto") != (ua.get("detector") in UA_DETECTORS) or (ua["kind"] == "req" and ua.get("detector")):
         errors.append(f"auto needs a detector in {list(UA_DETECTORS)}, got {ua.get('detector')!r}")
+    elif valid_id and ua["id"][:2] != ("AA" if ua["kind"] == "req" else "UA"):
+        errors.append(f"{ua['id']}: a {ua['kind']} action takes the {'AA' if ua['kind'] == 'req' else 'UA'}- prefix")
     if not isinstance(ua.get("description"), str) or not ua["description"].strip() or "\n" in ua["description"]:
         errors.append("user action description must be one non-empty line")
+    if ua.get("body") is not None and not isinstance(ua["body"], str):
+        errors.append("user action body must be a string")
     errors += [f"{key} must not contain spaces" for key in UA_META_KEYS if ua.get(key) and re.search(r"\s", str(ua[key]))]
     return errors
 
@@ -1850,15 +2415,30 @@ def _art_text(item):
     return f"{item['kind']} {ref or item.get('url')}"
 
 
+def _art_shown(item):
+    if item["kind"] == "file":
+        return f"`{item.get('path')}`"
+    text = _art_text(item).replace("[", "\\[").replace("]", "\\]")
+    return f"[{text}]({item['url']})" if item.get("url") else text
+
+
 def render_artifact_line(item):
     """One `## 成果物` line: display text, the sv-art JSON comment, and the block id ^sv-art-<n>."""
     data = {k: item[k] for k in ART_KEYS if item.get(k) is not None}
-    if item["kind"] == "file":
-        shown = f"`{item.get('path')}`"
-    else:
-        text = _art_text(item).replace("[", "\\[").replace("]", "\\]")
-        shown = f"[{text}]({item['url']})" if item.get("url") else text
-    return f"- {shown} <!-- sv-art {_art_json(data)} --> ^sv-art-{item['n']}"
+    return f"- {_art_shown(item)} <!-- sv-art {_art_json(data)} --> ^sv-art-{item['n']}"
+
+
+def _render_art_rows(item):
+    """The artifact line followed by its description line (`desc`), which is display only like the link text."""
+    return [render_artifact_line(item)] + ([f"  - {item['desc'].strip()}"] if item.get("desc") else [])
+
+
+def _children_end(lines, i, end):
+    """Index after the indented lines right below line i (its child list items)."""
+    j = i + 1
+    while j < end and lines[j][:1] in (" ", "\t") and lines[j].strip():
+        j += 1
+    return j
 
 
 def _art_errors(data):
@@ -1868,6 +2448,10 @@ def _art_errors(data):
               if not isinstance(data.get(key), int) or isinstance(data.get(key), bool) or data[key] < 1]
     if "label" in data and not isinstance(data["label"], str):
         errors.append("label must be a string")
+    if data.get("desc") is not None and (not isinstance(data["desc"], str) or "\n" in data["desc"]):
+        errors.append("desc must be one line")
+    if data.get("st") is not None and not (isinstance(data["st"], str) and ST_ID_RE.match(data["st"])):
+        errors.append(f"st must be a subtask id, got {data['st']!r}")
     return errors + _validate_artifact("sv-art", {k: data[k] for k in ART_FIELDS if k in data}, None)
 
 
@@ -1967,23 +2551,71 @@ def _insert_in_section(lines, title, new_lines):
 
 
 def _has_block(lines, block_id):
+    if re.fullmatch(r"(?:ua|aa)-\d+", block_id):
+        return _find_ua(lines, block_id.upper()) is not None
+    if re.fullmatch(r"st-\d+", block_id):
+        return _find_st(lines, block_id.upper()) is not None
     pattern = re.compile(rf"\^{re.escape(block_id)}[ \t]*$")
     return any(pattern.search(line) for line in lines)
 
 
 def _find_ua(lines, ua_id):
+    """The layout entry of the action numbered like ua_id (UA and AA share one numbering), or None."""
     span = _section_span(lines, UA_SECTION)
-    for i in range(*span) if span else ():
-        m = UA_LINE_RE.match(lines[i])
-        if m and (m.group(3) == ua_id or m.group(6) == ua_id.lower()):
-            return i, span[1]
-    return None, None
+    number = _ua_number(ua_id)
+    if not span or not number:
+        return None
+    return next((e for e in _ua_layout(lines, span[0] + 1, span[1])[0]
+                 if e["ua"]["id"] and _ua_number(e["ua"]["id"]) == number), None)
 
 
-def _edit_ua(line, tokens, checked=False):
-    m = UA_LINE_RE.match(line)
-    line = line[:m.start(5)] + " ".join(tokens) + " " + line[m.end(5):]
-    return line[:m.start(2)] + "x" + line[m.end(2):] if checked else line
+def _st_lines(lines):
+    """(index, match) of each subtask line of `## サブタスク`."""
+    span = _section_span(lines, ST_SECTION)
+    if not span:
+        return []
+    stripped = _strip_ignored(lines[span[0] + 1:span[1]])
+    return [(span[0] + 1 + k, m) for k, m in enumerate(map(_st_match, stripped)) if m]
+
+
+def _find_st(lines, st_id):
+    return next(((i, m) for i, m in _st_lines(lines) if m.group(2) == st_id), None)
+
+
+def _render_st(done, st_id, who, text, worker=None, commit=None):
+    mark = f" ({worker}{' ' + commit if commit else ''})" if worker else ""
+    return f"- [{'x' if done else ' '}] [{st_id}] {'@' + who + ' ' if who else ''}{text}{mark}"
+
+
+def _st_errors(name, st, fields=("id", "text")):
+    errors = []
+    if "id" in fields and not (isinstance(st.get("id"), str) and ST_ID_RE.match(st["id"])):
+        errors.append(f"invalid subtask id {st.get('id')!r}")
+    if "text" in fields and (not isinstance(st.get("text"), str) or not st["text"].strip() or "\n" in st["text"]):
+        errors.append("subtask text must be one non-empty line")
+    if st.get("assignee") is not None and st["assignee"] not in ASSIGNEES:
+        errors.append(f"subtask assignee must be one of {list(ASSIGNEES)}")
+    if st.get("worker") is not None and not re.fullmatch(r"w-\d+", str(st["worker"])):
+        errors.append(f"invalid worker {st['worker']!r}")
+    if st.get("commit") is not None and not re.fullmatch(r"[0-9a-f]{7,40}", str(st["commit"])):
+        errors.append(f"commit must be a hex sha, got {st['commit']!r}")
+    if errors:
+        raise StateError(f"{name}: {errors}")
+
+
+def _put_block(lines, pos, block):
+    """Insert block at pos with a blank line before and after it."""
+    before = [""] if pos > 0 and lines[pos - 1].strip() else []
+    after = [""] if pos >= len(lines) or lines[pos].strip() else []
+    lines[pos:pos] = before + block + after
+
+
+def _open_end(lines):
+    """Position right after the last non-blank line before the 完了 callout (or the section end)."""
+    head, end = _ensure_section(lines, UA_SECTION)
+    callout = _ua_layout(lines, head + 1, end)[1]
+    limit = callout[0] if callout else end
+    return max((i for i in range(head + 1, limit) if lines[i].strip()), default=head) + 1
 
 
 def _art_data(line):
@@ -2023,74 +2655,214 @@ def _op_log(lines, op, now, rev, index, problems):
 
 
 def _op_ua_add(lines, op, now, rev, index, problems):
-    ua = {"since": now, **(op.get("ua") or {}), "checked": False, "chk_rev": None, "done": None, "done_rev": None}
+    ua = {"since": now, **(op.get("ua") or {}), "done": None, "done_rev": None, "answer": ""}
     errors = _ua_errors(ua)
     if errors:
         raise StateError(f"ua_add: {errors}")
-    block_id = ua.get("block") or ua["id"].lower()
-    if _has_block(lines, block_id):
+    if op.get("reply") is not None and ua["kind"] != "req":
+        raise StateError("ua_add: only a req item takes a reply")
+    options = _options(op, "ua_add")
+    if options and ua["kind"] == "req":
+        raise StateError("ua_add: only a user action takes options")
+    if _find_ua(lines, ua["id"]):
         return []
-    span = _section_span(lines, UA_SECTION)
-    items = [i for i in range(*span) if UA_LINE_RE.match(lines[i])] if span else []
-    if items:
-        # Keep the checklist together: a user's ### heading later in the section stays below it.
-        pos = _sub_end(lines, items[-1], span[1])
-        lines[pos:pos] = [render_ua_line(ua)]
-    else:
-        _insert_in_section(lines, UA_SECTION, [render_ua_line(ua)])
-    return [block_id]
+    block = render_ua_block(dict(ua, options=options))
+    # A user action that waits for an answer ends with a blank line and an empty line to type in, besides the blank line
+    # that separates the next block.
+    # It goes after the blank lines that end the last item, which keep the empty line to type in of a waiting item.
+    pos = _open_end(lines)
+    while not lines[pos - 1].startswith("## ") and pos < len(lines) and not lines[pos].strip():
+        pos += 1
+    _put_block(lines, pos, block + (["", ""] if ua["kind"] != "req" and UA_THREAD_HEAD in block else []))
+    _reply(lines, op, ua["id"], now, rev, problems)
+    return [ua["id"].lower()]
 
 
-def _op_ua_check(lines, op, now, rev, index, problems):
-    i, _ = _find_ua(lines, op["id"])
-    if i is None:
-        problems.append(f"ua_check {op['id']}: item not found")
-        return []
-    tokens = UA_LINE_RE.match(lines[i]).group(5).split()
-    # The rev mark makes a re-application a no-op, so a box the user unchecked afterwards stays unchecked.
-    if f"chk=r{rev}" not in tokens:
-        lines[i] = _edit_ua(lines[i], [t for t in tokens if not t.startswith("chk=")] + [f"chk=r{rev}"], checked=True)
-    return []
+def _options(op, name):
+    options = op.get("options") or []
+    if not isinstance(options, list) or not all(isinstance(o, str) and o.strip() and "\n" not in o for o in options):
+        raise StateError(f"{name}: options must be a list of one-line texts")
+    return [o.strip() for o in options]
+
+
+def _drop_marks(content):
+    """content without the `[!sv-input]` mark of older notes and unchecked option lines under `#### やりとり`, with one
+    blank line below the heading, blank runs collapsed and trailing blank lines removed."""
+    k = _answer_at(content)
+    out, j = list(content if k is None else content[:k + 1] + [""]), (len(content) if k is None else k + 1)
+    while j < len(content):
+        if UA_INPUT_RE.match(content[j]):
+            j = _mark_end(content, j)
+            continue
+        if not UA_OPTION_OPEN_RE.match(content[j]) and (content[j].strip() or out[-1].strip()):
+            out.append(content[j])
+        j += 1
+    while out and not out[-1].strip():
+        out.pop()
+    return out
+
+
+def _reply(lines, op, ua_id, now, rev, problems):
+    """The agent's reply to a req item numbered in this same op, whose id the supervisor could not name in a ua_answer."""
+    if op.get("reply") is not None:
+        _op_ua_answer(lines, {"id": ua_id, "text": op["reply"]}, now, rev, None, problems)
 
 
 def _op_ua_ack(lines, op, now, rev, index, problems):
-    i, _ = _find_ua(lines, op["id"])
-    if i is None:
+    e = _find_ua(lines, op["id"])
+    if e is None:
         problems.append(f"ua_ack {op['id']}: item not found")
         return []
-    tokens = UA_LINE_RE.match(lines[i]).group(5).split()
+    if e["done"]:
+        return []
+    tokens = UA_META_RE.match(lines[e["meta"]]).group(1).split()
     if not any(t.startswith("done=") for t in tokens):
-        lines[i] = _edit_ua(lines[i], tokens + [f"done={op.get('at') or now}", f"r{rev}"])
+        tokens += [f"done={op.get('at') or now}", f"r{rev}"]
+    content = _drop_marks(lines[e["first"]:e["stop"]])
+    while content and not content[0].strip():
+        content.pop(0)
+    item = [f"> - {_ua_title(e['ua'])} <!-- sv {' '.join(tokens)} -->"] + _callout_lines(content)
+    del lines[e["at"]:e["stop"]]
+    head, end = _section_span(lines, UA_SECTION)
+    callout = _ua_layout(lines, head + 1, end)[1]
+    if callout is None:
+        _put_block(lines, _open_end(lines), ["> [!done]- 完了 (1)"] + item)
+        return []
+    lines[callout[1]:callout[1]] = item
+    count = sum(1 for line in lines[callout[0] + 1:callout[1] + len(item)] if UA_DONE_RE.match(line))
+    lines[callout[0]] = f"> [!done]- 完了 ({count})"
     return []
 
 
 def _op_ua_answer(lines, op, now, rev, index, problems):
-    i, end = _find_ua(lines, op["id"])
-    if i is None:
+    e = _find_ua(lines, op["id"])
+    if e is None:
         problems.append(f"ua_answer {op['id']}: item not found")
         return []
     if not isinstance(op.get("text"), str) or not op["text"].strip():
         raise StateError("ua_answer needs text")
-    base = UA_LINE_RE.match(lines[i]).group(1) + "    "
-    first, *rest = op["text"].strip("\n").split("\n")
-    new = [f"{base}- {first}"] + [f"{base}  {line}".rstrip() for line in rest]
-    sub_end = _sub_end(lines, i, end)
-    if "\n".join(new) not in "\n".join(lines[i + 1:sub_end]):
-        lines[sub_end:sub_end] = new
+    ua = e["ua"]
+    who = op.get("from") or ("agent" if ua["kind"] == "req" else "user")
+    if who not in ASSIGNEES:
+        raise StateError(f"ua_answer: from must be one of {list(ASSIGNEES)}")
+    options = _options(op, "ua_answer")
+    text = op["text"].strip("\n")
+    last = ua["thread"][-1] if ua["thread"] else None
+    if last and last["from"] == who and text in last["text"]:
+        return []
+    raw = lines[e["first"]:e["stop"]]
+    content = [_callout_plain(line) for line in raw] if e["done"] else list(raw)
+    tail = []
+    while content and not content[-1].strip():
+        tail.insert(0, content.pop())
+    content = _drop_marks(content)
+    if _answer_at(content) is None:
+        content += ([""] if content or not e["done"] else []) + [UA_THREAD_HEAD]
+    content += [""] + (_agent_lines(text, _short_time(now)) if who == "agent" else _answer_lines(text))
+    if who == "agent" and not e["done"] and ua["kind"] != "req" and options:
+        content += [""] + [f"- [ ] {o}" for o in options]
+    if e["done"]:
+        lines[e["first"]:e["stop"]] = _callout_lines(content)
+    else:
+        # After the supervisor's message the user writes next: leave a blank line, an empty line to type in and one
+        # before the next block.
+        tail = ["", "", ""] if who == "agent" else tail or ([""] if e["stop"] < len(lines) and lines[e["stop"]].strip() else [])
+        lines[e["first"]:e["stop"]] = content + tail
     return []
+
+
+def _op_ua_adopt(lines, op, now, rev, index, problems):
+    ua = dict(op.get("ua") or {}, kind="req")
+    errors = _ua_errors(ua)
+    if errors:
+        raise StateError(f"ua_adopt: {errors}")
+    if _find_ua(lines, ua["id"]):
+        return []
+    span = _section_span(lines, UA_SECTION)
+    entries = _ua_layout(lines, span[0] + 1, span[1])[0] if span else []
+    e = next((e for e in entries if e["ua"]["id"] is None and e["ua"]["description"] == ua["description"]), None)
+    if e is None:
+        problems.append(f"ua_adopt {ua['id']}: no unnumbered @agent request {ua['description']!r}")
+        return []
+    k = e["at"]
+    blank = [""] if k + 1 < len(lines) and lines[k + 1].strip() else []
+    lines[k:k + 1] = [f"### {_ua_title(ua)}", "", f"<!-- sv req since={ua.get('since') or now} -->"] + blank
+    _reply(lines, op, ua["id"], now, rev, problems)
+    return [ua["id"].lower()]
+
+
+def _op_st_adopt(lines, op, now, rev, index, problems):
+    st = op.get("st") or {}
+    _st_errors("st_adopt", st)
+    if _find_st(lines, st["id"]):
+        return []
+    found = next(((i, m) for i, m in _st_lines(lines) if m.group(2) is None and m.group(4).strip() == st["text"].strip()), None)
+    if found is None:
+        problems.append(f"st_adopt {st['id']}: no unnumbered subtask {st['text']!r}")
+        return []
+    i, m = found
+    lines[i] = lines[i][:6] + f"[{st['id']}] " + lines[i][6:]
+    return [st["id"].lower()]
+
+
+def _op_st_add(lines, op, now, rev, index, problems):
+    st = op.get("st") or {}
+    _st_errors("st_add", st)
+    if _find_st(lines, st["id"]):
+        return []
+    _insert_in_section(lines, ST_SECTION, [_render_st(False, st["id"], st.get("assignee"), st["text"].strip())])
+    return [st["id"].lower()]
+
+
+def _op_st_set(lines, op, now, rev, index, problems):
+    """Sets the given fields of a subtask line: done (the checkbox), assignee, worker and commit (the trailing mark;
+    worker null removes it). Fields left out keep their value, so the op can be applied again."""
+    _st_errors("st_set", op, fields=("id",))
+    found = _find_st(lines, op["id"])
+    if found is None:
+        problems.append(f"st_set {op['id']}: subtask not found")
+        return []
+    i, m = found
+    cur = _st_item(m)
+    done = op["done"] if "done" in op else cur["done"]
+    who = op["assignee"] if op.get("assignee") else m.group(3)
+    worker = op["worker"] if "worker" in op else cur["worker"]
+    commit = op["commit"] if "commit" in op else (cur["commit"] if worker == cur["worker"] else None)
+    if commit and not worker:
+        raise StateError(f"st_set {op['id']}: a commit needs the worker that made it")
+    lines[i] = _render_st(bool(done), op["id"], who, cur["text"], worker, commit)
+    return []
+
+
+def _link_to_subtasks(lines, items, problems):
+    """Lists each item with an `st` as a child line `  - <link>` of that subtask line, once."""
+    for item in items:
+        if not item.get("st"):
+            continue
+        found = _find_st(lines, item["st"])
+        if found is None:
+            problems.append(f"artifact {item['n']}: subtask {item['st']} not found")
+            continue
+        i = found[0]
+        child = f"  - {_art_shown(item)}"
+        end = _children_end(lines, i, len(lines))
+        if child not in lines[i + 1:end]:
+            lines.insert(end, child)
 
 
 def _op_art_add(lines, op, now, rev, index, problems):
     items = op.get("items") or []
     g = op.get("g") or (items[0].get("n") if items else None)
+    items = _art_op_lines(op, g, rev)
     added, block = [], []
-    for item in _art_op_lines(op, g, rev):
+    for item in items:
         block_id = f"sv-art-{item['n']}"
         if not _has_block(lines, block_id):
-            block.append(render_artifact_line(item))
+            block += _render_art_rows(item)
             added.append(block_id)
     if block:
         _insert_in_section(lines, ART_SECTION, block)
+    _link_to_subtasks(lines, items, problems)
     return added
 
 
@@ -2105,6 +2877,8 @@ def _op_art_set(lines, op, now, rev, index, problems):
         return []
     old_url = data.get("url")
     for key, value in (op.get("fields") or {}).items():
+        if key == "desc":
+            continue
         if key not in ART_FIELDS:
             raise StateError(f"art_set cannot change {key!r}")
         if value is None:
@@ -2119,7 +2893,15 @@ def _op_art_set(lines, op, now, rev, index, problems):
     shown, rest = lines[i][:m.start()], lines[i][m.end():]
     if old_url and data.get("url") and data["url"] != old_url:
         shown = shown.replace(f"]({old_url})", f"]({data['url']})")
+        st_span = _section_span(lines, ST_SECTION)
+        for k in range(*st_span) if st_span else ():
+            if lines[k][:1] in (" ", "\t"):
+                lines[k] = lines[k].replace(f"]({old_url})", f"]({data['url']})")
     lines[i] = shown + f"<!-- sv-art {_art_json({k: data[k] for k in ART_KEYS if k in data})} -->" + rest
+    if "desc" in (op.get("fields") or {}):
+        end = _children_end(lines, i, span[1])
+        desc = (op["fields"]["desc"] or "").strip()
+        lines[i + 1:end] = [f"  - {desc}"] if desc else []
     return []
 
 
@@ -2129,36 +2911,149 @@ def _op_art_replace_group(lines, op, now, rev, index, problems):
     block_ids = [f"sv-art-{item['n']}" for item in items]
     if any(_has_block(lines, b) for b in block_ids):
         return []
-    new = [render_artifact_line(item) for item in items]
+    new = [row for item in items for row in _render_art_rows(item)]
     head, end = _ensure_section(lines, ART_SECTION)
     group = [i for i in range(head + 1, end) if (_art_data(lines[i]) or {}).get("g") == g]
     if not group:
         _insert_in_section(lines, ART_SECTION, new)
+        _link_to_subtasks(lines, items, problems)
         return block_ids
+    old_links = {"  - " + lines[i][2:ART_COMMENT_RE.search(lines[i]).start()].strip() for i in group}
     for i in reversed(group):
-        del lines[i]
+        del lines[i:_children_end(lines, i, len(lines))]
     lines[group[0]:group[0]] = new
+    st_span = _section_span(lines, ST_SECTION)
+    if st_span:
+        lines[st_span[0] + 1:st_span[1]] = [l for l in lines[st_span[0] + 1:st_span[1]] if l not in old_links]
+    _link_to_subtasks(lines, items, problems)
     return block_ids
 
 
+def _knowledge_errors(item):
+    if not isinstance(item, dict) or not (isinstance(item.get("key"), str) and KN_KEY_RE.fullmatch(item["key"])
+                                          and len(item["key"]) <= 40):
+        return "each knowledge entry needs a key of lowercase letters, digits, and dashes (at most 40 characters)"
+    if not isinstance(item.get("text"), str) or "\n" in item["text"]:
+        return f"knowledge {item['key']}: text must be one line (empty to remove the entry)"
+    return None
+
+
+def _op_kn_set(lines, op, now, rev, index, problems):
+    """Sets the `## 知見` entry `- <text> ^sv-kn-<key>`: replaces the line that carries the block id, appends it when
+    there is none, and removes it when text is empty. Lines without an sv-kn block id are the user's."""
+    error = _knowledge_errors(op)
+    if error:
+        raise StateError(f"kn_set: {error}")
+    block_id = f"sv-kn-{op['key']}"
+    text = op["text"].strip()
+    span = _section_span(lines, KN_SECTION)
+    pattern = re.compile(rf"\^{re.escape(block_id)}[ \t]*$")
+    at = next((i for i in range(*span) if pattern.search(lines[i])), None) if span else None
+    line = f"- {text} ^{block_id}"
+    if at is not None:
+        if text:
+            lines[at] = line
+        else:
+            del lines[at]
+        return []
+    if not text:
+        return []
+    _insert_in_section(lines, KN_SECTION, [line])
+    return [block_id]
+
+
+def _op_report_set(lines, op, now, rev, index, problems):
+    """Replaces the body of `## 完了報告` with text: why the supervisor judged the task's work finished."""
+    text = op.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise StateError("report_set needs text")
+    body = text.strip("\n").split("\n")
+    if any(re.match(r"#{1,2}\s", line) for line in body):
+        raise StateError("report_set: text must not contain # or ## headings")
+    head, end = _ensure_section(lines, REPORT_SECTION)
+    lines[head + 1:end] = [""] + body + [""]
+    return []
+
+
+def _op_done_when_set(lines, op, now, rev, index, problems):
+    """Replaces the body of `## 完了条件` with text: what has to hold for the task's work to count as finished."""
+    text = op.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise StateError("done_when_set needs text")
+    body = text.strip("\n").split("\n")
+    if any(re.match(r"#{1,2}\s", line) for line in body):
+        raise StateError("done_when_set: text must not contain # or ## headings")
+    head, end = _ensure_section(lines, DONE_WHEN_SECTION)
+    lines[head + 1:end] = [""] + body + [""]
+    return []
+
+
 _NOTE_BODY_OPS = {
-    "log": _op_log, "ua_add": _op_ua_add, "ua_check": _op_ua_check, "ua_answer": _op_ua_answer, "ua_ack": _op_ua_ack,
+    "log": _op_log, "ua_add": _op_ua_add, "ua_answer": _op_ua_answer, "ua_ack": _op_ua_ack, "ua_adopt": _op_ua_adopt,
     "art_add": _op_art_add, "art_set": _op_art_set, "art_replace_group": _op_art_replace_group,
+    "st_adopt": _op_st_adopt, "st_add": _op_st_add, "st_set": _op_st_set, "kn_set": _op_kn_set,
+    "report_set": _op_report_set, "done_when_set": _op_done_when_set,
 }
+
+
+def note_summary(text):
+    """The summary prop the kanban shows: one line of at most NOTE_SUMMARY_MAX characters."""
+    if not isinstance(text, str) or not text.strip():
+        raise StateError("summary needs text")
+    line = " ".join(text.split())
+    return line if len(line) <= NOTE_SUMMARY_MAX else line[:NOTE_SUMMARY_MAX - 1] + "…"
+
+
+_CODE_OR_COMMENT_MARK_RE = re.compile(r"(`+).+?(?<!`)\1(?!`)|%{2,}|(?<!\\)<(/?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>\n]*)?/?)>")
+_FENCE_RE = re.compile(r"^[ \t>]*(```|~~~)")
+
+
+def _escape_mark(m):
+    if m.group(1):
+        return m.group(0)
+    if m.group(2) is not None:
+        return f"\\<{m.group(2)}\\>"
+    return f"`{m.group(0)}`"
+
+
+def escape_comment_marks(value):
+    """Wrap each bare `%%` of the texts in value (a string, or lists and dicts of them) in backticks, and escape the
+    `<` and `>` of each bare HTML-tag-like text (`<target>`, `</b>`, `<a href="x">`) with backslashes.
+    Obsidian hides everything from a `%%` to the next one (to the end of the note when there is none), so a `%%` in
+    a report or a log would hide the rest of the note, and it renders a tag-like text as HTML, which hides it or
+    breaks the layout. Autolinks (`<https://...>`) and HTML comments are not tags and stay. Code spans and fenced code
+    blocks are left alone, which also makes this idempotent."""
+    if isinstance(value, dict):
+        return {key: escape_comment_marks(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [escape_comment_marks(item) for item in value]
+    if not isinstance(value, str) or ("%%" not in value and "<" not in value):
+        return value
+    lines, fenced = [], False
+    for line in value.split("\n"):
+        if _FENCE_RE.match(line):
+            fenced = not fenced
+        elif not fenced:
+            line = _CODE_OR_COMMENT_MARK_RE.sub(_escape_mark, line)
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def apply_note_ops(text, ops, now, rev):
     """Apply note ops to a note's text. Returns (text, new_ids, problems).
     Re-applying the same ops with the same rev is a no-op: lines are added once per block id, and edits of existing
-    lines leave a rev mark (chk=r<rev>, done=<at> r<rev>, "r": <rev>). new_ids are the block ids this call added.
-    create writes a note only into empty text; assign_uid sets uid only when the note has none."""
+    lines leave a rev mark (done=<at> r<rev>, "r": <rev>). new_ids are the block ids this call added.
+    create writes a note only into empty text; assign_uid sets uid only when the note has none; summary sets the
+    summary prop."""
     new_ids, problems = [], []
     for index, op in enumerate(ops):
         name = op.get("op")
         if name == "create":
             if not text.strip():
                 text = new_note_text(op["uid"], op["title"], op["kind"], op["status"], op["assignee"], now,
-                                     op.get("request", ""), op.get("parent"), op.get("follows"))
+                                     escape_comment_marks(op.get("request", "")), op.get("parent"), op.get("follows"),
+                                     escape_comment_marks(op.get("original")),
+                                     op.get("proposed_by"), op.get("parent_title"))
             continue
         if name == "assign_uid":
             props, _, errors = parse_frontmatter(text)
@@ -2167,11 +3062,14 @@ def apply_note_ops(text, ops, now, rev):
             elif not props.get("uid"):
                 text = set_props(text, {"uid": op["uid"]})
             continue
+        if name == "summary":
+            text = set_props(text, {"summary": note_summary(op.get("text"))})
+            continue
         if name not in _NOTE_BODY_OPS:
             raise StateError(f"unknown note op {name!r}")
         head, body = _split_note(text)
         lines = body.split("\n")
-        new_ids += _NOTE_BODY_OPS[name](lines, op, now, rev, index, problems)
+        new_ids += _NOTE_BODY_OPS[name](lines, escape_comment_marks(op), now, rev, index, problems)
         text = head + "\n".join(lines)
     return text, new_ids, problems
 
@@ -2188,10 +3086,10 @@ def _note_view(text):
 
 
 def _view_user_actions(section_text):
-    """Open user actions in the v1 shape. Slots are left out: derive_status would count them."""
+    """Open user actions in the v1 shape. Requests to the agent are left out: derive_status would count them."""
     actions = []
     for ua in parse_user_actions(section_text or ""):
-        if not ua_open(ua):
+        if not ua_open(ua) or ua["kind"] == "req":
             continue
         item = {"id": ua["id"], "description": ua["description"], "since": ua["since"]}
         if ua["rule"]:
@@ -2203,6 +3101,26 @@ def _view_user_actions(section_text):
             item["needs_answer"] = True
         actions.append(item)
     return actions
+
+
+def _view_agent_actions(section_text):
+    """Open numbered requests to the agent (AA-NNNN). split_view acks them when the task leaves the view."""
+    return [{"id": ua["id"], "description": ua["description"], "since": ua["since"]}
+            for ua in parse_user_actions(section_text or "") if ua["kind"] == "req" and ua["id"] and ua_open(ua)]
+
+
+def _request_text(section):
+    """The task request: the 依頼の原文 callout of `## 概要` when there is one, else the whole section."""
+    lines = (section or "").split("\n")
+    k = next((i for i, line in enumerate(lines) if line.rstrip() == QUOTE_HEAD), None)
+    if k is None:
+        return (section or "").strip()
+    quoted = []
+    for line in lines[k + 1:]:
+        if not line.startswith(">"):
+            break
+        quoted.append(line)
+    return "\n".join(_unquote(quoted)).strip("\n")
 
 
 def _held_action(task, wid):
@@ -2226,7 +3144,9 @@ def join_view(state, notes):
     empty = ({}, {}, [])
     sup = view["supervisor"]
     numbers = [_ua_number(ua["id"]) for _, sections, _ in parsed.values()
-               for ua in parse_user_actions(sections.get(UA_SECTION, ""))]
+               for ua in parse_user_actions(sections.get(UA_SECTION, "")) if ua["id"]]
+    numbers += [_id_number(ST_ID_RE, st["id"]) for _, sections, _ in parsed.values()
+                for st in parse_subtasks(sections.get(ST_SECTION, "")) if st["id"]]
     sup["last_ua_number"] = max(numbers + [sup.get("last_ua_number", 0)])
     for project in view.get("projects", []):
         props, sections, _ = parsed.get(project.get("uid"), empty)
@@ -2238,10 +3158,12 @@ def join_view(state, notes):
     live = {t["id"]: t for t in view["tasks"]}
     for task in view["tasks"]:
         props, sections, items = parsed.get(task.get("uid"), empty)
-        task.update(title=_note_title(task, props), request=sections.get("概要", "").strip(), followups=[],
+        task.update(title=_note_title(task, props), request=_request_text(sections.get("概要")), followups=[],
                     artifacts=artifacts_view(items, task.get("art_from")),
                     user_actions=(_view_user_actions(sections.get(UA_SECTION))
                                   + [_held_action(task, wid) for wid in task.get("held", [])]),
+                    agent_actions=_view_agent_actions(sections.get(UA_SECTION)),
+                    subtasks=[st for st in parse_subtasks(sections.get(ST_SECTION)) if st["id"]],
                     last_artifact_number=max([i["n"] for i in items] + [task.get("last_artifact_number", 0)]))
         task["status"] = derive_status(task, workers_by_id)
         if isinstance(task.get("proposal"), dict):
@@ -2252,7 +3174,7 @@ def join_view(state, notes):
         last = max([i["n"] for i in items] + [stub.get("last_artifact_number", 0)])
         if stub["id"] in live:
             items = [i for i in items if i["n"] < (live[stub["id"]].get("art_from") or 1)]
-        stub.update(title=_note_title(stub, props), request=sections.get("概要", "").strip(),
+        stub.update(title=_note_title(stub, props), request=_request_text(sections.get("概要")),
                     artifacts=artifacts_view(items), last_artifact_number=last)
         if "project" in stub:
             stub["project"] = {"id": stub["project"]["id"], "name": names.get(stub["project"]["id"], stub["project"]["id"])}
@@ -2262,7 +3184,7 @@ def join_view(state, notes):
 def _ua_add_op(owner_id, ua):
     follow_up = ua.get("follow_up") or {}
     detector = ua.get("detector")
-    if detector is None and ua["description"] == waiting_start_description(owner_id):
+    if detector is None and _is_waiting_start(ua, owner_id):
         detector = "start_possible"
     if detector is None and follow_up.get("done") == "pr_closed":
         detector = "pr_closed"
@@ -2294,6 +3216,8 @@ def split_view(view_cand, view_new, ops=None):
             numbers += [_ua_number(ua["id"]) for ua in after]
             added = [_ua_add_op(old["id"], ua) for ua in after if ua["id"] not in before]
             acked = [{"op": "ua_ack", "id": i} for i in sorted(before - {ua["id"] for ua in after})]
+            requests = {ua["id"] for ua in after_by_id.get(old["id"], {}).get("agent_actions", [])}
+            acked += [{"op": "ua_ack", "id": ua["id"]} for ua in old.get("agent_actions", []) if ua["id"] not in requests]
             if added or acked:
                 ops.setdefault(old.get("uid"), []).extend(added + acked)
     state["supervisor"]["last_ua_number"] = max(numbers)
@@ -2388,13 +3312,13 @@ def note_props(kind, item, workers_by_id):
     if item.get("user_hold"):
         return None
     if kind == "project":
-        if item.get("done_proposed"):
-            return ("done", "agent")
-        return ("in progress", "user") if item.get("user_actions") else ("in progress", "agent")
+        return ("in progress", "user") if item.get("user_actions") or item.get("done_proposed") else ("in progress", "agent")
     actions = item.get("user_actions", [])
     status = derive_status(item, workers_by_id)
-    if status == "done" or (actions and all(_read_action_worker(ua) for ua in actions)):
-        return ("done", "agent")
+    # Completion is the user's to confirm, so the agent never writes done/agent: a finished task is done/user, and
+    # a task waiting only for the user to read held results is in progress/user until the user sets done/user.
+    if status == "done":
+        return ("done", "user")
     return ("in progress", "user") if status == "needs_user" else ("in progress", "agent")
 
 
@@ -2424,7 +3348,8 @@ NOTE_AGENT_RESUME = (("in progress", "agent"), ("backlog", "agent"))
 def user_transition(seen, cur, ctx):
     """Classify a user's change of a note (3.4 (2)). seen and cur are {status, assignee, ua_sha, art_sha}; seen is
     None for an unmanaged note, cur None when the frontmatter cannot be read. ctx: managed, live, active,
-    hold (None, "pause", "invalid"), open_ua, kind ("task" or "project"), duplicate, artifacts_ok.
+    hold (None, "pause", "invalid"), open_ua, held_only (every open user action is a held read action),
+    done_proposed, kind ("task" or "project"), duplicate, artifacts_ok.
     Returns {event, row, ack, clear_invalid[, pause]}: row is the table row (0 for no change), ack the values to copy
     into note_seen once handled (an invalid change acks nothing; a status change leaves an artifact change for later)."""
     hold = ctx.get("hold")
@@ -2455,6 +3380,9 @@ def user_transition(seen, cur, ctx):
         return result("invalid", 19, seen)
     if pair[0] == "archived":
         return result("cancel", 17, ack) if task else result("close", 18, ack)
+    if task and not ctx.get("live") and pair in NOTE_AGENT_RESUME:
+        # A stub has no worker or hold to resume: handing it to the agent is a follow-up whatever it showed before.
+        return result("follow_up", 16, ack)
     found = None
     if hold == "pause":
         if pair in NOTE_AGENT_RESUME:
@@ -2463,7 +3391,7 @@ def user_transition(seen, cur, ctx):
             found = ("none", 9)
         elif task and pair[0] == "done":
             found = ("cancel", 15)
-        elif not task and pair == ("done", "user") and prev[0] in ("done", "in progress"):
+        elif not task and pair == ("done", "user") and prev[0] in ("done", "in progress", "pending"):
             found = ("confirm", 14)
     elif prev[0] == "in progress":
         if prev[1] == "agent" and pair in NOTE_USER_VALUES:
@@ -2472,8 +3400,12 @@ def user_transition(seen, cur, ctx):
             found = ("pause", 6 if ctx.get("active") else 7)
         elif prev[1] == "agent" and pair == ("backlog", "agent"):
             found = ("restore", 12)
+        elif prev[1] == "user" and pair == ("in progress", "agent") and not task and ctx.get("done_proposed"):
+            return result("reject_done", 24, ack)
         elif prev[1] == "user" and pair in NOTE_AGENT_RESUME:
             found = ("resume", 11)
+        elif task and pair == ("done", "user") and ctx.get("held_only"):
+            found = ("confirm", 13)
         elif task and pair[0] == "done":
             found = ("cancel", 15)
         elif not task and pair == ("done", "user"):
@@ -2557,7 +3489,7 @@ def journal_reflected(text, entry, rev):
     lines = text.split("\n")
     if any(_has_block(lines, block_id) for block_id in entry.get("new_ids", [])):
         return True
-    if re.search(rf"(?:chk=r{rev}|\bdone=\S+ r{rev})(?=[ \t])|\"r\":{rev}[,}}]", text):
+    if re.search(rf"\bdone=\S+ r{rev}(?=[ \t])|\"r\":{rev}[,}}]", text):
         return True
     after, before = _pair(entry.get("after")), _pair(entry.get("before"))
     return after != before and _pair(note_values(text)) == after
@@ -2565,14 +3497,18 @@ def journal_reflected(text, entry, rev):
 
 def number_note_ops(ops, next_ua, art_last):
     """Fill the user action ids and artifact numbers the supervisor left out (3.5 step 3). ops is {uid: [op, ...]},
-    next_ua the first free UA number, art_last {uid: highest artifact number used}. Returns new ops."""
+    next_ua the first free action number (UA- for user actions, AA- for requests to the agent), art_last {uid: highest artifact number used}. Returns new ops."""
     out = {}
     for uid in sorted(ops):
         last = art_last.get(uid, 0)
         filled = []
         for op in copy.deepcopy(ops[uid]):
-            if op.get("op") == "ua_add" and not (op.get("ua") or {}).get("id"):
-                op.setdefault("ua", {})["id"] = f"UA-{next_ua:04d}"
+            if op.get("op") in ("st_add", "st_adopt") and not (op.get("st") or {}).get("id"):
+                op.setdefault("st", {})["id"] = f"ST-{next_ua:04d}"
+                next_ua += 1
+            if op.get("op") in ("ua_add", "ua_adopt") and not (op.get("ua") or {}).get("id"):
+                req = op["op"] == "ua_adopt" or (op.get("ua") or {}).get("kind") == "req"
+                op.setdefault("ua", {})["id"] = f"{'AA' if req else 'UA'}-{next_ua:04d}"
                 next_ua += 1
             if op.get("op") in ("art_add", "art_replace_group"):
                 for item in op.get("items") or []:
@@ -2599,7 +3535,7 @@ MIGRATE_UA_RULES = (
     (re.compile(r"^Session \S+ was started by the P-\d+ project manager"), "auto", "foreign_session_gone"),
     (re.compile(r"^Tell w-\d+ in the app"), "ask", None),
 )
-V2_RUNTIME_KEYS = ("uid", "note", "note_seen", "user_hold", "confirmed", "held", "last_artifact_number", "art_from",
+V2_RUNTIME_KEYS = ("uid", "note", "note_seen", "user_hold", "confirmed", "held", "kept", "last_artifact_number", "art_from",
                    "artifacts_quarantine", "done_proposed")
 
 
@@ -2771,6 +3707,7 @@ def export_v1(state, notes):
             item.pop(key, None)
         if "user_actions" in item:
             item["user_actions"] = [{k: v for k, v in ua.items() if k not in ("detector", "needs_answer")} for ua in item["user_actions"]]
+        item.pop("agent_actions", None)
         if not item.get("followups"):
             item.pop("followups", None)
     return view
@@ -2874,6 +3811,12 @@ def parse_project_report(text, expect_project=None):
             return {"ok": False, "error": "each plan needs kind redo or new"}
         if not _fields_ok(plan, keys) or not isinstance(plan.get("worker_id", ""), str):
             return {"ok": False, "error": f"a {kind} plan needs non-empty {' and '.join(keys)} (worker_id, when given, a string)"}
+    if not isinstance(report.get("knowledge", []), list):
+        return {"ok": False, "error": "knowledge, when given, must be a list"}
+    for item in report.get("knowledge", []):
+        error = _knowledge_errors(item)
+        if error:
+            return {"ok": False, "error": error}
     if "done" in report and not (isinstance(report["done"], str) and report["done"].strip()):
         return {"ok": False, "error": "done, when given, must be a non-empty summary string"}
     if expect_project is not None and report["project_id"] != expect_project:
@@ -2953,6 +3896,9 @@ def plan_actions(state, project_id, report, running=(), proposal_titles=()):
         else:
             actions.append(dict(action, kind="redo_ambiguous" if live else "redo_start",
                                 worker_ids=[w["id"] for w in live]))
+    if project.get("uid"):
+        actions += [{"kind": "knowledge", "uid": project["uid"], "key": k["key"], "text": k["text"].strip()}
+                    for k in report.get("knowledge", [])]
     if report.get("done"):
         actions.append({"kind": "project_done", "summary": report["done"]})
     return actions
@@ -2963,13 +3909,28 @@ def _parent_uids(value):
     return set(re.findall(r"\d{8}_\d{6}", json.dumps(value)))
 
 
+def parent_project_id(state, parent):
+    """P-id of the open project whose note the parent property links ([[uid]], [[path|alias]], a path, or a list of
+    those), or None. sv-project.md writes [[<path without .md>|<title>]]."""
+    names = set()
+    for value in parent if isinstance(parent, list) else [parent]:
+        if isinstance(value, str):
+            for target in re.findall(r"\[\[([^\]|#]+)", value) or [value]:
+                name = target.strip().rsplit("/", 1)[-1]
+                names.add(name[:-3] if name.endswith(".md") else name)
+    for p in state.get("projects", []):
+        note = (p.get("note") or "").rsplit("/", 1)[-1]
+        if not p.get("close") and names & {p.get("uid"), note[:-3] if note.endswith(".md") else note} - {None, ""}:
+            return p["id"]
+    return None
+
+
 def proposal_titles(texts, project_uid):
     """Titles of the backlog/user task notes whose parent is the project note: proposals waiting for the user."""
     titles = set()
     for text in texts.values():
         props = parse_frontmatter(text)[0]
-        tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]
-        if ("task" in tags and (props.get("status"), props.get("assignee")) == ("backlog", "user")
+        if (note_kind(props) == "task" and (props.get("status"), props.get("assignee")) == ("backlog", "user")
                 and project_uid in _parent_uids(props.get("parent")) and isinstance(props.get("title"), str)):
             titles.add(props["title"])
     return titles
@@ -3032,12 +3993,13 @@ def waits(state, now, hub_minutes=HUB_WAIT_MINUTES, review_minutes=REVIEW_WAIT_M
         base = {"worker_id": w["id"], "task_id": task["id"], "project_id": task["project_id"]}
         report = w.get("last_report") or {}
         if (report.get("status") == "awaiting_manager" and w.get("observed_state") in ("idle", "needs_input")
-                and not any(d.startswith(HUB_WAIT_PREFIX.format(wid=w["id"])) for d in descs)):
+                and not any(d.startswith(p.format(wid=w["id"])) for p in HUB_WAIT_PREFIXES for d in descs)):
             since = _parse_time(w.get("awaiting_since"))
             if since and (now_t - since).total_seconds() > hub_minutes * 60:
                 found.append(dict(base, kind="hub", since=w["awaiting_since"]))
         review = w.get("review") or {}
-        if review.get("state") == "requested" and not any(d.startswith(REVIEW_WAIT_PREFIX.format(wid=w["id"])) for d in descs):
+        if review.get("state") == "requested" and not any(
+                d.startswith(p.format(wid=w["id"])) for p in REVIEW_WAIT_PREFIXES for d in descs):
             since = _parse_time(review.get("at"))
             if since and (now_t - since).total_seconds() > review_minutes * 60:
                 found.append(dict(base, kind="review", review_id=review["id"], since=review["at"]))
@@ -3054,8 +4016,8 @@ def _row_is(row, flag):
 
 
 def manager_reconcile(manager, rows, events=None):
-    """Decisions for one manager session from list rows (include_archived) and an optional summary of its latest events.
-    rows: objects with sessionId (or session_id / id), startedBy, and running / archived flags.
+    """Decisions for one manager session from rows (manager_rows_from_hc) and an optional summary of its latest message.
+    rows: objects with session_id, started_by, and running / archived flags.
     events: {"last_message_ref": str | null, "pending_approval": bool}; without it, handle_turn and pending_approval are not judged."""
     sid = manager.get("session_id")
     previous = set(manager.get("previous_session_ids", []))
@@ -3152,28 +4114,56 @@ def cmd_commit(args):
 
 
 VAULT_DIR = "vault"
-VAULT_SKIP = ("_templates",)
 DASHBOARD_NOTE = "Supervisor.md"
+TEMPLATES_DIR = "_templates"
+
+
+def vault_locations(supervisor_dir):
+    """(vault, dashboard, templates) from `## Locations`: the vault's absolute path, and the dashboard note and the
+    template folder relative to it. Without `vault` the vault is <dir>/vault."""
+    sup = os.path.abspath(supervisor_dir)
+    claude_md = os.path.join(sup, "CLAUDE.md")
+    text = Path(claude_md).read_text(encoding="utf-8") if os.path.exists(claude_md) else ""
+    values, errors = parse_locations(text)
+    if errors:
+        raise StateError(errors)
+    vault = os.path.join(sup, VAULT_DIR)
+    if "vault" in values:
+        vault = _real(values["vault"])
+        defaults = default_locations(sup)
+        for key in LOCATION_KEYS:
+            root = _real(values.get(key, defaults[key]))
+            if _cwds_overlap(vault, root):
+                raise StateError(f"vault {vault} and {key} {root} are nested")
+    return vault, values.get("dashboard", DASHBOARD_NOTE), values.get("templates", TEMPLATES_DIR)
 
 
 def _vault_path(state_path):
-    return os.path.join(os.path.dirname(os.path.abspath(state_path)), VAULT_DIR)
+    return vault_locations(os.path.dirname(os.path.abspath(state_path)))[0]
+
+
+def _vault_index(state_path):
+    """(vault, texts, uids) of the vault configured for this supervisor directory."""
+    vault, dashboard, templates = vault_locations(os.path.dirname(os.path.abspath(state_path)))
+    return (vault, *_index_vault(vault, dashboard, templates))
 
 
 def _new_note_path(uid):
     return f"{uid[:4]}/{uid[4:6]}/{uid}.md"
 
 
-def _index_vault(vault):
-    """({relpath: text}, {uid: [relpath, ...]}) of the vault's notes, without _templates/, hidden folders and Supervisor.md."""
+def _index_vault(vault, dashboard=DASHBOARD_NOTE, templates=TEMPLATES_DIR):
+    """({relpath: text}, {uid: [relpath, ...]}) of the vault's notes, without the template folder, hidden folders and
+    the dashboard note."""
     texts, uids = {}, {}
     if not os.path.isdir(vault):
         return texts, uids
     for root, dirs, files in os.walk(vault):
-        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and not (root == vault and d in VAULT_SKIP))
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".")
+                         and Path(os.path.relpath(os.path.join(root, d), vault)).as_posix() != templates)
         for name in sorted(files):
             rel = Path(os.path.relpath(os.path.join(root, name), vault)).as_posix()
-            if not name.endswith(".md") or rel == DASHBOARD_NOTE:
+            if not name.endswith(".md") or rel == dashboard:
                 continue
             try:
                 text = Path(root, name).read_text(encoding="utf-8")
@@ -3201,7 +4191,7 @@ def _load_view(state_path):
     if not isinstance(state, dict) or state.get("schema_version") != SCHEMA_VERSION:
         return state
     try:
-        texts, uids = _index_vault(_vault_path(state_path))
+        _, texts, uids = _vault_index(state_path)
     except OSError:
         texts, uids = {}, {}
     return join_view(state, _notes_by_uid(texts, uids))
@@ -3275,24 +4265,102 @@ def _numbered_ops(raw_ops, candidate, base, view_cur):
     return number_note_ops(raw_ops, next_ua, art_last)
 
 
-def _date_props(status, now):
-    if status == "done":
-        return {"completed_at": now[:10]}
-    if status == "archived":
-        return {"archived_at": f"{now[:10]} {now[11:19]}"}
-    return {}
+def _fill_parent_titles(ops, notes):
+    """Give each create op with a parent the parent note's title (parent_title), from a create op of the same commit or
+    the note in the vault, so the new note's parent link shows the project's name. The ops are journaled with it."""
+    titles = {uid: o.get("title") for uid, items in ops.items() for o in items if o.get("op") == "create"}
+    for items in ops.values():
+        for op in items:
+            if op.get("op") == "create" and op.get("parent") and not op.get("parent_title"):
+                title = titles.get(op["parent"]) or parse_frontmatter(notes.get(op["parent"]) or "")[0].get("title")
+                if isinstance(title, str) and title.strip():
+                    op["parent_title"] = title.strip()
+
+
+NOTE_PROPS_HEADING = "## Note props"
+# Properties the supervisor may set when a note reaches done / archived; the ones it owns or the user delegates with
+# (status, assignee, tags, ids, links) are not among them.
+NOTE_PROP_KEYS = ("para", "aliases", "archived_at", "start_date", "due_date", "pending_until", "completed_at")
+NOTE_PROP_RESET = {"para": "Project", "aliases": []}
+NOW_TOKENS = (("YYYY", "%Y"), ("MM", "%m"), ("DD", "%d"), ("HH", "%H"), ("mm", "%M"), ("ss", "%S"))
+DEFAULT_NOTE_PROPS = {"done": {"completed_at": "{now}"}, "archived": {"archived_at": "{now}"}, "now_format": "YYYY-MM-DD HH:mm:ss"}
+
+
+def parse_note_props(text):
+    """Parse `## Note props` of CLAUDE.md: `- done: k=v, ...`, `- archived: k=v, ...`, `- now_format: <format>`.
+    Returns (props, errors); a missing line keeps its default. `{now}` is the time in now_format; `k=` writes null."""
+    lines = _strip_ignored(text.splitlines())
+    heads = _section_heads(lines, NOTE_PROPS_HEADING)
+    props = {key: (dict(value) if isinstance(value, dict) else value) for key, value in DEFAULT_NOTE_PROPS.items()}
+    if not heads:
+        return props, []
+    if len(heads) > 1:
+        return props, [f"CLAUDE.md:{i + 1}: duplicate '{NOTE_PROPS_HEADING}' heading" for i in heads[1:]]
+    errors, seen = [], set()
+    for i in range(heads[0] + 1, _section_end(lines, heads[0])):
+        m = re.match(r"^- ([A-Za-z_]+):(.*)$", lines[i].rstrip())
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2).strip()
+        where = f"CLAUDE.md:{i + 1}"
+        if key not in DEFAULT_NOTE_PROPS:
+            errors.append(f"{where}: unknown key {key!r} (use {list(DEFAULT_NOTE_PROPS)})")
+        elif key in seen:
+            errors.append(f"{where}: duplicate key {key!r}")
+        elif key == "now_format":
+            if not any(token in value for token, _ in NOW_TOKENS) or "%" in value:
+                errors.append(f"{where}: now_format must use YYYY, MM, DD, HH, mm, ss, got {value!r}")
+            else:
+                props[key] = value
+        else:
+            pairs = {}
+            for part in filter(None, (p.strip() for p in value.split(","))):
+                name, eq, val = part.partition("=")
+                name, val = name.strip(), val.strip()
+                if not eq or name not in NOTE_PROP_KEYS or name in pairs:
+                    errors.append(f"{where}: {part!r} must be <key>=<value> once per key, with a key in {list(NOTE_PROP_KEYS)}")
+                else:
+                    pairs[name] = val or None
+            props[key] = pairs
+        seen.add(key)
+    return props, errors
+
+
+def _note_props_for(state_path):
+    claude_md = os.path.join(os.path.dirname(os.path.abspath(state_path)), "CLAUDE.md")
+    props, errors = parse_note_props(Path(claude_md).read_text(encoding="utf-8") if os.path.exists(claude_md) else "")
+    if errors:
+        raise StateError(errors)
+    return props
+
+
+def _format_now(now, fmt):
+    for token, code in NOW_TOKENS:
+        fmt = fmt.replace(token, code)
+    return datetime.fromisoformat(now).strftime(fmt)
+
+
+def _date_props(status, now, conf=DEFAULT_NOTE_PROPS):
+    """The properties a note gets when it reaches done / archived (`## Note props`)."""
+    return {k: (_format_now(now, conf["now_format"]) if v == "{now}" else v) for k, v in conf.get(status, {}).items()}
+
+
+def _reset_props(props, conf):
+    """Back to the values of a new note for every property `## Note props` sets, when a note leaves done / archived."""
+    keys = set(conf.get("done", {})) | set(conf.get("archived", {}))
+    return {k: NOTE_PROP_RESET.get(k) for k in sorted(keys) if props.get(k) not in (None, "", NOTE_PROP_RESET.get(k))}
 
 
 def _commit_v2(args, current):
     now = _now()
-    vault = _vault_path(args.state)
+    note_conf = _note_props_for(args.state)
+    vault, texts, uids = _vault_index(args.state)
     candidate = _read_json(args.candidate)
     if not isinstance(candidate, dict):
         raise StateError("candidate must be a JSON object")
     raw_ops = _ops_arg(args.notes)
     rev = current["rev"] + 1
     warnings = []
-    texts, uids = _index_vault(vault)
     # 1. Re-apply the last commit's note writes that did not happen.
     carried = _replay_journal(current, vault, texts, uids, warnings)
     pending = {e["uid"]: e for e in carried}
@@ -3334,6 +4402,7 @@ def _commit_v2(args, current):
     # 3. Apply the ops in memory.
     view_cur = join_view(current, notes)
     ops = _numbered_ops(raw_ops, candidate, base, view_cur)
+    _fill_parent_titles(ops, notes)
     after, new_ids, problems = dict(base), {}, []
     for uid, items in ops.items():
         after[uid], new_ids[uid], probs = apply_note_ops(base.get(uid) or "", items, now, rev)
@@ -3366,10 +4435,13 @@ def _commit_v2(args, current):
         changes = {}
         if derived[0] != cur_pair[0]:
             changes["status"] = derived[0]
-            if derived[0] not in ("done", "archived") and parse_frontmatter(after[uid])[0].get("completed_at"):
-                changes["completed_at"] = None
-        # The date is set when the note reaches done / archived, also when the user moved it there first.
-        changes.update({k: v for k, v in _date_props(derived[0], now).items() if not parse_frontmatter(after[uid])[0].get(k)})
+            if derived[0] not in ("done", "archived"):
+                changes.update(_reset_props(parse_frontmatter(after[uid])[0], note_conf))
+        # A time is set when the note reaches done / archived, also when the user moved it there first; a fixed value
+        # (e.g. para) is always written.
+        fm = parse_frontmatter(after[uid])[0]
+        changes.update({k: v for k, v in _date_props(derived[0], now, note_conf).items()
+                        if fm.get(k) != v and not (note_conf[derived[0]].get(k) == "{now}" and fm.get(k))})
         if derived[1] and derived[1] != cur_pair[1]:
             changes["assignee"] = derived[1]
         if changes:
@@ -3378,7 +4450,10 @@ def _commit_v2(args, current):
                 props[uid] = changes
             except StateError as e:
                 problems.append(f"{paths[uid]}: props not written ({e})")
+    task_uids = {t.get("uid") for key in ("tasks", "archived") for t in view_new.get(key, [])}
     for uid, ids in id_props(view_new).items():
+        if uid in task_uids and after.get(uid):
+            ids = dict(ids, subtasks=subtask_progress(after[uid]))
         changes = _id_changes(after[uid], ids) if after.get(uid) else {}
         if changes:
             try:
@@ -3389,6 +4464,14 @@ def _commit_v2(args, current):
 
     # 6. Storage form, the ops commit itself adds, note_seen and the journal.
     state_new, ops_all = split_view(view_cand, view_new, ops)
+    # The completion ask points the user at 完了報告, so the commit that adds it must write the grounds.
+    task_ids = {t.get("uid"): t["id"] for t in view_new["tasks"]}
+    unreported = [task_ids.get(uid, uid) for uid, items in ops_all.items()
+                  if any(o.get("op") == "ua_add" and o["ua"].get("detector") == "task_done" for o in items[len(ops.get(uid, [])):])
+                  and not any(o.get("op") == "report_set" for o in ops.get(uid, []))]
+    if unreported:
+        raise StateError(f"the work of {', '.join(sorted(unreported))} is finished: add report_set {{text}} with the grounds "
+                         "for completion to the ops of its note (SKILL.md section 4, Completion report)")
     for uid, items in ops_all.items():
         extra = items[len(ops.get(uid, [])):]
         if extra and after.get(uid):
@@ -3472,6 +4555,11 @@ def cmd_parse_report(args):
     return 0 if result["ok"] else 1
 
 
+def cmd_serial_check(args):
+    print(json.dumps(serial_status(_load_view(args.state), args.task, args.cwd), ensure_ascii=False))
+    return 0
+
+
 def cmd_check_cwd(args):
     print("busy" if cwd_busy(_load_view(args.state), _real(args.cwd)) else "free")
     return 0
@@ -3491,11 +4579,11 @@ This directory belongs to the session-supervisor skill. It is not a project.
 
 - Use the session-supervisor skill first, and read the state with `python3 .supervisor/state_tool.py digest --state state.json`.
 - Write `state.json` only through `python3 .supervisor/state_tool.py commit`.
-- `supervisor.archive_consent` in `state.json` is the user's explicit consent that archiving requires. It covers only worker sessions whose `startedBy` is in `supervisor.session_ids`.
-- Never delete sessions.
+- `supervisor.archive_consent` in `state.json` is the user's explicit consent that archiving requires. It covers only workers and managers with `runtime: "herdr"` in `state.json`.
+- The supervisor runs in the Herdr terminal `sv`, with `sv-watch` (`state_tool.py watch-vault`) beside it. It starts sessions only by running the argv of `state_tool.py launch-plan`, and never deletes branches.
 - The supervisor only operates sessions, changes state through commit, and talks to the user. Workers edit, commit, push, and open PRs; observer subagents run read-only checks and investigations, write results under .supervisor/observations/, and return the path.
-- A PreToolUse hook (state_tool.py guard) blocks edits outside this directory and mutating git / jj / gh commands. The one allowed exception is `state_tool.py prepare-dir`, which writes only under the `## Locations` roots. To disable it, remove its entry from .claude/settings.json by hand; the supervisor asks before restoring a missing entry.
-- `vault/` is an Obsidian vault with one note per task and project: the note holds the meaning (title, `## 概要`, status, assignee, `## ユーザーアクション`, `## 成果物`). Only `python3 .supervisor/state_tool.py commit --notes <ops.json>` writes it (the guard blocks edits); read changes with `notes-scan` and a note with `note-show`. `vault/Supervisor.md` is the kanban dashboard: moving a card changes the note's status. Delegate a task by setting a note to `backlog` / `agent`.
+- A PreToolUse hook (state_tool.py guard) blocks edits outside this directory and mutating git / jj / gh commands. The allowed exceptions are `state_tool.py prepare-dir`, `prepare-worktree`, and `remove-worktree`, which write only under the `## Locations` roots. To disable it, remove its entry from .claude/settings.json by hand; the supervisor asks before restoring a missing entry.
+- The Obsidian vault (`vault` in `## Locations`, default `vault/`) has one note per task and project, tagged `supervised`: the note holds the meaning (title, `## 概要`, status, assignee, `## アクション`, `## 成果物`). Only `python3 .supervisor/state_tool.py commit --notes <ops.json>` writes it (the guard blocks edits); read changes with `notes-scan` and a note with `note-show`. The `dashboard` note (default `vault/Supervisor.md`) is the kanban: moving a card changes the note's status. Delegate a task by setting a note tagged `supervised` to `backlog` / `agent`.
 - `## Follow-ups` (optional) turns each newly verified PR into a user action such as "Review org/repo#42". Format: references/follow-ups-format.md in the session-supervisor skill. Check it with `python3 .supervisor/state_tool.py validate-follow-ups --claude-md CLAUDE.md`.
 
 <!-- Example: remove the comment markers to enable it.
@@ -3515,7 +4603,9 @@ def cmd_setup(args):
         raise StateError(f"{target} is inside a git repository; choose a directory outside any repository")
     claude_md = target / "CLAUDE.md"
     old_md = claude_md.read_text(encoding="utf-8") if claude_md.exists() else None
-    new_md = add_missing_locations(CLAUDE_MD if old_md is None else old_md, str(target))
+    shims = os.path.expanduser(MISE_SHIMS)
+    new_md = add_missing_herdr(add_missing_locations(CLAUDE_MD if old_md is None else old_md, str(target)),
+                               os.environ.get("PATH", ""), shims if os.path.isdir(shims) else None)
     settings_path = target / ".claude" / "settings.json"
     settings = _read_settings(settings_path, ("SessionStart", "PreToolUse"), "setup")
 
@@ -3545,7 +4635,9 @@ def cmd_setup(args):
         _write_atomic(str(state_path), serialize(empty_state(str(target))))
         report.append(("created", state_path))
 
-    report += _setup_vault(target / VAULT_DIR)
+    report += _setup_vault(target)
+    report += _setup_chat(target, script)
+    report.append(_setup_launcher(target))
 
     if old_md is None:
         claude_md.write_text(new_md, encoding="utf-8")
@@ -3561,15 +4653,16 @@ def cmd_setup(args):
     return 0
 
 
-def _kanban_base(name, assignee):
+KANBAN_ORDER = "[formula.title, summary, subtasks, task_id, project_id, created_at]"
+
+
+def _kanban_base(name, filters, templates, order=KANBAN_ORDER, sort=""):
+    in_templates = (f"""'!file.inFolder("{templates}")'""",) if templates else ()
+    lines = "".join(f"\n    - {f}" for f in in_templates + filters)
     return f"""```base
 filters:
   and:
-    - or:
-        - file.hasTag("task")
-        - file.hasTag("project")
-    - '!file.inFolder("_templates")'
-    - 'assignee == "{assignee}"'
+    - file.hasTag("supervised"){lines}
 formulas:
   title: link(file.name, title)
 views:
@@ -3578,43 +4671,109 @@ views:
     groupBy:
       property: status
       direction: ASC
-    order: [formula.title, task_id, project_id, created_at]
+    order: {order}{sort}
     groupOrder: [backlog, in progress, pending, done, archived]
     hideEmptyGroups: false
 ```
 """
 
 
-SUPERVISOR_NOTE = f"## ユーザーの番\n\n{_kanban_base('ユーザー', 'user')}\n## エージェントの番\n\n{_kanban_base('エージェント', 'agent')}"
-ART_SECTION_NOTE = ("<!-- state_tool が書く行です。表示テキストは直せますが、メタデータ(sv-art)のある行に書き足した文字は、"
-                    "成果物のグループを置き換えるときに行ごと消えます。 -->")
+_NOT_PROJECT = """'!file.hasTag("project")'"""
+_ASSIGNEE_IS = """'assignee == "{}"'"""
 
 
-def note_template(kind):
-    """A core Templates template for a task or project note: backlog / user, uid from the creation time."""
-    text = new_note_text("UIDX", "TITLEX", kind, "backlog", "user", "2000-01-01T00:00:00")
-    text = text.replace('"UIDX"', '"{{date:YYYYMMDD}}_{{time:HHmmss}}"').replace('"TITLEX"', '"{{title}}"')
-    text = text.replace("2000-01-01 00:00:00", "{{date:YYYY-MM-DD}} {{time:HH:mm:ss}}")
-    return text.replace(f"## {ART_SECTION}\n\n", f"## {ART_SECTION}\n\n{ART_SECTION_NOTE}\n\n")
+# The project note's own tasks on two kanbans by assignee, like the dashboard: `this` is the note that holds the
+# block, and a link equals the file it resolves to, so `parent == this` matches both `[[<uid>]]` (state_tool) and
+# `[[<path>|<title>]]` (sv-project.md). Cards of a column are sorted by the last change of the task note, newest first.
+PROJECT_TASKS_FILTER = "'parent == this'"
+PROJECT_TASKS_SORT = "\n    sort:\n      - property: file.mtime\n        direction: DESC"
+PROJECT_TASKS_SECTION = "## タスク\n\n" + "\n".join(
+    f"### {heading}\n\n" + _kanban_base(name, (_NOT_PROJECT, PROJECT_TASKS_FILTER, _ASSIGNEE_IS.format(who)), None,
+                                         "[formula.title, summary, task_id, subtasks]", PROJECT_TASKS_SORT)
+    for heading, name, who in (("ユーザーの番", "ユーザー", "user"), ("エージェントの番", "エージェント", "agent")))
 
 
-def _setup_vault(vault):
-    """Create the vault files that are missing; never overwrite one."""
-    files = (
-        (vault / DASHBOARD_NOTE, SUPERVISOR_NOTE),
-        (vault / "_templates" / "task.md", note_template("task")),
-        (vault / "_templates" / "project.md", note_template("project")),
-        (vault / ".obsidian" / "templates.json", json.dumps({"folder": "_templates"}) + "\n"),
-    )
+def supervisor_note(templates):
+    """Tasks on two kanbans by assignee, and projects, which stay in progress / agent until closed, on their own."""
+    user = _kanban_base("ユーザー", (_NOT_PROJECT, _ASSIGNEE_IS.format("user")), templates)
+    agent = _kanban_base("エージェント", (_NOT_PROJECT, _ASSIGNEE_IS.format("agent")), templates)
+    project = _kanban_base("プロジェクト", ('file.hasTag("project")',), templates,
+                           "[formula.title, summary, project_id, assignee, created_at]")
+    return f"## ユーザーの番\n\n{user}\n## エージェントの番\n\n{agent}\n## プロジェクト\n\n{project}"
+
+
+def legacy_supervisor_notes(templates):
+    """Dashboards that earlier setups generated, which setup may replace because the user never edited them."""
+    return tuple(f"## ユーザーの番\n\n{_kanban_base('ユーザー', (_ASSIGNEE_IS.format('user'),), templates, order)}\n"
+                 f"## エージェントの番\n\n{_kanban_base('エージェント', (_ASSIGNEE_IS.format('agent'),), templates, order)}"
+                 for order in (KANBAN_ORDER, "[formula.title, task_id, project_id, created_at]"))
+
+
+def _setup_vault(supervisor_dir):
+    """Create the dashboard note when it is missing; never overwrite it unless it is an unedited earlier version. Templates are built with the user (section 3),
+    except the Templater scripts sv-status.md and sv-project.md, which are placed in the template folder, and the CSS
+    snippet sv-kanban.css in .obsidian/snippets (created, exists or updated)."""
+    vault, dashboard, templates = vault_locations(supervisor_dir)
+    files = ((Path(vault) / dashboard, supervisor_note(templates)),)
     report = []
     for path, text in files:
-        if path.exists():
+        if path.exists() and path.read_text(encoding="utf-8") in legacy_supervisor_notes(templates):
+            _write_atomic(str(path), text)
+            report.append(("updated", path))
+        elif path.exists():
             report.append(("exists", path))
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
             _write_atomic(str(path), text)
             report.append(("created", path))
+    # The scripts are overwritten like .supervisor/state_tool.py, so sv-status's MOVES stay in step with user_transition.
+    # The kanban snippet goes only into a vault Obsidian has opened; setup never creates .obsidian.
+    copies = [(name, Path(vault) / templates / name) for name in ("sv-status.md", "sv-project.md")]
+    if (Path(vault) / ".obsidian").is_dir():
+        copies.append(("sv-kanban.css", Path(vault) / ".obsidian" / "snippets" / "sv-kanban.css"))
+    for name, dest in copies:
+        src = HERE.parent / "assets" / name
+        if not src.exists():
+            report.append(("skipped", dest))
+            continue
+        status = "exists" if dest.exists() and dest.read_bytes() == src.read_bytes() else ("updated" if dest.exists() else "created")
+        if status != "exists":
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dest)
+        report.append((status, dest))
+    # Note templates are the user's: setup only reports those whose notes would differ from the ones state_tool creates.
+    report += [("outdated", f"{path} ({'; '.join(errors)})") for path, errors in outdated_templates(Path(vault) / templates)]
     return report
+
+
+def _setup_chat(supervisor_dir, script):
+    """<dir>/chat, where the free-form session sv-chat runs: its guard (role chat) and its brief CLAUDE.md, which is
+    overwritten when it differs, like sv-status.md, so that it stays in step with the chat subcommands."""
+    chat = Path(supervisor_dir) / CHAT_DIR
+    settings_path = chat / ".claude" / "settings.json"
+    settings = _read_settings(settings_path, ("PreToolUse",), "setup")
+    wanted = (("PreToolUse", GUARD_MATCHER, guard_hook_command(script, chat, "chat")),)
+    report = [(_install_hooks(settings_path, settings, wanted, {"model": SUPERVISOR_MODEL}), settings_path)]
+    src, dest = HERE.parent / "assets" / "chat-CLAUDE.md", chat / "CLAUDE.md"
+    if not src.exists():
+        return report + [("skipped", dest)]
+    status = "exists" if dest.exists() and dest.read_bytes() == src.read_bytes() else ("updated" if dest.exists() else "created")
+    if status != "exists":
+        shutil.copyfile(src, dest)
+    return report + [(status, dest)]
+
+
+def _setup_launcher(supervisor_dir):
+    """<dir>/sv.sh, the user's script that starts, restarts, and stops sv, sv-watch, and sv-chat. It is overwritten
+    when it differs, like chat/CLAUDE.md, so that it keeps starting the sessions as this version expects."""
+    src, dest = HERE.parent / "assets" / "sv.sh", Path(supervisor_dir) / "sv.sh"
+    if not src.exists():
+        return ("skipped", dest)
+    status = "exists" if dest.exists() and dest.read_bytes() == src.read_bytes() else ("updated" if dest.exists() else "created")
+    if status != "exists":
+        shutil.copyfile(src, dest)
+    dest.chmod(0o755)
+    return (status, dest)
 
 
 def guard_hook_command(script, directory, role=None):
@@ -3751,7 +4910,7 @@ def _follow_ups_v2(args, state, state_path, candidate, rules, closed, manual):
         raise StateError("--notes is required with a schema_version 2 state")
     _check_candidate_path(args.notes, state_path)
     raw_ops = _ops_arg(args.notes) if os.path.exists(args.notes) else {}
-    texts, uids = _index_vault(_vault_path(state_path))
+    _, texts, uids = _vault_index(state_path)
     notes = _notes_by_uid(texts, uids)
     view_cur = join_view(state, notes)
     ops = _numbered_ops(raw_ops, candidate, notes, view_cur)
@@ -3799,8 +4958,9 @@ def _locations_for(claude_md):
             errors.append(f"{key} {root} is inside the supervisor directory; workers would inherit its CLAUDE.md")
     if _inside_git(roots["work_root"][0]):
         errors.append(f"work_root {roots['work_root'][0]} is inside a git repository")
-    if _cwds_overlap(roots["clone_root"][0], roots["work_root"][0]):
-        errors.append(f"clone_root {roots['clone_root'][0]} and work_root {roots['work_root'][0]} are nested")
+    for x, y in (("clone_root", "work_root"), ("clone_root", "worktree_root"), ("work_root", "worktree_root")):
+        if _cwds_overlap(roots[x][0], roots[y][0]):
+            errors.append(f"{x} {roots[x][0]} and {y} {roots[y][0]} are nested")
     if errors:
         raise StateError(errors)
     return roots, sup
@@ -3869,6 +5029,313 @@ def cmd_prepare_dir(args):
     return 0
 
 
+REPORT_TOOL = "--allowedTools=Bash(hc send sv:*)"
+
+
+def _session_cwd(worker):
+    """Where Claude runs: a git worker in its worktree, a non-git worker in its directory."""
+    return worker.get("worktree_path") if worker.get("kind") == "git" else worker.get("cwd")
+
+
+def _herdr_target(state, ident):
+    """(kind, session, cwd, label) for a worker id or a manager handle p-NNNN (m-p-NNNN before 0.66.0)."""
+    for w in state.get("workers", []):
+        if w.get("id") == ident:
+            return "worker", w, _session_cwd(w), f"task={w.get('task_id')}"
+    for p in _projects(state):
+        if manager_handle(p) == ident:
+            return "manager", p.get("manager") or {}, p.get("dir"), f"project={p.get('id')}"
+    raise StateError(f"{ident} is neither a worker id nor a manager handle (p-NNNN)")
+
+
+def launch_argv(state, ident, prompt, herdr, parent=None):
+    """The `hc run` argv that starts the herdr worker or manager `ident`. herdr: parsed `## Herdr` values. parent: the
+    terminal address to start it under instead of `sv` (a project worker under its manager, `project_worker_parent`)."""
+    kind, session, cwd, label = _herdr_target(state, ident)
+    if session.get("runtime") != "herdr" or session.get("handle") != ident:
+        raise StateError(f"{ident} must have runtime 'herdr' and handle {ident!r} in the state before launch")
+    sid = session.get("session_id")
+    if not (isinstance(sid, str) and UUID_RE.match(sid)):
+        raise StateError(f"{ident} has no uuid session_id: set a uuid4 in the candidate and commit it before launch")
+    if not cwd or not os.path.isabs(cwd):
+        where = "worktree_path (run prepare-worktree first)" if session.get("kind") == "git" else "cwd"
+        raise StateError(f"{ident} has no absolute {where}")
+    if not prompt.strip():
+        raise StateError("the prompt is empty")
+    if kind == "worker":
+        limit = herdr.get("max_workers", DEFAULT_MAX_WORKERS)
+        kept = {wid for t in state.get("tasks", []) for wid in t.get("kept", [])}
+        running = [w["id"] for w in state.get("workers", [])
+                   if w.get("runtime") == "herdr" and w.get("id") != ident and w.get("intended_state") == "running"
+                   and w.get("observed_state") not in ("archived", "missing") and w.get("id") not in kept]
+        if len(running) >= limit:
+            raise StateError(f"max_workers {limit} reached ({', '.join(running)}); start {ident} after one finishes")
+        task_id = session.get("task_id")
+        if any(t.get("id") == task_id and t.get("after") for t in state.get("tasks", [])):
+            serial = serial_status(state, task_id)
+            if not serial["ready"]:
+                raise StateError(f"{task_id} runs after {serial['waiting_for']} (serial queue); start {ident} once "
+                                 f"{serial['waiting_for']} has finished its work")
+    argv = ["hc", "run", "--bg", "--json", "--name", ident, "--cwd", cwd, "--label", f"sv={kind}", "--label", label,
+            "--outlive-parent"]
+    if parent:
+        # Shown under its manager in Herdr; hc's own blocked / exit notes would go to the manager's input box, so they
+        # are off and sv-watch forwards those changes to sv (its parent is not sv).
+        argv += ["--parent", parent, "--no-notify"]
+    if herdr.get("worker_path"):
+        argv += ["env", f"PATH={herdr['worker_path']}"]
+    argv += ["claude", "--session-id", sid]
+    if session.get("model"):
+        argv += ["--model", session["model"]]
+    # The prompt goes last: a variadic option right before it would take it as a value.
+    argv += ["--permission-mode", "auto", "-n", session.get("title") or ident, REPORT_TOOL, prompt]
+    return argv
+
+
+def project_worker_parent(state, ident, runner):
+    """Address of the live manager terminal of the project of worker `ident`, or None (not a project worker, or the
+    manager is not live: the worker then starts under `sv`)."""
+    worker = next((w for w in state.get("workers", []) if w.get("id") == ident), None)
+    task = next((t for t in state.get("tasks", []) if worker and t.get("id") == worker.get("task_id")), None)
+    if not (task and task.get("project_id")):
+        return None
+    try:
+        project = next((p for p in _projects(state) if p.get("id") == task["project_id"]), {"id": task["project_id"]})
+        got = _hc_json(runner, ["hc", "get", manager_handle(project), "--json"])
+    except (StateError, OSError, ValueError):
+        return None
+    return got.get("address") if got.get("state") == "live" else None
+
+
+def cmd_launch_plan(args):
+    state = _read_json(args.state)
+    text = Path(args.claude_md).read_text(encoding="utf-8") if os.path.exists(args.claude_md) else ""
+    herdr, errors = parse_herdr(text)
+    if errors:
+        raise StateError(errors)
+    prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+    argv = launch_argv(state, args.worker, prompt, herdr, project_worker_parent(state, args.worker, _run_hc))
+    if args.run:
+        # Run here so the prompt never becomes Bash text, which the guard would scan for blocked commands.
+        return subprocess.run(argv).returncode
+    print(json.dumps({"argv": argv}, ensure_ascii=False))
+    return 0
+
+
+def _herdr_sessions(state):
+    """(handle, session) of every herdr worker and manager in the state."""
+    out = [(w.get("handle"), w) for w in state.get("workers", []) if w.get("runtime") == "herdr"]
+    out += [(manager_handle(p), p.get("manager") or {}) for p in _projects(state)
+            if (p.get("manager") or {}).get("runtime") == "herdr"]
+    return out
+
+
+def observe_hc(state, terminals):
+    """Observed facts of each herdr worker and manager from `hc ls --all --json` terminals, matched by name."""
+    by_name = {t.get("name"): t for t in terminals if t.get("name")}
+    out = []
+    for handle, session in _herdr_sessions(state):
+        t = by_name.get(handle)
+        # `hc ls` gives status as a word; `hc get` gives {app, state, msg}.
+        status = (t or {}).get("status")
+        state_word = status.get("state") if isinstance(status, dict) else status
+        status = status if isinstance(status, dict) else {}
+        if t is None:
+            observed = "missing"
+        elif t.get("state") == "finished":
+            observed = "archived" if session.get("intended_state") == "archived" else "missing"
+        elif state_word == "working":
+            observed = "running"
+        elif state_word == "blocked":
+            observed = "needs_input"
+        else:
+            observed = "idle"
+        out.append({"id": handle, "address": (t or {}).get("address"), "observed_state": observed,
+                    "status_state": state_word, "turn": (t or {}).get("turn"),
+                    "blocked_msg": status.get("msg") if state_word == "blocked" else None,
+                    "exit_code": (t or {}).get("exit_code"), "reason": (t or {}).get("reason"),
+                    "parent": (t or {}).get("parent")})
+    return out
+
+
+def _hc_json(runner, argv):
+    proc = runner(argv)
+    if proc.returncode != 0:
+        raise StateError(f"{' '.join(argv)} exited with {proc.returncode}: {(proc.stderr or proc.stdout).strip()}")
+    return json.loads(proc.stdout)
+
+
+def _run_hc(argv):
+    return subprocess.run(argv, capture_output=True, text=True)
+
+
+def last_assistant_message(lines):
+    """{message_ref, text} of the last assistant message with text in a Claude Code transcript (jsonl lines), or None.
+    One message is stored as several entries sharing message.id; their text parts are joined in order."""
+    entries = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("type") == "assistant" and not entry.get("isSidechain"):
+            message = entry.get("message") or {}
+            texts = [c.get("text") for c in message.get("content") or []
+                     if isinstance(c, dict) and c.get("type") == "text" and c.get("text")]
+            entries.append((message.get("id"), entry.get("uuid"), texts))
+    with_text = [e for e in entries if e[2]]
+    if not with_text:
+        return None
+    message_id, ref, _ = with_text[-1]
+    parts = [t for mid, _, texts in with_text if mid == message_id for t in texts] if message_id else with_text[-1][2]
+    return {"message_ref": ref, "text": "\n".join(parts)}
+
+
+def transcript_dir_name(cwd):
+    """Claude Code's folder name for a working directory: every character outside [A-Za-z0-9] of the NFD form becomes '-'."""
+    return re.sub(r"[^A-Za-z0-9]", "-", unicodedata.normalize("NFD", cwd))
+
+
+def _transcript_path(cwd, session_id):
+    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    direct = root / transcript_dir_name(cwd) / f"{session_id}.jsonl"
+    if direct.is_file():
+        return direct
+    found = sorted(root.glob(f"*/{session_id}.jsonl"))
+    if not found:
+        raise StateError(f"no transcript {session_id}.jsonl under {root}; read the screen with hc read instead")
+    return found[0]
+
+
+def cmd_last_message(args):
+    state = _read_json(args.state)
+    _, session, cwd, _ = _herdr_target(state, args.id)
+    sid = session.get("session_id")
+    if session.get("runtime") != "herdr" or not (isinstance(sid, str) and UUID_RE.match(sid)):
+        raise StateError(f"{args.id} is not a herdr session with a uuid session_id")
+    path = _transcript_path(cwd or "", sid)
+    with open(path, encoding="utf-8") as f:
+        found = last_assistant_message(f)
+    if found is None:
+        raise StateError(f"{path} has no assistant message with text yet")
+    _write_atomic(args.out, found["text"])
+    print(json.dumps({"message_ref": found["message_ref"], "path": str(path)}, ensure_ascii=False))
+    return 0
+
+
+def manager_rows_from_hc(manager, handle, terminals, workers=()):
+    """manager-reconcile rows from `hc ls --all --json` terminals: the manager's own row (by terminal name) and a
+    row for each live terminal it started, so its agents show up as foreign sessions. workers: handles of the
+    supervisor's workers, which launch-plan starts under their manager and are not foreign."""
+    sid = manager.get("session_id")
+    rows = []
+    own = next((t for t in terminals if t.get("name") == handle), None)
+    if own is not None and sid is not None:
+        status = own.get("status")
+        word = status.get("state") if isinstance(status, dict) else status
+        rows.append({"session_id": sid, "running": word == "working", "archived": own.get("state") == "finished",
+                     "blocked": word == "blocked"})
+        rows += [{"session_id": t.get("name") or t.get("address"), "started_by": sid, "running": True}
+                 for t in terminals if t.get("parent") == own.get("address") and t.get("state") == "live"
+                 and t.get("name") not in workers]
+    return rows
+
+
+def cmd_observe_hc(args):
+    state = _read_json(args.state)
+    if args.from_file:
+        data = _read_json(args.from_file)
+    else:
+        data = _hc_json(_run_hc, ["hc", "ls", "--all", "--json"])
+    print(json.dumps(observe_hc(state, data.get("terminals", [])), ensure_ascii=False))
+    return 0
+
+
+WORKTREE_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,59}$")
+
+
+def _git_run(argv):
+    proc = subprocess.run(argv, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise StateError(f"{' '.join(argv)} exited with {proc.returncode}: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def cmd_prepare_worktree(args):
+    # Besides prepare-dir, the only write outside the supervisor directory: a worktree under worktree_root.
+    roots, sup = _locations_for(args.claude_md)
+    root = roots["worktree_root"][0]
+    repo = _git_output(["git", "-C", _real(args.repo), "rev-parse", "--show-toplevel"])
+    if repo is None:
+        raise StateError(f"--repo {args.repo} is not a git repository")
+    if _git_output(["git", "check-ref-format", "--branch", args.branch]) is None:
+        raise StateError(f"--branch {args.branch!r} is not a valid branch name")
+    slug = args.slug or args.branch.rsplit("/", 1)[-1]
+    if not WORKTREE_SLUG_RE.match(slug):
+        raise StateError(f"slug {slug!r} must be letters, digits, '.', '_' or '-', up to 60 characters")
+    dest = os.path.join(root, os.path.basename(repo), slug)
+    _check_dest(dest, root, sup)
+    common = _real(_git_run(["git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"]))
+    if os.path.exists(dest):
+        dest_common = _git_output(["git", "-C", dest, "rev-parse", "--path-format=absolute", "--git-common-dir"])
+        branch = _git_output(["git", "-C", dest, "symbolic-ref", "--short", "HEAD"])
+        if dest_common is None or _real(dest_common) != common or branch != args.branch:
+            raise StateError(f"{dest} exists and is not a worktree of {repo} on {args.branch}")
+        status = "exists"
+    else:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        _git_run(["git", "-C", repo, "worktree", "add", "-b", args.branch, dest, args.base])
+        status = "created"
+    head = _git_run(["git", "-C", dest, "rev-parse", "HEAD"])
+    trusted, untrusted = _mise_trust(dest)
+    print(json.dumps({"status": status, "path": dest, "repo": repo, "branch": args.branch, "base": args.base, "head": head,
+                      "mise_trusted": trusted, "mise_untrusted": untrusted}))
+    return 0
+
+
+# Config files at a worktree's root that mise refuses until trusted (its trust is per path, so every new worktree
+# needs it again, for example for a .mise.local.toml copied from the main clone by a post-checkout hook).
+MISE_CONFIG_NAMES = (".mise.local.toml", "mise.local.toml", ".mise.toml", "mise.toml", ".config/mise.toml",
+                     ".config/mise/config.toml", ".mise/config.toml")
+
+
+def _mise_trust(dest):
+    """Trust the mise config files at the worktree root only (not its parents). Returns (trusted, untrusted) paths."""
+    found = [os.path.join(dest, n) for n in MISE_CONFIG_NAMES if os.path.isfile(os.path.join(dest, n))]
+    mise = shutil.which("mise")
+    if not found or mise is None:
+        if found:
+            print("warning: mise is not on PATH; could not trust " + ", ".join(found), file=sys.stderr)
+        return [], found
+    trusted, untrusted = [], []
+    for path in found:
+        proc = subprocess.run([mise, "trust", "--quiet", path], capture_output=True, text=True)
+        if proc.returncode == 0:
+            trusted.append(path)
+        else:
+            untrusted.append(path)
+            print(f"warning: mise trust {path} exited with {proc.returncode}: {proc.stderr.strip()}", file=sys.stderr)
+    return trusted, untrusted
+
+
+def cmd_remove_worktree(args):
+    roots, _ = _locations_for(args.claude_md)
+    root = roots["worktree_root"][0]
+    path = _real(args.path)
+    if not _under(path, root) or path == root:
+        raise StateError(f"{path} is not under worktree_root {root}")
+    top = _git_output(["git", "-C", path, "rev-parse", "--show-toplevel"])
+    if top is None or _real(top) != path:
+        raise StateError(f"{path} is not the top of a git worktree")
+    if _git_run(["git", "-C", path, "status", "--porcelain"]):
+        raise StateError(f"{path} has uncommitted changes; leave it for the user")
+    branch = _git_output(["git", "-C", path, "symbolic-ref", "--short", "HEAD"])
+    common = _git_run(["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"])
+    _git_run(["git", "-C", os.path.dirname(common), "worktree", "remove", path])
+    print(json.dumps({"status": "removed", "path": path, "branch": branch}))
+    return 0
+
+
 def _prepare_project_dir(name, root, sup):
     if not PROJECT_NAME_RE.match(name):
         raise StateError(f"--project {name!r} must match P-<number>-<slug> (lowercase letters, digits and '-', up to 40 characters)")
@@ -3901,7 +5368,7 @@ def cmd_plan_actions(args):
         raise StateError(result["error"])
     view = _load_view(args.state)
     project_uid = (_project(view, args.project) or {}).get("uid")
-    titles = proposal_titles(_index_vault(_vault_path(args.state))[0], project_uid) if project_uid else ()
+    titles = proposal_titles(_vault_index(args.state)[1], project_uid) if project_uid else ()
     print(json.dumps(plan_actions(view, args.project, result["report"], args.running, titles), ensure_ascii=False))
     return 0
 
@@ -3917,11 +5384,12 @@ def cmd_waits(args):
 
 
 def cmd_manager_reconcile(args):
-    project = _project(_load_view(args.state), args.project)
-    rows = _read_json(args.rows)
-    if isinstance(rows, dict):
-        rows = rows.get("sessions", rows.get("rows", []))
-    events = _read_json(args.events) if args.events else None
+    view = _load_view(args.state)
+    project = _project(view, args.project)
+    data = _read_json(args.from_file) if args.from_file else _hc_json(_run_hc, ["hc", "ls", "--all", "--json"])
+    workers = {w.get("handle") for w in view.get("workers", []) if w.get("runtime") == "herdr"}
+    rows = manager_rows_from_hc(project["manager"], manager_handle(project), data.get("terminals", []), workers)
+    events = {"last_message_ref": args.last_message_ref, "pending_approval": any(r.get("blocked") for r in rows)}
     print(json.dumps(manager_reconcile(project["manager"], rows, events), ensure_ascii=False))
     return 0
 
@@ -3932,16 +5400,25 @@ def _require_v2(state, path):
 
 
 def _ua_summary(ua):
-    return {k: ua[k] for k in ("id", "kind", "detector", "answer_required", "checked", "done", "description", "answer", "rule", "url")}
+    return {k: ua[k] for k in ("id", "kind", "assignee", "detector", "answer_required", "done", "description", "body", "answer",
+                               "thread", "rule", "url")}
 
 
 def _scan_ctx(kind, item, view_item, workers, live, duplicate, items):
+    uas = (view_item or {}).get("user_actions") or []
+    # done/user confirms a task whose open items are only held results and the completion ask, or, with nothing open,
+    # whose workers are done (the user checked the last @user subtask): anything else open is cancelled (row 15).
+    rest = dict(view_item or {}, user_actions=[], subtasks=[])
+    settled = (kind == "task" and not any(not st["done"] for st in (view_item or {}).get("subtasks", []))
+               and (bool(uas) or derive_status(rest, {w["id"]: w for w in workers}) == "done"))
     if kind == "project":
         active = _occupies(item.get("manager") or {})
     else:
         active = any(_occupies(w) for w in workers if w.get("task_id") == item.get("id"))
     ctx = {"managed": True, "live": live, "kind": kind, "active": active, "duplicate": duplicate,
-           "hold": (item.get("user_hold") or {}).get("reason"), "open_ua": bool((view_item or {}).get("user_actions"))}
+           "hold": (item.get("user_hold") or {}).get("reason"), "open_ua": bool((view_item or {}).get("user_actions")),
+           "held_only": settled and all(_read_action_worker(ua) or ua.get("detector") == "task_done" for ua in uas),
+           "done_proposed": bool(item.get("done_proposed"))}
     needs = artifact_needs(view_item, workers, items) if live and kind == "task" and view_item else []
     return dict(ctx, artifacts_ok=not needs), needs
 
@@ -3991,6 +5468,8 @@ def notes_scan(state, texts, uids, vault=None):
                 continue
         event = dict(result, uid=uid, path=rels[0], id=item.get("id"), kind=kind, live=live, seen=seen, cur=cur,
                      user_actions=[_ua_summary(u) for u in parse_user_actions(body.get(UA_SECTION, ""))])
+        if kind == "task":
+            event["subtasks"] = parse_subtasks(body.get(ST_SECTION, ""))
         if needs:
             event["needs"] = needs
         if warning:
@@ -4000,12 +5479,8 @@ def notes_scan(state, texts, uids, vault=None):
     for rel, text in texts.items():
         props, body_text, _ = parse_frontmatter(text)
         uid = props.get("uid") if isinstance(props.get("uid"), str) and props.get("uid") else None
-        tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]
-        if "project" in tags:
-            kind = "project"
-        elif "task" in tags:
-            kind = "task"
-        else:
+        kind = note_kind(props)
+        if kind is None:
             continue
         if uid in managed:
             continue
@@ -4026,7 +5501,12 @@ def notes_scan(state, texts, uids, vault=None):
             event["warning_key"], event["warning_sha"] = uid or rel, sha
         sections = parse_sections(body_text)
         event.update(title=props.get("title"), request=sections.get("概要", "").strip(),
-                     parent=props.get("parent"), follows=props.get("follows"))
+                     lang=note_lang(sections.get("概要", "")),
+                     parent=props.get("parent"), project_id=parent_project_id(state, props.get("parent")),
+                     proposed_by=props.get("proposed_by"), follows=props.get("follows"),
+                     user_actions=[_ua_summary(u) for u in parse_user_actions(sections.get(UA_SECTION, ""))])
+        if kind == "task":
+            event["subtasks"] = parse_subtasks(sections.get(ST_SECTION, ""))
         if uid is None and vault:
             event["proposed_uid"] = _proposed_uid(os.path.join(vault, rel), taken)
             taken.add(event["proposed_uid"])
@@ -4034,7 +5514,7 @@ def notes_scan(state, texts, uids, vault=None):
     return {"events": events, "warnings": warnings}
 
 
-FORMER_MARK_RE = re.compile(r"\^(?:ua-\d+|sv-log-[\w-]+|sv-art-\d+)[ \t]*$|<!--[ \t]*sv-art ", re.M)
+FORMER_MARK_RE = re.compile(r"\^(?:sv-log-[\w-]+|sv-art-\d+)[ \t]*$|<!--[ \t]*sv(?:-art)? ", re.M)
 
 
 def _former_note(props, body):
@@ -4044,32 +5524,219 @@ def _former_note(props, body):
 
 def _former_follow_up(uid, rel, kind, props, body, cur):
     """done/archived or anything but backlog/agent: no event. backlog/agent: a follow-up (#16) without a stub, carrying
-    the open slot's text and the highest artifact number, so the new T-id keeps the uid and starts its own rows."""
+    the actions (unnumbered `### @agent` requests have id None) and the highest artifact number, so the new T-id keeps
+    the uid and starts its own rows."""
     if _pair(cur) != ("backlog", "agent"):
         return None
     sections = parse_sections(body)
     uas = parse_user_actions(sections.get(UA_SECTION, ""))
-    slots = [u for u in uas if u["kind"] == "slot" and not u["done"]]
     rows = parse_artifacts(sections.get(ART_SECTION, ""))[0]
     return {"event": "follow_up", "row": 16, "ack": cur, "clear_invalid": False, "uid": uid, "path": rel, "kind": kind,
-            "live": False, "former": True, "cur": cur, "title": props.get("title"), "request": sections.get("概要", "").strip(),
-            "slot": slots[-1]["id"] if slots else None, "follow_up_text": slots[-1]["answer"] if slots else "",
-            "last_artifact_number": max([r["n"] for r in rows] + [0]),
-            "user_actions": [_ua_summary(u) for u in uas]}
+            "live": False, "former": True, "cur": cur, "title": props.get("title"),
+            "request": _request_text(sections.get("概要")), "last_artifact_number": max([r["n"] for r in rows] + [0]),
+            "user_actions": [_ua_summary(u) for u in uas], "subtasks": parse_subtasks(sections.get(ST_SECTION, ""))}
 
 
 def cmd_notes_scan(args):
     state = _read_json(args.state)
     _require_v2(state, args.state)
-    vault = _vault_path(args.state)
-    texts, uids = _index_vault(vault)
+    vault, texts, uids = _vault_index(args.state)
     print(json.dumps(notes_scan(state, texts, uids, vault), ensure_ascii=False))
     return 0
 
 
+def _notes_signature(scan):
+    return sorted(json.dumps([e.get("uid"), e.get("event"), e.get("ack")], sort_keys=True) for e in scan.get("events", []))
+
+
+def watch_messages(scan, terminals, notify_address, memo):
+    """Messages for the supervisor from one watch tick. memo carries what was already sent between ticks.
+
+    Notes: one message when the scan's events changed and are not empty. Sessions: one message per newly blocked or
+    finished herdr terminal whose parent is not the current supervisor terminal (hc tells its own children's parent).
+    """
+    messages = []
+    sig = _notes_signature(scan)
+    if sig and sig != memo.get("notes"):
+        uids = sorted({e.get("uid") for e in scan.get("events", []) if e.get("uid")})
+        messages.append("notes: " + " ".join(uids))
+    memo["notes"] = sig
+    forwarded = memo.setdefault("sessions", {})
+    for t in terminals:
+        name = t.get("name") or ""
+        if not re.match(r"^(w-\d+|(?:m-)?p-\d+)$", name):
+            continue
+        status = t.get("status")
+        word = status.get("state") if isinstance(status, dict) else status
+        change = "finished" if t.get("state") == "finished" else ("blocked" if word == "blocked" else None)
+        key = f"{t.get('address')}:{change}"
+        if change is None:
+            forwarded.pop(name, None)
+            continue
+        if forwarded.get(name) == key:
+            continue
+        forwarded[name] = key
+        if t.get("parent") != notify_address:
+            messages.append(f"worker: {name} {change} (hc read {t.get('address')})")
+    return messages
+
+
+def tab_renames(state, spaces):
+    """(tab id, new name) for each Herdr tab that is still named after the herdr worker or manager in it, as Herdr names
+    the tab when the user gives that terminal a pane: `w-NNNN <task title>` / `p-NNNN <project name>`. A tab the user
+    named otherwise is left alone. spaces: `herdr-app ls` spaces."""
+    purpose = {w.get("handle"): w.get("title") for w in state.get("workers", []) if w.get("runtime") == "herdr"}
+    # A v2 state keeps the project name only in the manager's title `P-NNNN <name>` (the note holds the name).
+    purpose.update({manager_handle(p): re.sub(r"^P-\d+\s+", "", p["manager"].get("title") or "")
+                    for p in _projects(state) if (p.get("manager") or {}).get("runtime") == "herdr"})
+    out = []
+    for space in spaces:
+        for tab in space.get("tabs", []):
+            name = tab.get("name")
+            if purpose.get(name) and any(t.get("name") == name for t in tab.get("terminals", [])):
+                out.append((tab.get("id"), f"{name} {purpose[name]}"))
+    return out
+
+
+def rename_tabs(state, runner):
+    """Rename the Herdr tabs of `tab_renames`. Without a Herdr window (`herdr-app ls` fails) there is nothing to do."""
+    try:
+        spaces = _hc_json(runner, ["herdr-app", "ls"]).get("spaces", [])
+    except (StateError, OSError, ValueError):
+        return []
+    renames = tab_renames(state, spaces)
+    for tab_id, name in renames:
+        argv = ["herdr-app", "do", "tab.rename", json.dumps({"id": tab_id, "name": name}, ensure_ascii=False)]
+        proc = runner(argv)
+        if proc.returncode != 0:
+            raise StateError(f"{' '.join(argv)} exited with {proc.returncode}: {(proc.stderr or proc.stdout).strip()}")
+    return renames
+
+
+def watch_tick(state_path, notify, runner, memo):
+    """One tick of watch-vault: scan notes, read hc, send the messages, name the Herdr tabs of kept sessions. Writes
+    nothing of the supervisor. Returns the messages sent."""
+    state = _read_json(state_path)
+    _require_v2(state, state_path)
+    vault, texts, uids = _vault_index(state_path)
+    scan = notes_scan(state, texts, uids, vault)
+    terminals = _hc_json(runner, ["hc", "ls", "--all", "--json"]).get("terminals", [])
+    target = _hc_json(runner, ["hc", "get", notify, "--json"]).get("address")
+    messages = watch_messages(scan, terminals, target, memo)
+    for text in messages:
+        _hc_json(runner, ["hc", "send", notify, text])
+    rename_tabs(state, runner)
+    return messages
+
+
+def cmd_watch_vault(args, runner=None, sleep=time.sleep):
+    runner = runner or _run_hc
+    memo = {}
+    while True:
+        try:
+            watch_tick(args.state, args.notify, runner, memo)
+        except (StateError, OSError, ValueError) as e:
+            print(f"warning: {e}", file=sys.stderr)
+        if args.once:
+            return 0
+        sleep(args.interval)
+
+
+def _chat_dir(state_path):
+    return Path(os.path.dirname(os.path.abspath(state_path))) / CHAT_INBOX
+
+
+def _chat_text(args):
+    text = Path(args.text_file).read_text(encoding="utf-8") if args.text_file else args.text
+    if not text or not text.strip():
+        raise StateError("the text is empty")
+    return text
+
+
+def _chat_path(state_path, chat_id):
+    if not CHAT_ID_RE.match(chat_id or ""):
+        raise StateError(f"{chat_id!r} is not a chat request id (C-NNNN)")
+    path = _chat_dir(state_path) / f"{chat_id}.json"
+    if not path.exists():
+        raise StateError(f"no chat request {chat_id}")
+    return path
+
+
+def chat_entries(state_path):
+    """(entries, warnings): the chat requests under <dir>/.supervisor/chat, oldest id first."""
+    entries, warnings = [], []
+    folder = _chat_dir(state_path)
+    names = sorted((p for p in folder.glob("C-*.json") if CHAT_ID_RE.match(p.stem)),
+                   key=lambda p: int(CHAT_ID_RE.match(p.stem).group(1))) if folder.is_dir() else []
+    for path in names:
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            warnings.append(f"{path.name}: {e}")
+            continue
+        if not isinstance(entry, dict) or entry.get("id") != path.stem or not isinstance(entry.get("text"), str):
+            warnings.append(f"{path.name}: not a chat request")
+            continue
+        entries.append(entry)
+    return entries, warnings
+
+
+def cmd_chat_send(args, runner=None):
+    """sv-chat: store the user's words as a chat request and tell sv. The file, not the signal, is the request."""
+    text = _chat_text(args)
+    context = Path(args.context_file).read_text(encoding="utf-8") if args.context_file else None
+    folder = _chat_dir(args.state)
+    folder.mkdir(parents=True, exist_ok=True)
+    n = max([int(CHAT_ID_RE.match(p.stem).group(1)) for p in folder.glob("C-*.json") if CHAT_ID_RE.match(p.stem)] + [0])
+    entry = {"at": _now(), "text": text, "context": context or None, "reply": None, "replied_at": None}
+    while True:
+        n += 1
+        chat_id = f"C-{n:04d}"
+        try:
+            # Exclusive creation: an id is never reused, even by a second send in the same moment.
+            with open(folder / f"{chat_id}.json", "x", encoding="utf-8") as f:
+                f.write(json.dumps({"id": chat_id, **entry}, ensure_ascii=False, indent=2) + "\n")
+            break
+        except FileExistsError:
+            continue
+    proc = (runner or _run_hc)(["hc", "send", args.notify, f"chat: {chat_id}"])
+    print(json.dumps({"id": chat_id, "notified": proc.returncode == 0}, ensure_ascii=False))
+    return 0
+
+
+def cmd_chat_inbox(args):
+    entries, warnings = chat_entries(args.state)
+    pending = [{k: e.get(k) for k in ("id", "at", "text", "context")} for e in entries if e.get("replied_at") is None]
+    print(json.dumps({"entries": pending, "warnings": warnings}, ensure_ascii=False))
+    return 0
+
+
+def cmd_chat_reply(args):
+    path = _chat_path(args.state, args.id)
+    entry = json.loads(path.read_text(encoding="utf-8"))
+    if entry.get("replied_at") is not None:
+        raise StateError(f"{args.id} was already answered at {entry['replied_at']}")
+    entry.update(reply=_chat_text(args), replied_at=_now())
+    _write_atomic(str(path), json.dumps(entry, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps({"id": args.id, "replied_at": entry["replied_at"]}))
+    return 0
+
+
+def cmd_chat_wait(args, sleep=time.sleep):
+    path = _chat_path(args.state, args.id)
+    waited = 0.0
+    while True:
+        entry = json.loads(path.read_text(encoding="utf-8"))
+        if entry.get("replied_at") is not None or waited >= args.timeout:
+            break
+        sleep(2)
+        waited += 2
+    print(json.dumps({"id": args.id, "reply": entry.get("reply"), "replied_at": entry.get("replied_at")}, ensure_ascii=False))
+    return 0
+
+
 def cmd_note_show(args):
-    vault = _vault_path(args.state)
-    texts, uids = _index_vault(vault)
+    vault, texts, uids = _vault_index(args.state)
     if args.uid not in uids:
         raise StateError(f"note {args.uid} not found in {vault}")
     rel = uids[args.uid][0]
@@ -4078,8 +5745,10 @@ def cmd_note_show(args):
     uas = parse_user_actions(sections.get(UA_SECTION, ""))
     items, problems = parse_artifacts(sections.get(ART_SECTION, ""))
     print(json.dumps({"uid": args.uid, "path": rel, "props": props, "frontmatter_errors": errors, "sections": sections,
+                      "request": _request_text(sections.get("概要")), "lang": note_lang(_request_text(sections.get("概要"))),
                       "user_actions": [_ua_summary(u) for u in uas],
-                      "slots": {u["id"]: u["answer"] for u in uas if u["kind"] == "slot" and not u["done"]},
+                      "requests": [_ua_summary(u) for u in uas if u["kind"] == "req" and ua_open(u)],
+                      "subtasks": parse_subtasks(sections.get(ST_SECTION, "")),
                       "artifacts": items, "artifact_problems": problems}, ensure_ascii=False))
     return 0
 
@@ -4087,7 +5756,7 @@ def cmd_note_show(args):
 def cmd_new_note(args):
     state = _read_json(args.state)
     _require_v2(state, args.state)
-    _, uids = _index_vault(_vault_path(args.state))
+    _, _, uids = _vault_index(args.state)
     taken = set(uids) | {i.get("uid") for k in ("tasks", "projects", "archived") for i in state.get(k, [])}
     if args.count < 1:
         raise StateError("--count must be 1 or more")
@@ -4098,6 +5767,89 @@ def cmd_new_note(args):
             notes.append({"uid": uid, "path": _new_note_path(uid), "kind": args.kind})
         t += timedelta(seconds=1)
     print(json.dumps(notes[0] if args.count == 1 else notes))
+    return 0
+
+
+def template_errors(text, kind):
+    """What a task / project note template lacks for notes made from it to be picked up (section 3)."""
+    props, body, fm_errors = parse_frontmatter(text)
+    errors = [f"frontmatter: {e}" for e in fm_errors]
+    tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]
+    missing = [t for t in NOTE_TAGS[kind] if t not in tags]
+    if missing:
+        errors.append(f"tags must include {list(NOTE_TAGS[kind])}; missing {missing}")
+    if kind == "task" and "project" in tags:
+        errors.append("a task template must not have the project tag")
+    if kind == "task" and "task" in tags:
+        errors.append("a task template must not have the task tag (daily notes would list supervised tasks)")
+    for key, want in (("status", "backlog"), ("assignee", "user")):
+        if props.get(key) != want:
+            errors.append(f"{key} must be {want}, got {props.get(key)!r}")
+    if "summary" not in props:
+        errors.append("the frontmatter must have the summary prop (empty)")
+    sections = parse_sections(body)
+    if "概要" not in sections:
+        errors.append("the body must have a '## 概要' section")
+    if kind == "project" and PROJECT_TASKS_SECTION not in body:
+        errors.append("a project template must have the '## タスク' kanban of its tasks exactly as in the notes "
+                      "state_tool creates")
+    # Notes made from the template and by state_tool keep their sections in the same order.
+    order = NOTE_SECTIONS[:1] + ("タスク",) + NOTE_SECTIONS[1:]
+    found = [name for name in sections if name in order]
+    if found != sorted(found, key=order.index):
+        errors.append(f"sections must follow the order {[n for n in order if n in found]}; got {found}")
+    return errors
+
+
+def outdated_templates(folder):
+    """[(path, errors)] of the supervised note templates in folder that differ from the notes state_tool creates."""
+    found = []
+    for path in sorted(Path(folder).glob("*.md")) if Path(folder).is_dir() else ():
+        text = path.read_text(encoding="utf-8")
+        kind = note_kind(parse_frontmatter(text)[0])
+        errors = kind and template_errors(text, kind)
+        if errors:
+            found.append((path, errors))
+    return found
+
+
+def cmd_check_template(args):
+    errors = template_errors(Path(args.file).read_text(encoding="utf-8"), args.kind)
+    if errors:
+        raise StateError(errors)
+    print(f"ok: {args.kind} template {args.file}")
+    return 0
+
+
+def retagged(tags):
+    """The tags of a note in the supervised form, or None when it is not a task / project note or is already in it."""
+    tags = tags if isinstance(tags, list) else ([tags] if tags else [])
+    if "project" in tags:
+        kind = "project"
+    elif "task" in tags or SUPERVISED_TAG in tags:
+        kind = "task"
+    else:
+        return None
+    want = list(NOTE_TAGS[kind])
+    new = want + [t for t in tags if t not in want and not (kind == "task" and t == "task")]
+    return None if new == tags else new
+
+
+def cmd_retag_notes(args):
+    sup = os.path.dirname(os.path.abspath(args.state))
+    vault, texts, _ = _vault_index(args.state)
+    if os.path.realpath(vault) != os.path.realpath(os.path.join(sup, VAULT_DIR)):
+        raise StateError(f"retag-notes rewrites every task and project note, so it runs only on {os.path.join(sup, VAULT_DIR)}, "
+                         f"not on {vault}")
+    changed = []
+    for rel, text in texts.items():
+        new = retagged(parse_frontmatter(text)[0].get("tags"))
+        if new is None:
+            continue
+        if not args.dry_run:
+            _write_note(os.path.join(vault, rel), set_props(text, {"tags": new}))
+        changed.append({"path": rel, "tags": new})
+    print(json.dumps({"dry_run": bool(args.dry_run), "notes": changed}, ensure_ascii=False))
     return 0
 
 
@@ -4126,7 +5878,7 @@ def cmd_export_v1(args):
         raise StateError("--out must not be the state file")
     state = _read_json(args.state)
     _require_v2(state, args.state)
-    texts, uids = _index_vault(_vault_path(args.state))
+    _, texts, uids = _vault_index(args.state)
     out = export_v1(state, _notes_by_uid(texts, uids))
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     _write_atomic(args.out, serialize(out))
@@ -4177,6 +5929,16 @@ def build_parser():
     p.add_argument("--count", type=int, default=1, help="reserve this many distinct uids (prints a list when above 1)")
     p.set_defaults(func=cmd_new_note)
 
+    p = sub.add_parser("check-template", help="check that a note template has what notes need to be picked up (writes nothing)")
+    p.add_argument("--kind", required=True, choices=("task", "project"))
+    p.add_argument("--file", required=True)
+    p.set_defaults(func=cmd_check_template)
+
+    p = sub.add_parser("retag-notes", help="give the task and project notes of <dir>/vault the supervised tags (tags only)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--dry-run", action="store_true", help="print the notes it would change and write nothing")
+    p.set_defaults(func=cmd_retag_notes)
+
     p = sub.add_parser("digest", help="print the SessionStart summary (always exits 0)")
     p.add_argument("--state", required=True)
     p.set_defaults(func=cmd_digest)
@@ -4212,16 +5974,16 @@ def build_parser():
     p.add_argument("--review-minutes", type=int, default=REVIEW_WAIT_MINUTES)
     p.set_defaults(func=cmd_waits)
 
-    p = sub.add_parser("manager-reconcile", help="judge a project manager session from list rows and its latest events (JSON)")
+    p = sub.add_parser("manager-reconcile", help="judge a project manager session from its hc terminal and its latest message (JSON)")
     p.add_argument("--state", required=True)
     p.add_argument("--project", required=True)
-    p.add_argument("--rows", required=True, help="JSON file with the list rows (include_archived)")
-    p.add_argument("--events", help='JSON file {"last_message_ref": ..., "pending_approval": bool} summarizing the latest events')
+    p.add_argument("--from", dest="from_file", help="read `hc ls --all --json` output from this file instead of running hc")
+    p.add_argument("--last-message-ref", help="message_ref printed by last-message for the manager; omit while it is running")
     p.set_defaults(func=cmd_manager_reconcile)
 
     p = sub.add_parser("guard", help="PreToolUse hook: exit 3 with a reason on stderr when the call is blocked, else 0")
     p.add_argument("--dir", required=True)
-    p.add_argument("--role", choices=("manager",), help="manager: the guard of a project directory")
+    p.add_argument("--role", choices=("manager", "chat"), help="manager: the guard of a project directory; chat: of <dir>/chat")
     p.set_defaults(func=cmd_guard)
 
     p = sub.add_parser("validate-follow-ups", help="check the ## Follow-ups section of CLAUDE.md (exit 1 with error lines when invalid)")
@@ -4242,12 +6004,84 @@ def build_parser():
     p = sub.add_parser("prepare-dir", help="show the ## Locations roots, or clone a repository / create a work directory under them")
     p.add_argument("--claude-md", required=True)
     mode = p.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--show", action="store_true", help="print clone_root and work_root as absolute paths (read-only)")
+    mode.add_argument("--show", action="store_true", help="print clone_root, work_root and worktree_root as absolute paths (read-only)")
     mode.add_argument("--work", metavar="NAME", help="create work_root/NAME (NAME is T-NNNN-<slug>)")
     mode.add_argument("--clone", metavar="URL", help="clone URL into clone_root/<host>/<owner>/<repo>")
     mode.add_argument("--project", metavar="NAME", help="create work_root/NAME with the manager guard hook (NAME is P-NNNN-<slug>)")
     p.set_defaults(func=cmd_prepare_dir)
 
+    p = sub.add_parser("prepare-worktree", help="add a worker worktree under worktree_root/<repo>/<slug> on a new branch")
+    p.add_argument("--claude-md", required=True)
+    p.add_argument("--repo", required=True, help="the repository (its main checkout or any worktree)")
+    p.add_argument("--branch", required=True, help="the new branch, e.g. claude/t0123-readme-fix")
+    p.add_argument("--base", required=True, help="the ref the branch starts from")
+    p.add_argument("--slug", help="the directory name (default: the branch's last path segment)")
+    p.set_defaults(func=cmd_prepare_worktree)
+
+    p = sub.add_parser("remove-worktree", help="remove a clean worker worktree under worktree_root (the branch stays)")
+    p.add_argument("--claude-md", required=True)
+    p.add_argument("--path", required=True)
+    p.set_defaults(func=cmd_remove_worktree)
+
+    p = sub.add_parser("launch-plan", help="print (or with --run, run) the hc run argv that starts a herdr worker or manager")
+    p.add_argument("--state", required=True)
+    p.add_argument("--claude-md", required=True)
+    p.add_argument("--worker", required=True, help="a worker id (w-0123) or a manager handle (p-0006)")
+    p.add_argument("--prompt-file", required=True)
+    p.add_argument("--run", action="store_true", help="run the argv and exit with its status instead of printing it")
+    p.set_defaults(func=cmd_launch_plan)
+
+    p = sub.add_parser("last-message", help="write the last assistant message of a herdr worker or manager from its transcript")
+    p.add_argument("--state", required=True)
+    p.add_argument("--id", required=True, help="worker id (w-NNNN) or manager handle (p-NNNN)")
+    p.add_argument("--out", required=True)
+    p.set_defaults(func=cmd_last_message)
+
+    p = sub.add_parser("observe-hc", help="map hc terminals to observed states of herdr workers and managers (reads only)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--from", dest="from_file", help="read `hc ls --all --json` output from this file instead of running hc")
+    p.set_defaults(func=cmd_observe_hc)
+
+    p = sub.add_parser("watch-vault", help="loop: tell the supervisor terminal about note changes and blocked / finished sessions, and name the Herdr tabs of kept sessions")
+    p.add_argument("--state", required=True)
+    p.add_argument("--notify", default="sv", help="the supervisor terminal (default: sv)")
+    p.add_argument("--interval", type=float, default=10, help="seconds between ticks (default: 10)")
+    p.add_argument("--once", action="store_true", help="run one tick and exit")
+    p.set_defaults(func=cmd_watch_vault)
+
+    def chat_text(p, required=True):
+        group = p.add_mutually_exclusive_group(required=required)
+        group.add_argument("--text")
+        group.add_argument("--text-file")
+
+    p = sub.add_parser("chat-send", help="sv-chat: store the user's words as a chat request C-NNNN and tell sv")
+    p.add_argument("--state", required=True)
+    chat_text(p)
+    p.add_argument("--context-file", help="the chat session's own notes on the request (no user authority)")
+    p.add_argument("--notify", default="sv", help="the supervisor terminal (default: sv)")
+    p.set_defaults(func=cmd_chat_send)
+
+    p = sub.add_parser("chat-inbox", help="list the chat requests sv has not answered yet (JSON, writes nothing)")
+    p.add_argument("--state", required=True)
+    p.set_defaults(func=cmd_chat_inbox)
+
+    p = sub.add_parser("chat-reply", help="sv: answer a chat request once (it then leaves chat-inbox)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--id", required=True)
+    chat_text(p)
+    p.set_defaults(func=cmd_chat_reply)
+
+    p = sub.add_parser("chat-wait", help="sv-chat: wait up to --timeout seconds for sv's answer to a chat request")
+    p.add_argument("--state", required=True)
+    p.add_argument("--id", required=True)
+    p.add_argument("--timeout", type=float, default=120)
+    p.set_defaults(func=cmd_chat_wait)
+
+    p = sub.add_parser("serial-check", help="print whether a task of a serial queue may start and the branch to start from (JSON)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--task", required=True)
+    p.add_argument("--cwd", help="repository root of the git worker to start (for base)")
+    p.set_defaults(func=cmd_serial_check)
     p = sub.add_parser("check-cwd", help="print busy or free for a non-git cwd")
     p.add_argument("--state", required=True)
     p.add_argument("--cwd", required=True)
