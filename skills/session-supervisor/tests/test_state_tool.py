@@ -3595,6 +3595,11 @@ class NoteTemplateTest(unittest.TestCase):
         self.assertIn("    - 'parent == this'\n", sections["タスク"])
         self.assertNotIn("inFolder", sections["タスク"])
         self.assertIn("    sort:\n      - property: file.mtime\n        direction: DESC\n", sections["タスク"])
+        user, agent = sections["タスク"].split("### エージェントの番")
+        self.assertTrue(user.lstrip("\n").startswith("### ユーザーの番\n"))
+        self.assertIn("""    - 'assignee == "user"'\n""", user)
+        self.assertIn("""    - 'assignee == "agent"'\n""", agent)
+        self.assertNotIn("assignee]", sections["タスク"])
         follows = st.parse_frontmatter(st.new_note_text("u", "t", "task", "backlog", "agent", NOTE_NOW, follows="20261101_000000"))[0]
         self.assertEqual(follows["follows"], "[[20261101_000000]]")
         for args in (("u", "t", "memo", "backlog", "agent"), ("u", "t", "task", "new", "agent"), ("u", "t", "task", "backlog", "bot")):

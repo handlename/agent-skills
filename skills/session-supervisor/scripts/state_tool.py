@@ -4682,14 +4682,15 @@ _NOT_PROJECT = """'!file.hasTag("project")'"""
 _ASSIGNEE_IS = """'assignee == "{}"'"""
 
 
-# The project note's own tasks: `this` is the note that holds the block, and a link equals the file it resolves to,
-# so `parent == this` matches both `[[<uid>]]` (state_tool) and `[[<path>|<title>]]` (sv-project.md). Cards of a
-# column are sorted by the last change of the task note, newest first.
+# The project note's own tasks on two kanbans by assignee, like the dashboard: `this` is the note that holds the
+# block, and a link equals the file it resolves to, so `parent == this` matches both `[[<uid>]]` (state_tool) and
+# `[[<path>|<title>]]` (sv-project.md). Cards of a column are sorted by the last change of the task note, newest first.
 PROJECT_TASKS_FILTER = "'parent == this'"
 PROJECT_TASKS_SORT = "\n    sort:\n      - property: file.mtime\n        direction: DESC"
-PROJECT_TASKS_SECTION = "## タスク\n\n" + _kanban_base("タスク", (_NOT_PROJECT, PROJECT_TASKS_FILTER), None,
-                                                    "[formula.title, summary, task_id, subtasks, assignee]",
-                                                    PROJECT_TASKS_SORT)
+PROJECT_TASKS_SECTION = "## タスク\n\n" + "\n".join(
+    f"### {heading}\n\n" + _kanban_base(name, (_NOT_PROJECT, PROJECT_TASKS_FILTER, _ASSIGNEE_IS.format(who)), None,
+                                         "[formula.title, summary, task_id, subtasks]", PROJECT_TASKS_SORT)
+    for heading, name, who in (("ユーザーの番", "ユーザー", "user"), ("エージェントの番", "エージェント", "agent")))
 
 
 def supervisor_note(templates):
