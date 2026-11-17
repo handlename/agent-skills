@@ -4835,6 +4835,7 @@ class NoteCommitTest(unittest.TestCase):
         self.assertEqual(sorted(out["notes_written"]), sorted([project_note["path"], task_note["path"]]))
         props = st.parse_frontmatter((self.env.vault / task_note["path"]).read_text(encoding="utf-8"))[0]
         self.assertEqual((props["project_id"], st.parent_project_id(state, props["parent"])), ("P-0001", "P-0001"))
+        self.assertEqual(props["parent"], f"[[{project_note['uid']}|Nature MCP]]")
         self.assertEqual(self.env.scan(), {"events": [], "warnings": []})
 
     def test_held_task_waits_for_the_user_and_done_user_confirms(self):
@@ -5556,6 +5557,19 @@ class ProposalNoteTest(unittest.TestCase):
               "request": "write docs", "parent": U3}
         props = st.parse_frontmatter(st.apply_note_ops("", [op], NOW, 1)[0])[0]
         self.assertEqual((props["parent"], props["status"], props["assignee"]), (f"[[{U3}]]", "backlog", "user"))
+
+    def test_parent_link_shows_the_project_title(self):
+        project = st.new_note_text(U3, 'Lock の "Matter" | 対応', "project", "in progress", "agent", NOTE_NOW, "ctx")
+        ops = {U1: [{"op": "create", "uid": U1, "title": "a", "kind": "task", "status": "backlog", "assignee": "user",
+                     "parent": U3}],
+               U2: [{"op": "create", "uid": U2, "title": "b", "kind": "task", "status": "backlog", "assignee": "user",
+                     "parent": "20261101_000000"}]}
+        st._fill_parent_titles(ops, {U3: project})
+        self.assertEqual(ops[U1][0]["parent_title"], 'Lock の "Matter" | 対応')
+        self.assertNotIn("parent_title", ops[U2][0])
+        props = st.parse_frontmatter(st.apply_note_ops("", ops[U1], NOW, 1)[0])[0]
+        self.assertEqual(props["parent"], f"[[{U3}|Lock の  Matter    対応]]")
+        self.assertEqual(st.parent_project_id({"projects": [{"id": "P-0001", "uid": U3}]}, props["parent"]), "P-0001")
 
     def test_task_from_a_proposal_note_takes_title_and_text_from_it(self):
         task = v2_git_task(self.state, self.notes, "T-0020", "w-0020", U1, intended="pending", observed="none")

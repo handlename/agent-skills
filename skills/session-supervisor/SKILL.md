@@ -315,7 +315,7 @@ Note ops (all idempotent; `commit` fills a missing action `id`, `UA-` or `AA-` b
 
 | Op | Effect |
 | :--- | :--- |
-| `create {uid, title, kind, status, assignee, request, original?, parent?, proposed_by?, follows?}` | A new note at `YYYY/MM/<uid>.md` (uid from `new-note`). `request` is the formatted `## 概要`; `original`, the chat message verbatim, follows it as `> [!quote]- 依頼の原文` (section 1). `parent` is a project's uid; `proposed_by` (a P-id) marks a manager's proposal note (6.11). `commit` rejects a second `create` for one uid and a `create` for a uid that already has a note |
+| `create {uid, title, kind, status, assignee, request, original?, parent?, proposed_by?, follows?}` | A new note at `YYYY/MM/<uid>.md` (uid from `new-note`). `request` is the formatted `## 概要`; `original`, the chat message verbatim, follows it as `> [!quote]- 依頼の原文` (section 1). `parent` is a project's uid; `commit` writes it as `[[<uid>|<project title>]]` (the title of the project's note, or of the project `create` in the same commit), so the link shows the project's name; `proposed_by` (a P-id) marks a manager's proposal note (6.11). `commit` rejects a second `create` for one uid and a `create` for a uid that already has a note |
 | `assign_uid {uid, path}` | Gives a picked-up note without `uid` the `proposed_uid` of its event |
 | `log {text}` | Appends a dated entry to `## ログ` (multi-line allowed) |
 | `summary {text}` | Sets the note's `summary` prop, which the kanban card shows. `commit` joins the lines into one and cuts it at 80 characters (`…`) |

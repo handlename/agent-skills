@@ -2001,19 +2001,21 @@ def note_kind(props):
 
 
 def new_note_text(uid, title, kind, status, assignee, now, request="", parent=None, follows=None, original=None,
-                  proposed_by=None):
-    """Text of a new task or project note in the create-task format. parent and follows are note uids. original (the
+                  proposed_by=None, parent_title=None):
+    """Text of a new task or project note in the create-task format. parent and follows are note uids; parent_title (the
+    project's title) becomes the alias of the parent link, as sv-project.md writes it. original (the
     chat message the request was written from) follows the request as a folded 依頼の原文 callout. proposed_by is the
     P-id of the project manager whose proposal the note holds."""
     if kind not in ("task", "project"):
         raise StateError(f"note kind must be task or project, got {kind!r}")
     if status not in NOTE_STATUSES or assignee not in ASSIGNEES:
         raise StateError(f"invalid status/assignee {status!r}/{assignee!r}")
+    alias = "|" + re.sub(r'[|\]"]', " ", parent_title) if parent_title else ""
     values = {
         "uid": uid, "title": title, "para": "Project", "aliases": [], "created_at": f"{now[:10]} {now[11:19]}",
         "archived_at": None, "tags": list(NOTE_TAGS[kind]), "start_date": None, "due_date": None, "pending_until": None,
         "completed_at": None, "status": status, "assignee": assignee, "summary": None,
-        "parent": f"[[{parent}]]" if parent else None, "follows": f"[[{follows}]]" if follows else None,
+        "parent": f"[[{parent}{alias}]]" if parent else None, "follows": f"[[{follows}]]" if follows else None,
         "proposed_by": proposed_by,
     }
     head = "".join(_prop_line(k, values[k]) + "\n" for k in NOTE_KEYS
@@ -2864,7 +2866,7 @@ def apply_note_ops(text, ops, now, rev):
             if not text.strip():
                 text = new_note_text(op["uid"], op["title"], op["kind"], op["status"], op["assignee"], now,
                                      op.get("request", ""), op.get("parent"), op.get("follows"), op.get("original"),
-                                     op.get("proposed_by"))
+                                     op.get("proposed_by"), op.get("parent_title"))
             continue
         if name == "assign_uid":
             props, _, errors = parse_frontmatter(text)
@@ -4076,6 +4078,18 @@ def _numbered_ops(raw_ops, candidate, base, view_cur):
     return number_note_ops(raw_ops, next_ua, art_last)
 
 
+def _fill_parent_titles(ops, notes):
+    """Give each create op with a parent the parent note's title (parent_title), from a create op of the same commit or
+    the note in the vault, so the new note's parent link shows the project's name. The ops are journaled with it."""
+    titles = {uid: o.get("title") for uid, items in ops.items() for o in items if o.get("op") == "create"}
+    for items in ops.values():
+        for op in items:
+            if op.get("op") == "create" and op.get("parent") and not op.get("parent_title"):
+                title = titles.get(op["parent"]) or parse_frontmatter(notes.get(op["parent"]) or "")[0].get("title")
+                if isinstance(title, str) and title.strip():
+                    op["parent_title"] = title.strip()
+
+
 NOTE_PROPS_HEADING = "## Note props"
 # Properties the supervisor may set when a note reaches done / archived; the ones it owns or the user delegates with
 # (status, assignee, tags, ids, links) are not among them.
@@ -4201,6 +4215,7 @@ def _commit_v2(args, current):
     # 3. Apply the ops in memory.
     view_cur = join_view(current, notes)
     ops = _numbered_ops(raw_ops, candidate, base, view_cur)
+    _fill_parent_titles(ops, notes)
     after, new_ids, problems = dict(base), {}, []
     for uid, items in ops.items():
         after[uid], new_ids[uid], probs = apply_note_ops(base.get(uid) or "", items, now, rev)
