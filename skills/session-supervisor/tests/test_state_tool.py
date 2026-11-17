@@ -5286,6 +5286,7 @@ class StatusShortcutTest(unittest.TestCase):
         ("project", "完了", "in progress/agent", "project_open", "confirm", 14),
         ("project", "完了", "in progress/user", "project_open", "confirm", 14),
         ("project", "完了", "in progress/user", "project_open_paused", "confirm", 14),
+        ("project", "完了", "pending/user", "project_open_paused", "confirm", 14),
         *[("project", "取り消す", f, "project", "close", 18) for f in CANCEL_FROM],
         ("project", "取り消す", "backlog/agent", "unmanaged", "none", 2),
     ]

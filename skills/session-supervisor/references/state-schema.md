@@ -420,7 +420,7 @@ Note ops (all idempotent): `st_adopt {st: {text, id?}}` numbers the first unnumb
 | 11 | in progress/user | in progress/agent, backlog/agent | | `resume` |
 | 12 | in progress/agent | backlog/agent | | `restore` |
 | 13 | done/agent; in progress/* with only held read actions or the completion ask open, or with nothing open and every worker finished (the user checked the last `@user` subtask); an unchecked numbered subtask counts as open | done/user | task | `confirm` |
-| 14 | done/agent, in progress/* | done/user | project | `confirm` |
+| 14 | done/agent, in progress/*, pending/user (paused) | done/user | project | `confirm` |
 | 15 | in progress/*, paused | done/user, done/agent | task, except #13 | `cancel` |
 | 16 | done/agent, done/user; or any value but archived on a stub (a task that is not live) | backlog/agent; also in progress/agent on a stub | | `follow_up` |
 | 17 | managed | archived | task | `cancel` |

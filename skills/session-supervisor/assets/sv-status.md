@@ -23,7 +23,7 @@ const MOVES = [
   {"kind": "project", "label": "保留", "from": ["backlog/user", "backlog/agent"], "managed": false, "to": "pending/user"},
   {"kind": "project", "label": "完了確認", "from": ["in progress/user"], "when": "done_proposed", "to": "done/user"},
   {"kind": "project", "label": "完了確認", "from": ["done/agent"], "to": "done/user"},
-  {"kind": "project", "label": "完了", "from": ["in progress/agent", "in progress/user"], "managed": true, "when": "not_proposed", "to": "done/user"},
+  {"kind": "project", "label": "完了", "from": ["in progress/agent", "in progress/user", "pending/user"], "managed": true, "when": "not_proposed", "to": "done/user"},
   {"kind": "project", "label": "取り消す", "from": ["backlog/user", "backlog/agent", "in progress/user", "in progress/agent", "pending/user", "pending/agent"], "to": "archived/user"}
 ];
 

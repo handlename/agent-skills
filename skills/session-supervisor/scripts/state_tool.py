@@ -3272,7 +3272,7 @@ def user_transition(seen, cur, ctx):
             found = ("none", 9)
         elif task and pair[0] == "done":
             found = ("cancel", 15)
-        elif not task and pair == ("done", "user") and prev[0] in ("done", "in progress"):
+        elif not task and pair == ("done", "user") and prev[0] in ("done", "in progress", "pending"):
             found = ("confirm", 14)
     elif prev[0] == "in progress":
         if prev[1] == "agent" and pair in NOTE_USER_VALUES:
