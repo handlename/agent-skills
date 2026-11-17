@@ -2344,15 +2344,30 @@ def _art_text(item):
     return f"{item['kind']} {ref or item.get('url')}"
 
 
+def _art_shown(item):
+    if item["kind"] == "file":
+        return f"`{item.get('path')}`"
+    text = _art_text(item).replace("[", "\\[").replace("]", "\\]")
+    return f"[{text}]({item['url']})" if item.get("url") else text
+
+
 def render_artifact_line(item):
     """One `## 成果物` line: display text, the sv-art JSON comment, and the block id ^sv-art-<n>."""
     data = {k: item[k] for k in ART_KEYS if item.get(k) is not None}
-    if item["kind"] == "file":
-        shown = f"`{item.get('path')}`"
-    else:
-        text = _art_text(item).replace("[", "\\[").replace("]", "\\]")
-        shown = f"[{text}]({item['url']})" if item.get("url") else text
-    return f"- {shown} <!-- sv-art {_art_json(data)} --> ^sv-art-{item['n']}"
+    return f"- {_art_shown(item)} <!-- sv-art {_art_json(data)} --> ^sv-art-{item['n']}"
+
+
+def _render_art_rows(item):
+    """The artifact line followed by its description line (`desc`), which is display only like the link text."""
+    return [render_artifact_line(item)] + ([f"  - {item['desc'].strip()}"] if item.get("desc") else [])
+
+
+def _children_end(lines, i, end):
+    """Index after the indented lines right below line i (its child list items)."""
+    j = i + 1
+    while j < end and lines[j][:1] in (" ", "\t") and lines[j].strip():
+        j += 1
+    return j
 
 
 def _art_errors(data):
@@ -2362,6 +2377,10 @@ def _art_errors(data):
               if not isinstance(data.get(key), int) or isinstance(data.get(key), bool) or data[key] < 1]
     if "label" in data and not isinstance(data["label"], str):
         errors.append("label must be a string")
+    if data.get("desc") is not None and (not isinstance(data["desc"], str) or "\n" in data["desc"]):
+        errors.append("desc must be one line")
+    if data.get("st") is not None and not (isinstance(data["st"], str) and ST_ID_RE.match(data["st"])):
+        errors.append(f"st must be a subtask id, got {data['st']!r}")
     return errors + _validate_artifact("sv-art", {k: data[k] for k in ART_FIELDS if k in data}, None)
 
 
@@ -2744,17 +2763,35 @@ def _op_st_set(lines, op, now, rev, index, problems):
     return []
 
 
+def _link_to_subtasks(lines, items, problems):
+    """Lists each item with an `st` as a child line `  - <link>` of that subtask line, once."""
+    for item in items:
+        if not item.get("st"):
+            continue
+        found = _find_st(lines, item["st"])
+        if found is None:
+            problems.append(f"artifact {item['n']}: subtask {item['st']} not found")
+            continue
+        i = found[0]
+        child = f"  - {_art_shown(item)}"
+        end = _children_end(lines, i, len(lines))
+        if child not in lines[i + 1:end]:
+            lines.insert(end, child)
+
+
 def _op_art_add(lines, op, now, rev, index, problems):
     items = op.get("items") or []
     g = op.get("g") or (items[0].get("n") if items else None)
+    items = _art_op_lines(op, g, rev)
     added, block = [], []
-    for item in _art_op_lines(op, g, rev):
+    for item in items:
         block_id = f"sv-art-{item['n']}"
         if not _has_block(lines, block_id):
-            block.append(render_artifact_line(item))
+            block += _render_art_rows(item)
             added.append(block_id)
     if block:
         _insert_in_section(lines, ART_SECTION, block)
+    _link_to_subtasks(lines, items, problems)
     return added
 
 
@@ -2769,6 +2806,8 @@ def _op_art_set(lines, op, now, rev, index, problems):
         return []
     old_url = data.get("url")
     for key, value in (op.get("fields") or {}).items():
+        if key == "desc":
+            continue
         if key not in ART_FIELDS:
             raise StateError(f"art_set cannot change {key!r}")
         if value is None:
@@ -2783,7 +2822,15 @@ def _op_art_set(lines, op, now, rev, index, problems):
     shown, rest = lines[i][:m.start()], lines[i][m.end():]
     if old_url and data.get("url") and data["url"] != old_url:
         shown = shown.replace(f"]({old_url})", f"]({data['url']})")
+        st_span = _section_span(lines, ST_SECTION)
+        for k in range(*st_span) if st_span else ():
+            if lines[k][:1] in (" ", "\t"):
+                lines[k] = lines[k].replace(f"]({old_url})", f"]({data['url']})")
     lines[i] = shown + f"<!-- sv-art {_art_json({k: data[k] for k in ART_KEYS if k in data})} -->" + rest
+    if "desc" in (op.get("fields") or {}):
+        end = _children_end(lines, i, span[1])
+        desc = (op["fields"]["desc"] or "").strip()
+        lines[i + 1:end] = [f"  - {desc}"] if desc else []
     return []
 
 
@@ -2793,15 +2840,21 @@ def _op_art_replace_group(lines, op, now, rev, index, problems):
     block_ids = [f"sv-art-{item['n']}" for item in items]
     if any(_has_block(lines, b) for b in block_ids):
         return []
-    new = [render_artifact_line(item) for item in items]
+    new = [row for item in items for row in _render_art_rows(item)]
     head, end = _ensure_section(lines, ART_SECTION)
     group = [i for i in range(head + 1, end) if (_art_data(lines[i]) or {}).get("g") == g]
     if not group:
         _insert_in_section(lines, ART_SECTION, new)
+        _link_to_subtasks(lines, items, problems)
         return block_ids
+    old_links = {"  - " + lines[i][2:ART_COMMENT_RE.search(lines[i]).start()].strip() for i in group}
     for i in reversed(group):
-        del lines[i]
+        del lines[i:_children_end(lines, i, len(lines))]
     lines[group[0]:group[0]] = new
+    st_span = _section_span(lines, ST_SECTION)
+    if st_span:
+        lines[st_span[0] + 1:st_span[1]] = [l for l in lines[st_span[0] + 1:st_span[1]] if l not in old_links]
+    _link_to_subtasks(lines, items, problems)
     return block_ids
 
 

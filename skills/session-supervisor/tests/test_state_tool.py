@@ -6699,6 +6699,28 @@ class SubtaskTest(unittest.TestCase):
                     {"op": "st_set", "id": "ST-0010", "commit": "zz"}, {"op": "st_set", "id": "ST-0010", "assignee": "bot"}):
             with self.subTest(bad=bad), self.assertRaises(st.StateError):
                 st.apply_note_ops(out, [bad], NOTE_NOW, 14)
+        # An artifact row carries its description as a child line and links itself under its subtask.
+        pr = "https://github.com/org/repo-a/pull/7"
+        out, _, problems = apply_twice(self, out, [{"op": "art_add", "items": [
+            {"n": 1, "kind": "pr", "url": pr, "desc": "ST-0010 の Pull Request", "st": "ST-0010"}]}])
+        self.assertEqual(problems, [])
+        self.assertIn(f"^sv-art-1\n  - ST-0010 の Pull Request\n", out)
+        self.assertIn(f"- [ ] [ST-0010] 調べる (w-0002)\n  - [pr org/repo-a#7]({pr})\n", out)
+        self.assertNotIn("desc", note_section(out, "成果物").split("<!--", 1)[1])
+        moved = pr + "?v=2"
+        out, _, _ = apply_twice(self, out, [{"op": "art_set", "n": 1, "fields": {"url": moved, "desc": "直した説明"}}], rev=14)
+        self.assertIn(f"- [ ] [ST-0010] 調べる (w-0002)\n  - [pr org/repo-a#7]({moved})\n", out)
+        self.assertIn("^sv-art-1\n  - 直した説明\n", out)
+        out, _, _ = apply_twice(self, out, [{"op": "art_replace_group", "g": 1, "items": [
+            {"n": 2, "kind": "ci", "url": "https://ci/2", "desc": "CI", "st": "ST-0011"}]}], rev=15)
+        self.assertNotIn("直した説明", out)
+        self.assertNotIn(moved, out)
+        self.assertIn("- [ ] [ST-0011] @user 確認する\n  - [ci https://ci/2](https://ci/2)\n", out)
+        _, _, problems = st.apply_note_ops(out, [{"op": "art_add", "items": [{"n": 3, "kind": "ci", "url": "https://ci/3", "st": "ST-0099"}]}], NOTE_NOW, 16)
+        self.assertEqual(problems, ["artifact 3: subtask ST-0099 not found"])
+        for bad in ({"desc": "a\nb"}, {"st": "AA-0001"}):
+            with self.subTest(bad=bad), self.assertRaises(st.StateError):
+                st.apply_note_ops(out, [{"op": "art_add", "items": [{"n": 4, "kind": "ci", "url": "https://ci/4", **bad}]}], NOTE_NOW, 14)
         # A note without the section gets it in the template order.
         bare = st.new_note_text("u6", "t", "task", "in progress", "agent", NOTE_NOW, "x").replace("## サブタスク\n\n", "")
         added = st.apply_note_ops(bare, [{"op": "st_add", "st": {"id": "ST-0001", "text": "足す"}}], NOTE_NOW, 2)[0]
