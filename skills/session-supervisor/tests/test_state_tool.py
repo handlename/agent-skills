@@ -6650,13 +6650,32 @@ class ObsidianVaultTest(unittest.TestCase):
         self.assertIn("runs only on", err)
 
     def test_check_template(self):
-        good = '---\ntitle: ""\ntags: ["supervised", "nature/sre"]\nstatus: backlog\nassignee: user\n---\n## 概要\n\n## ログ\n'
+        good = '---\ntitle: ""\ntags: ["supervised", "nature/sre"]\nstatus: backlog\nassignee: user\nsummary: null\n---\n## 概要\n\n## ログ\n'
         self.assertEqual(st.template_errors(good, "task"), [])
         self.assertEqual(len(st.template_errors(good, "project")), 2)
         project = good.replace('"supervised"', '"supervised", "project", "task"').replace("## ログ", st.PROJECT_TASKS_SECTION + "\n## ログ")
         self.assertEqual(st.template_errors(project, "project"), [])
+        unsorted = project.replace(st.PROJECT_TASKS_SECTION, "")
+        self.assertEqual(len(st.template_errors(unsorted, "project")), 1)
+        self.assertEqual(len(st.template_errors(project.replace("direction: DESC", "direction: ASC"), "project")), 1)
+        self.assertIn("order", st.template_errors(good.replace("## ログ", "## アクション\n\n## サブタスク"), "task")[0])
         bad = '---\ntags: ["task"]\nstatus: backlog\nassignee: agent\n---\n## メモ\n'
-        self.assertEqual(len(st.template_errors(bad, "task")), 4)
+        self.assertEqual(len(st.template_errors(bad, "task")), 5)
+        for kind, uid in (("task", "U"), ("project", "U")):
+            self.assertEqual(st.template_errors(st.new_note_text(uid, "t", kind, "backlog", "user", "2026-11-17T00:00:00"), kind), [])
+
+    def test_setup_reports_outdated_note_templates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "sup"
+            templates = target / "vault" / "_templates"
+            templates.mkdir(parents=True)
+            (templates / "task.md").write_text(st.new_note_text("U", "t", "task", "backlog", "user", "2026-11-17T00:00:00"), encoding="utf-8")
+            (templates / "project.md").write_text('---\ntags: ["supervised", "project", "task"]\nstatus: backlog\nassignee: user\n---\n## 概要\n', encoding="utf-8")
+            proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            outdated = [l for l in proc.stdout.splitlines() if l.startswith("outdated:")]
+            self.assertEqual(len(outdated), 1, proc.stdout)
+            self.assertIn("project.md (", outdated[0])
 
 
 class CancelWithoutWorkersTest(unittest.TestCase):

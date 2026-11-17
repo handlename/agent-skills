@@ -4616,6 +4616,8 @@ def _setup_vault(supervisor_dir):
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, dest)
         report.append((status, dest))
+    # Note templates are the user's: setup only reports those whose notes would differ from the ones state_tool creates.
+    report += [("outdated", f"{path} ({'; '.join(errors)})") for path, errors in outdated_templates(Path(vault) / templates)]
     return report
 
 
@@ -5652,12 +5654,32 @@ def template_errors(text, kind):
     for key, want in (("status", "backlog"), ("assignee", "user")):
         if props.get(key) != want:
             errors.append(f"{key} must be {want}, got {props.get(key)!r}")
-    if "概要" not in parse_sections(body):
+    if "summary" not in props:
+        errors.append("the frontmatter must have the summary prop (empty)")
+    sections = parse_sections(body)
+    if "概要" not in sections:
         errors.append("the body must have a '## 概要' section")
-    if kind == "project" and PROJECT_TASKS_FILTER.strip("'") not in body:
-        errors.append("a project template must have the '## タスク' kanban of its tasks (a base block filtered by "
-                      f"{PROJECT_TASKS_FILTER}, as in the notes state_tool creates)")
+    if kind == "project" and PROJECT_TASKS_SECTION not in body:
+        errors.append("a project template must have the '## タスク' kanban of its tasks exactly as in the notes "
+                      "state_tool creates")
+    # Notes made from the template and by state_tool keep their sections in the same order.
+    order = NOTE_SECTIONS[:1] + ("タスク",) + NOTE_SECTIONS[1:]
+    found = [name for name in sections if name in order]
+    if found != sorted(found, key=order.index):
+        errors.append(f"sections must follow the order {[n for n in order if n in found]}; got {found}")
     return errors
+
+
+def outdated_templates(folder):
+    """[(path, errors)] of the supervised note templates in folder that differ from the notes state_tool creates."""
+    found = []
+    for path in sorted(Path(folder).glob("*.md")) if Path(folder).is_dir() else ():
+        text = path.read_text(encoding="utf-8")
+        kind = note_kind(parse_frontmatter(text)[0])
+        errors = kind and template_errors(text, kind)
+        if errors:
+            found.append((path, errors))
+    return found
 
 
 def cmd_check_template(args):
