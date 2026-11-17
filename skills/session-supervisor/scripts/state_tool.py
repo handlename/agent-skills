@@ -4532,7 +4532,7 @@ def cmd_setup(args):
 KANBAN_ORDER = "[formula.title, summary, subtasks, task_id, project_id, created_at]"
 
 
-def _kanban_base(name, filters, templates, order=KANBAN_ORDER):
+def _kanban_base(name, filters, templates, order=KANBAN_ORDER, sort=""):
     in_templates = (f"""'!file.inFolder("{templates}")'""",) if templates else ()
     lines = "".join(f"\n    - {f}" for f in in_templates + filters)
     return f"""```base
@@ -4547,7 +4547,7 @@ views:
     groupBy:
       property: status
       direction: ASC
-    order: {order}
+    order: {order}{sort}
     groupOrder: [backlog, in progress, pending, done, archived]
     hideEmptyGroups: false
 ```
@@ -4559,10 +4559,13 @@ _ASSIGNEE_IS = """'assignee == "{}"'"""
 
 
 # The project note's own tasks: `this` is the note that holds the block, and a link equals the file it resolves to,
-# so `parent == this` matches both `[[<uid>]]` (state_tool) and `[[<path>|<title>]]` (sv-project.md).
+# so `parent == this` matches both `[[<uid>]]` (state_tool) and `[[<path>|<title>]]` (sv-project.md). Cards of a
+# column are sorted by the last change of the task note, newest first.
 PROJECT_TASKS_FILTER = "'parent == this'"
+PROJECT_TASKS_SORT = "\n    sort:\n      - property: file.mtime\n        direction: DESC"
 PROJECT_TASKS_SECTION = "## タスク\n\n" + _kanban_base("タスク", (_NOT_PROJECT, PROJECT_TASKS_FILTER), None,
-                                                    "[formula.title, summary, task_id, subtasks, assignee]")
+                                                    "[formula.title, summary, task_id, subtasks, assignee]",
+                                                    PROJECT_TASKS_SORT)
 
 
 def supervisor_note(templates):

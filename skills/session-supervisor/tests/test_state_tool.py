@@ -3593,6 +3593,7 @@ class NoteTemplateTest(unittest.TestCase):
         self.assertEqual(list(sections), ["概要", "タスク", *[n for n in st.NOTE_SECTIONS[1:] if n != st.REPORT_SECTION]])
         self.assertIn("    - 'parent == this'\n", sections["タスク"])
         self.assertNotIn("inFolder", sections["タスク"])
+        self.assertIn("    sort:\n      - property: file.mtime\n        direction: DESC\n", sections["タスク"])
         follows = st.parse_frontmatter(st.new_note_text("u", "t", "task", "backlog", "agent", NOTE_NOW, follows="20261101_000000"))[0]
         self.assertEqual(follows["follows"], "[[20261101_000000]]")
         for args in (("u", "t", "memo", "backlog", "agent"), ("u", "t", "task", "new", "agent"), ("u", "t", "task", "backlog", "bot")):
