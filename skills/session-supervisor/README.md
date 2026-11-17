@@ -71,7 +71,9 @@ The sessions it starts:
 
 ## 4. Core Workflow
 
-```mermaid
+![Core workflow: a delegated note is picked up by sv, which starts a worker; the worker's questions go to the note, and a verified worker is kept until you confirm the task complete](core-workflow.svg)
+
+[//]: # "Source of core-workflow.svg. Kept as a link reference definition because the --> arrows would end an HTML comment.
 graph TD
     A[Note set to backlog / agent, or a request in sv-chat] --> B[sv picks up the task]
     B --> C[sv starts a worker per directory]
@@ -81,7 +83,7 @@ graph TD
     D -->|done| F[sv verifies the branch or files via an observer subagent]
     F --> G[Worker kept for follow-ups]
     G -->|You confirm the task complete| H[Workers archived]
-```
+"
 
 1. **Delegate**: set a task note (tagged `supervised`) to `status: backlog`, `assignee: agent`, or ask `sv-chat`. The note's `## 概要` is the request.
 2. **Dispatch**: `sv` picks the target directory (cloning a repository or creating a work directory when needed) and starts one worker per directory.

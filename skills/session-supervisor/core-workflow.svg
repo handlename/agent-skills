@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="840" height="672" viewBox="0 0 840 672" font-family="-apple-system, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L8,4 L0,8 z" fill="#57606a"/>
+    </marker>
+  </defs>
+  <rect width="840" height="672" fill="#ffffff"/>
+
+  <g fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arrow)">
+    <path d="M260,72 V112"/>
+    <path d="M260,160 V200"/>
+    <path d="M260,248 V288"/>
+    <path d="M260,336 V376"/>
+    <path d="M260,424 V464"/>
+    <path d="M260,512 V552"/>
+    <path d="M484,312 H580"/>
+    <path d="M696,288 V232 Q696,224 688,224 H484"/>
+  </g>
+
+  <g font-size="12" fill="#57606a" style="paint-order: stroke; stroke: #ffffff; stroke-width: 3">
+    <text x="532" y="302" text-anchor="middle">needs_input</text>
+    <text x="590" y="214" text-anchor="middle">You answer in the note</text>
+    <text x="272" y="360">done</text>
+    <text x="272" y="536">You confirm the task complete</text>
+  </g>
+
+  <g stroke-width="1.5">
+    <rect x="36" y="24" width="448" height="48" rx="6" fill="#ffffff" stroke="#d0d7de"/>
+    <rect x="36" y="112" width="448" height="48" rx="6" fill="#f6f8fa" stroke="#d0d7de"/>
+    <rect x="36" y="200" width="448" height="48" rx="6" fill="#f6f8fa" stroke="#d0d7de"/>
+    <rect x="36" y="288" width="448" height="48" rx="6" fill="#f6f8fa" stroke="#d0d7de"/>
+    <rect x="580" y="288" width="232" height="48" rx="6" fill="#ffffff" stroke="#d0d7de"/>
+    <rect x="36" y="376" width="448" height="48" rx="6" fill="#f6f8fa" stroke="#d0d7de"/>
+    <rect x="36" y="464" width="448" height="48" rx="6" fill="#f6f8fa" stroke="#d0d7de"/>
+    <rect x="36" y="552" width="448" height="48" rx="6" fill="#f6f8fa" stroke="#d0d7de"/>
+  </g>
+
+  <g font-size="14" fill="#1f2328" text-anchor="middle">
+    <text x="260" y="53">Note set to backlog / agent, or a request in sv-chat</text>
+    <text x="260" y="141">sv picks up the task</text>
+    <text x="260" y="229">sv starts a worker per directory</text>
+    <text x="260" y="317">Worker reports with a supervisor-report block</text>
+    <text x="696" y="317">Question copied into the note</text>
+    <text x="260" y="405">sv verifies the branch or files via an observer subagent</text>
+    <text x="260" y="493">Worker kept for follow-ups</text>
+    <text x="260" y="581">Workers archived</text>
+  </g>
+
+  <line x1="16" y1="624" x2="824" y2="624" stroke="#d8dee4" stroke-width="1"/>
+  <g font-size="12" fill="#57606a">
+    <rect x="36" y="640" width="16" height="16" rx="4" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+    <text x="60" y="653">Your step</text>
+    <rect x="148" y="640" width="16" height="16" rx="4" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+    <text x="172" y="653">Supervisor or worker step</text>
+  </g>
+</svg>
