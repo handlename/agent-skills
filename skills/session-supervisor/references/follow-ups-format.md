@@ -13,7 +13,7 @@ A worker's result can be verified while work remains for the user, such as revie
 - done: pr_closed
 ```
 
-With this rule, a verified PR `https://github.com/org/repo-a/pull/42` gets the user action "Review org/repo-a#42". The task stays `needs_user` until the follow-up is removed, then `commit` archives it.
+With this rule, a verified PR `https://github.com/org/repo-a/pull/42` gets the user action "Review org/repo-a#42". The task stays `needs_user` until the follow-up is removed, then `commit` archives it. While a worker of the task is observed `running`, the follow-up does not make it `needs_user` ([state-schema.md](state-schema.md), Derivation).
 
 ## Rules
 

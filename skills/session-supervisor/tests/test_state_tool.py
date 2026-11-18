@@ -2294,6 +2294,18 @@ class FollowUpStateTest(unittest.TestCase):
         state = st.next_state(self.current, copy.deepcopy(self.current), NOW)
         self.assertEqual(find(state["tasks"], "T-0040")["status"], "needs_user")
 
+    def test_pr_waits_do_not_stop_a_working_worker(self):
+        task = pr_task(self.current, intended="running", observed="running")
+        task["user_actions"] += [follow_up_ua("UA-0040", PR43),
+                                 {"id": "UA-0041", "description": "Merge #44", "since": NOW, "detector": "pr_closed"}]
+        state = st.next_state(self.current, copy.deepcopy(self.current), NOW)
+        self.assertEqual(find(state["tasks"], "T-0040")["status"], "running")
+        workers = {w["id"]: w for w in state["workers"]}
+        other = {"id": "UA-0042", "description": "Decide whether to push", "since": NOW}
+        self.assertEqual(st.derive_status(dict(task, user_actions=task["user_actions"] + [other]), workers), "needs_user")
+        kept = dict(task, kept=["w-0040"])
+        self.assertEqual(st.derive_status(kept, workers), "needs_user")
+
     def test_removing_follow_up_does_not_resolve_push_decision(self):
         git_task(self.current, "T-0020", "w-0020", intended="archived", observed="archived")
         commit_artifacts(self.current, "T-0020")

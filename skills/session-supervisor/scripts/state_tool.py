@@ -572,15 +572,22 @@ def _archived_externally(worker):
     return worker.get("observed_state") == "archived" and worker.get("intended_state") != "archived"
 
 
+def _waits_on_pr(ua):
+    return bool(ua.get("follow_up")) or ua.get("detector") == "pr_closed"
+
+
 def derive_status(task, workers_by_id):
     workers = [workers_by_id[wid] for wid in task.get("worker_ids", []) if wid in workers_by_id]
     if task.get("cancel") and not any(_occupies(w) for w in workers):
         return "done"
+    kept = set(task.get("kept", []))
+    # While a worker is at work (hc `working`), a follow-up or PR-close wait is the user's to do later, not a stop.
+    working = any(w.get("observed_state") == "running" and w["id"] not in kept for w in workers)
+    blocking = [ua for ua in task.get("user_actions", []) if not (working and _waits_on_pr(ua))]
     # An archive the supervisor did not request must be verified before the task can finish.
-    if task.get("user_actions") or any(_archived_externally(w) for w in workers):
+    if blocking or any(_archived_externally(w) for w in workers):
         return "needs_user"
     # A kept worker's verified result is recorded; its session only waits for follow-ups, so it counts as finished.
-    kept = set(task.get("kept", []))
     observed = ["archived" if _finished(w) or w["id"] in kept else w.get("observed_state") for w in workers]
     if any(o in ACTIVE_OBSERVED for o in observed):
         return "running"
