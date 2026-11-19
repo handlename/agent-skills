@@ -406,7 +406,7 @@ Note ops (all idempotent): `st_adopt {st: {text, id?}}` numbers the first unnumb
 
 ### User changes (`user_transition`)
 
-`notes-scan` compares each note with `note_seen` (or with the `before` values of an unconfirmed journal entry) and classifies the change. `state_tool` never writes `done` / `agent` (completion is the user's to confirm); the rows seen from done/agent cover notes written by earlier versions. Any combination not listed is `invalid`: the user is told, `user_hold` (`reason: invalid`) stops props and starts, and nothing is acked until the user sets listed values. A change of `## アクション` alone needs no handling.
+`notes-scan` compares each note with `note_seen` (or with the `before` values of an unconfirmed journal entry) and classifies the change. `state_tool` never writes `done` / `agent` (completion is the user's to confirm); the rows seen from done/agent cover notes written by earlier versions. Any combination not listed is `invalid`: the user is told, `user_hold` (`reason: invalid`) stops props and starts, and nothing is acked until the user sets listed values. A change of `## アクション` alone needs no handling, except a checked `完了にする` (row 25), which the supervisor acks at once even while the assignee is user.
 
 | # | Seen | Now | Condition | Event |
 | :--- | :--- | :--- | :--- | :--- |
@@ -434,6 +434,7 @@ Note ops (all idempotent): `st_adopt {st: {text, id?}}` numbers the first unnumb
 | 22 | only `## 成果物` changed | dependencies met (or a stub) | | `artifacts_edit` |
 | 23 | only `## 成果物` changed | dependencies not met | live task | `artifacts_broken` |
 | 24 | in progress/user | in progress/agent | project with `done_proposed` | `reject_done` |
+| 25 | any row whose event is `none` | an open numbered item with `- [x] 完了にする` in its `answer` | | `ua_done` |
 
 The stub case of #16 is checked right after #19 and before the rows that look at a hold or a worker (#8, #11, #12), so a stub set to in progress/agent or backlog/agent is always `follow_up` (SKILL.md 6.7 (c)). A change to the same values as before stays `none`.
 

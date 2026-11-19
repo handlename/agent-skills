@@ -121,6 +121,9 @@ UA_THREAD_HEAD = "#### やりとり"
 UA_AGENT_RE = re.compile(r"^> \[!sv-agent\][ \t]*(.*?)[ \t]*$")
 UA_INPUT_RE = re.compile(r"^> \[!sv-input\]")
 UA_OPTION_OPEN_RE = re.compile(r"^[ \t]*[-*+] \[ \] ")
+# The option the supervisor puts under every item that waits for the user; checking it is the user's explicit "done".
+UA_DONE_OPTION = "完了にする"
+UA_DONE_MARK_RE = re.compile(r"^[ \t]*[-*+] \[[xX]\] " + UA_DONE_OPTION + r"[ \t]*$")
 UA_ANSWER_DETECTORS = ("worker_report", "pr_closed", "manager_report")
 ST_ID_RE = re.compile(r"^ST-(\d+)$")
 # A subtask is a top-level checklist line of `## サブタスク`: `- [ ] [ST-NNNN] @agent|@user text (w-NNNN sha)`. The id,
@@ -2240,9 +2243,10 @@ def _body_of(lines):
 def _ua_full(ua, ua_id, description, content):
     k = _answer_at(content)
     thread = [] if k is None else _thread(content[k + 1:], ua["kind"] == "req")
+    answer = _pending(thread, ua["kind"] == "req")
     return {"id": ua_id, "assignee": "agent" if ua["kind"] == "req" else "user", "description": description, **ua,
-            "body": _body_of(content if k is None else content[:k]), "answer": _pending(thread, ua["kind"] == "req"),
-            "thread": thread}
+            "body": _body_of(content if k is None else content[:k]), "answer": answer,
+            "done_marked": any(UA_DONE_MARK_RE.match(line) for line in answer.split("\n")), "thread": thread}
 
 
 def _ua_layout(lines, start, end):
@@ -2369,8 +2373,9 @@ def _ua_content(ua):
         lines.append(UA_THREAD_HEAD)
         for m in thread:
             lines += [""] + (_agent_lines(m["text"], m["at"]) if m["from"] == "agent" else _answer_lines(m["text"]))
-        if ua.get("options") and not ua.get("done") and ua["kind"] != "req" and (not thread or thread[-1]["from"] == "agent"):
-            lines += [""] + [f"- [ ] {o}" for o in ua["options"]]
+        waiting = thread[-1]["from"] == "agent" if thread else ua["kind"] != "req"
+        if waiting and not ua.get("done"):
+            lines += [""] + _option_lines(ua.get("options"), ua["kind"])
     return lines[:-1] if lines and not lines[-1] else lines
 
 
@@ -2696,6 +2701,11 @@ def _options(op, name):
     return [o.strip() for o in options]
 
 
+def _option_lines(options, kind):
+    """Unchecked option lines under an item that waits for the user: the options of a user action, then the done option."""
+    return [f"- [ ] {o}" for o in (options or []) if kind != "req" and o != UA_DONE_OPTION] + [f"- [ ] {UA_DONE_OPTION}"]
+
+
 def _drop_marks(content):
     """content without the `[!sv-input]` mark of older notes and unchecked option lines under `#### やりとり`, with one
     blank line below the heading, blank runs collapsed and trailing blank lines removed."""
@@ -2770,8 +2780,8 @@ def _op_ua_answer(lines, op, now, rev, index, problems):
     if _answer_at(content) is None:
         content += ([""] if content or not e["done"] else []) + [UA_THREAD_HEAD]
     content += [""] + (_agent_lines(text, _short_time(now)) if who == "agent" else _answer_lines(text))
-    if who == "agent" and not e["done"] and ua["kind"] != "req" and options:
-        content += [""] + [f"- [ ] {o}" for o in options]
+    if who == "agent" and not e["done"]:
+        content += [""] + _option_lines(options, ua["kind"])
     if e["done"]:
         lines[e["first"]:e["stop"]] = _callout_lines(content)
     else:
@@ -4503,6 +4513,12 @@ def _commit_v2(args, current):
             new_ids[uid] = new_ids.get(uid, []) + ids
             problems += [f"{paths[uid]}: {p}" for p in probs]
     written = sorted(uid for uid in after if after[uid] and after[uid] != base.get(uid))
+    marked = [f"{task_ids.get(uid, uid)} {ua['id']}" for uid in written
+              for ua in parse_user_actions(parse_sections(parse_frontmatter(after[uid])[1]).get(UA_SECTION, ""))
+              if ua_open(ua) and ua["done_marked"] and ua["id"]]
+    if marked:
+        raise StateError(f"the user checked {UA_DONE_OPTION} on {', '.join(marked)}: ack them (ua_ack) in this candidate "
+                         "(SKILL.md section 5, Done mark)")
     new_seen = {}
     for uid in written:
         values, old, seen = note_values(after[uid]), note_values(base[uid]) if base.get(uid) else None, seen_cmp.get(uid)
@@ -5445,7 +5461,7 @@ def _require_v2(state, path):
 
 def _ua_summary(ua):
     return {k: ua[k] for k in ("id", "kind", "assignee", "detector", "answer_required", "done", "description", "body", "answer",
-                               "thread", "rule", "url")}
+                               "done_marked", "thread", "rule", "url")}
 
 
 def _scan_ctx(kind, item, view_item, workers, live, duplicate, items):
@@ -5497,6 +5513,10 @@ def notes_scan(state, texts, uids, vault=None):
         rows = parse_artifacts(body.get(ART_SECTION, ""))[0]
         ctx, needs = _scan_ctx(kind, item, view_items.get((key, item["id"])), view["workers"], live, len(rels) > 1, rows)
         result = user_transition(seen, cur, ctx)
+        uas = parse_user_actions(body.get(UA_SECTION, ""))
+        if result["event"] == "none" and any(ua_open(u) and u["done_marked"] and u["id"] for u in uas):
+            # The user checked 完了にする: the item is acked now, whoever the assignee is (row 25).
+            result = dict(result, event="ua_done", row=25)
         # A change that needs nothing (an answer or checkbox edit, a paused note moved between user values) is not
         # printed; it is acked with the next event of the note. AC-12: nothing happens while the assignee is user.
         if result["event"] == "none" and not result["clear_invalid"]:
@@ -5511,7 +5531,7 @@ def notes_scan(state, texts, uids, vault=None):
             if warned.get(uid) == warning:
                 continue
         event = dict(result, uid=uid, path=rels[0], id=item.get("id"), kind=kind, live=live, seen=seen, cur=cur,
-                     user_actions=[_ua_summary(u) for u in parse_user_actions(body.get(UA_SECTION, ""))])
+                     user_actions=[_ua_summary(u) for u in uas])
         if kind == "task":
             event["subtasks"] = parse_subtasks(body.get(ST_SECTION, ""))
         if needs:
