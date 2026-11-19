@@ -2,7 +2,7 @@
 
 This skill turns one Claude Code session into a **supervisor** that delegates work to other Claude Code sessions (**workers**) and tracks it to completion. The supervisor runs in a [Herdr](https://herdr.dev) terminal named `sv` and starts each worker as an `hc` (herdr-core) child: a git worktree per worker in a git repository, or one worker per non-git directory.
 
-Every task and project is a note in an Obsidian vault. You delegate a task by setting its note to `backlog` / `agent`, answer the agent's questions inside the note, and follow progress on a kanban dashboard note (`Supervisor.md`). The supervisor's runtime data lives in a validated `state.json` that survives context compaction, resume, `/clear`, and re-creation of the supervisor.
+Every task and project is a note in an Obsidian vault. You delegate a task by setting its note to `backlog` / `agent`, answer the agent's questions inside the note, and follow progress on a kanban dashboard note (`Supervisor.md`), where a task with the note property `priority: A` (of `A`, `B`, `C`) stays at the top of its column even when nothing changed in it. The supervisor's runtime data lives in a validated `state.json` that survives context compaction, resume, `/clear`, and re-creation of the supervisor.
 
 The supervisor itself never edits, commits, or pushes. Changes go to workers, observation goes to subagents, and a PreToolUse guard installed by `setup` blocks out-of-directory edits and mutating git / jj / gh commands. A push or pull request happens only when you consent to it, and always by a worker.
 

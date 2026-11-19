@@ -3625,7 +3625,9 @@ class NoteTemplateTest(unittest.TestCase):
                                                           if n not in (st.REPORT_SECTION, st.DONE_WHEN_SECTION)]])
         self.assertIn("    - 'parent == this'\n", sections["タスク"])
         self.assertNotIn("inFolder", sections["タスク"])
-        self.assertIn("    sort:\n      - property: file.mtime\n        direction: DESC\n", sections["タスク"])
+        self.assertEqual(sections["タスク"].count(st.TASK_SORT + "\n"), 2)
+        self.assertEqual(sections["タスク"].count(st.PRIORITY_FORMULA + "\n"), 2)
+        self.assertIn("summary, priority,", sections["タスク"])
         user, agent = sections["タスク"].split("### エージェントの番")
         self.assertTrue(user.lstrip("\n").startswith("### ユーザーの番\n"))
         self.assertIn("""    - 'assignee == "user"'\n""", user)
@@ -5438,6 +5440,18 @@ class SetupVaultTest(unittest.TestCase):
                 self.assertIn(f"{'exists' if edited else 'updated'}: {dashboard}", proc.stdout)
                 self.assertEqual(dashboard.read_text(encoding="utf-8"), old if edited else st.supervisor_note("_templates"))
 
+    def test_task_kanbans_sort_by_priority_then_last_change(self):
+        note = st.supervisor_note("_templates")
+        tasks, projects = note.split("## プロジェクト")
+        self.assertEqual(tasks.count(st.TASK_SORT + "\n"), 2)
+        self.assertEqual(tasks.count(st.PRIORITY_FORMULA + "\n"), 2)
+        self.assertEqual(tasks.count(st.TASK_ORDER), 2)
+        self.assertNotIn("sort:", projects)
+        self.assertNotIn("priority", projects)
+        # The dashboard before 0.82 (no sort) is an earlier version that setup brings up to date.
+        self.assertIn(note.replace(st.TASK_SORT, "").replace(st.PRIORITY_FORMULA, "").replace(st.TASK_ORDER, st.KANBAN_ORDER),
+                      st.legacy_supervisor_notes("_templates"))
+
     def test_creates_the_vault_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "sup"
@@ -5452,7 +5466,7 @@ class SetupVaultTest(unittest.TestCase):
             self.assertIn("## プロジェクト", dashboard)
             self.assertIn("order: [formula.title, summary, project_id, assignee, created_at]", dashboard)
             self.assertIn("groupOrder: [backlog, in progress, pending, done, archived]", (vault / "Supervisor.md").read_text(encoding="utf-8"))
-            self.assertEqual(dashboard.count("order: [formula.title, summary, subtasks, task_id, project_id, created_at]"), 2)
+            self.assertEqual(dashboard.count("order: [formula.title, summary, priority, subtasks, task_id, project_id, created_at]"), 2)
             self.assertIn('file.hasTag("supervised")', dashboard)
             self.assertEqual(sorted(p.name for p in (vault / "_templates").iterdir()), ["sv-project.md", "sv-status.md"])
             self.assertFalse((vault / ".obsidian").exists())

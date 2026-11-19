@@ -4673,7 +4673,15 @@ def cmd_setup(args):
 KANBAN_ORDER = "[formula.title, summary, subtasks, task_id, project_id, created_at]"
 
 
-def _kanban_base(name, filters, templates, order=KANBAN_ORDER, sort=""):
+# A task's `priority` prop (A, B, or C) ranks its card in a column: A first, then B, then C; a note without it, or with
+# another value, ranks as B. Cards of one rank are sorted by the last change of the note, newest first.
+PRIORITY_FORMULA = """\n  priority_rank: 'if(priority == "A", 1, if(priority == "C", 3, 2))'"""
+TASK_SORT = ("\n    sort:\n      - property: formula.priority_rank\n        direction: ASC"
+             "\n      - property: file.mtime\n        direction: DESC")
+TASK_ORDER = "[formula.title, summary, priority, subtasks, task_id, project_id, created_at]"
+
+
+def _kanban_base(name, filters, templates, order=KANBAN_ORDER, sort="", formulas=""):
     in_templates = (f"""'!file.inFolder("{templates}")'""",) if templates else ()
     lines = "".join(f"\n    - {f}" for f in in_templates + filters)
     return f"""```base
@@ -4681,7 +4689,7 @@ filters:
   and:
     - file.hasTag("supervised"){lines}
 formulas:
-  title: link(file.name, title)
+  title: link(file.name, title){formulas}
 views:
   - type: kanban
     name: {name}
@@ -4701,19 +4709,19 @@ _ASSIGNEE_IS = """'assignee == "{}"'"""
 
 # The project note's own tasks on two kanbans by assignee, like the dashboard: `this` is the note that holds the
 # block, and a link equals the file it resolves to, so `parent == this` matches both `[[<uid>]]` (state_tool) and
-# `[[<path>|<title>]]` (sv-project.md). Cards of a column are sorted by the last change of the task note, newest first.
+# `[[<path>|<title>]]` (sv-project.md). Cards of a column are sorted by priority, then by the last change of the task note.
 PROJECT_TASKS_FILTER = "'parent == this'"
-PROJECT_TASKS_SORT = "\n    sort:\n      - property: file.mtime\n        direction: DESC"
 PROJECT_TASKS_SECTION = "## タスク\n\n" + "\n".join(
     f"### {heading}\n\n" + _kanban_base(name, (_NOT_PROJECT, PROJECT_TASKS_FILTER, _ASSIGNEE_IS.format(who)), None,
-                                         "[formula.title, summary, task_id, subtasks]", PROJECT_TASKS_SORT)
+                                         "[formula.title, summary, priority, task_id, subtasks]", TASK_SORT, PRIORITY_FORMULA)
     for heading, name, who in (("ユーザーの番", "ユーザー", "user"), ("エージェントの番", "エージェント", "agent")))
 
 
-def supervisor_note(templates):
-    """Tasks on two kanbans by assignee, and projects, which stay in progress / agent until closed, on their own."""
-    user = _kanban_base("ユーザー", (_NOT_PROJECT, _ASSIGNEE_IS.format("user")), templates)
-    agent = _kanban_base("エージェント", (_NOT_PROJECT, _ASSIGNEE_IS.format("agent")), templates)
+def supervisor_note(templates, order=TASK_ORDER, sort=TASK_SORT, formulas=PRIORITY_FORMULA):
+    """Tasks on two kanbans by assignee, sorted by priority, and projects, which stay in progress / agent until closed,
+    on their own. The defaults after templates are the current layout; older ones generate earlier dashboards."""
+    user = _kanban_base("ユーザー", (_NOT_PROJECT, _ASSIGNEE_IS.format("user")), templates, order, sort, formulas)
+    agent = _kanban_base("エージェント", (_NOT_PROJECT, _ASSIGNEE_IS.format("agent")), templates, order, sort, formulas)
     project = _kanban_base("プロジェクト", ('file.hasTag("project")',), templates,
                            "[formula.title, summary, project_id, assignee, created_at]")
     return f"## ユーザーの番\n\n{user}\n## エージェントの番\n\n{agent}\n## プロジェクト\n\n{project}"
@@ -4723,7 +4731,8 @@ def legacy_supervisor_notes(templates):
     """Dashboards that earlier setups generated, which setup may replace because the user never edited them."""
     return tuple(f"## ユーザーの番\n\n{_kanban_base('ユーザー', (_ASSIGNEE_IS.format('user'),), templates, order)}\n"
                  f"## エージェントの番\n\n{_kanban_base('エージェント', (_ASSIGNEE_IS.format('agent'),), templates, order)}"
-                 for order in (KANBAN_ORDER, "[formula.title, task_id, project_id, created_at]"))
+                 for order in (KANBAN_ORDER, "[formula.title, task_id, project_id, created_at]")) + (
+        supervisor_note(templates, KANBAN_ORDER, "", ""),)
 
 
 def _setup_vault(supervisor_dir):

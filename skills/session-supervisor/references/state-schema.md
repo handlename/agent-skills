@@ -387,6 +387,8 @@ For a task or stub note it writes in the same way `subtasks`: `<checked>/<all>` 
 
 The `summary` prop is written only by the `summary` note op (SKILL.md section 4), never derived: one line of at most 80 characters (`note_summary` joins the lines with spaces and cuts a longer text to 79 characters plus `…`), shown on the kanban card. New notes start with `summary: null` (templates from the Vault interview have it empty; a note without it gets it at the first `summary` op). It is not a user value either: `notes-scan` ignores it, and a user's edit stays until the next `summary` op.
 
+The `priority` prop (`A`, `B`, or `C`) is the user's alone: `state_tool` never writes or checks it, `set_props` keeps its line as it is, and `notes-scan` ignores it. Only the task kanbans read it, ranking a column's cards by it (none or another value ranks as `B`) and then by the last change (SKILL.md section 3).
+
 ### Subtasks
 
 `## サブタスク` holds the task's subtasks, one top-level checklist line each (an indented line, a fenced block, or a comment is the user's note):
