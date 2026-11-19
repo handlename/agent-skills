@@ -5411,6 +5411,66 @@ class NewNoteCliTest(unittest.TestCase):
         self.assertFalse((env.vault / "2026/11/20261110_090001.md").exists())
 
 
+class AttachCliTest(unittest.TestCase):
+    def setUp(self):
+        self.env = VaultEnv(self)
+        self.env.add_task("T-0020", "w-0020", "20261110_090000")
+        self.env.save()
+        self.src = self.env.dir / "figs"
+        self.src.mkdir()
+
+    def attach(self, *names, uid="20261110_090000"):
+        files = [a for n in names for a in ("--file", str(self.src / n))]
+        return self.env.run("attach", "--state", str(self.env.state_path), "--uid", uid, *files)
+
+    def test_copies_into_the_note_folder_and_prints_embeds(self):
+        (self.src / "flow.svg").write_text("<svg/>", encoding="utf-8")
+        (self.src / "Shot.PNG").write_bytes(b"png")
+        code, out, _ = self.attach("flow.svg", "Shot.PNG")
+        self.assertEqual(code, 0)
+        rel = "_attachments/supervisor/20261110_090000"
+        self.assertEqual(json.loads(out), [
+            {"file": str(self.src / "flow.svg"), "status": "created", "path": f"{rel}/flow.svg", "embed": f"![[{rel}/flow.svg]]"},
+            {"file": str(self.src / "Shot.PNG"), "status": "created", "path": f"{rel}/Shot.PNG", "embed": f"![[{rel}/Shot.PNG]]"}])
+        self.assertEqual((self.env.vault / rel / "flow.svg").read_text(encoding="utf-8"), "<svg/>")
+
+    def test_same_content_is_reused_and_other_content_gets_a_new_name(self):
+        (self.src / "flow.svg").write_text("v1", encoding="utf-8")
+        self.attach("flow.svg")
+        self.assertEqual(json.loads(self.attach("flow.svg")[1])[0]["status"], "exists")
+        (self.src / "flow.svg").write_text("v2", encoding="utf-8")
+        result = json.loads(self.attach("flow.svg")[1])[0]
+        self.assertEqual((result["status"], result["path"]), ("created", "_attachments/supervisor/20261110_090000/flow-2.svg"))
+        self.assertEqual((self.env.vault / "_attachments/supervisor/20261110_090000/flow.svg").read_text(encoding="utf-8"), "v1")
+
+    def test_attachments_key_of_claude_md(self):
+        (self.env.dir / "CLAUDE.md").write_text("## Locations\n- attachments: assets/sv\n", encoding="utf-8")
+        (self.src / "a.webp").write_bytes(b"w")
+        self.assertEqual(json.loads(self.attach("a.webp")[1])[0]["embed"], "![[assets/sv/20261110_090000/a.webp]]")
+
+    def test_rejects_without_writing(self):
+        (self.src / "notes.md").write_text("x", encoding="utf-8")
+        (self.src / "a#b.png").write_bytes(b"p")
+        (self.src / "ok.png").write_bytes(b"p")
+        for names, uid, expected in ((("notes.md",), "20261110_090000", "not an image"),
+                                     (("ok.png", "a#b.png"), "20261110_090000", "must not start with"),
+                                     (("missing.png",), "20261110_090000", "not a file"),
+                                     (("ok.png",), "20991231_000000", "no note with uid")):
+            with self.subTest(names=names, uid=uid):
+                code, _, err = self.attach(*names, uid=uid)
+                self.assertEqual(code, 1)
+                self.assertIn(expected, err)
+        self.assertFalse((self.env.vault / "_attachments").exists())
+
+    def test_parse_report_checks_figures(self):
+        base = {"task_id": "T-1", "worker_id": "w-1", "status": "done", "summary": "", "artifacts": {}, "blockers": [],
+                "next_action": ""}
+        block = lambda r: f"```supervisor-report\n{json.dumps(r)}\n```"
+        self.assertTrue(st.parse_report(block({**base, "figures": ["/tmp/a.svg"]}))["ok"])
+        for bad in ("/tmp/a.svg", ["a.svg"], [1]):
+            self.assertEqual(st.parse_report(block({**base, "figures": bad}))["error"], "figures must be a list of absolute paths")
+
+
 class VaultGuardTest(unittest.TestCase):
     def test_vault_writes_are_blocked_and_the_rest_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -35,7 +35,7 @@ It creates, among others:
 | Path | Purpose |
 | :--- | :--- |
 | `<dir>/state.json` | Runtime state, written only through `state_tool.py commit`. |
-| `<dir>/CLAUDE.md` | `## Locations` (`clone_root`, `work_root`, `worktree_root`, `vault`, ...) and `## Herdr` (`max_workers`, `worker_path`). |
+| `<dir>/CLAUDE.md` | `## Locations` (`clone_root`, `work_root`, `worktree_root`, `vault`, `attachments`, ...) and `## Herdr` (`max_workers`, `worker_path`). |
 | `<dir>/.claude/settings.json` | The SessionStart hook (re-injects a digest after compaction) and the PreToolUse guard. |
 | `<dir>/sv.sh` | Starts, restarts, and stops the supervisor's sessions. |
 | `<dir>/chat/` | The directory of `sv-chat`, the conversational front end. |

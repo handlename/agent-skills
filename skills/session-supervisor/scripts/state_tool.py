@@ -132,8 +132,9 @@ ART_COMMENT_RE = re.compile(r"<!--[ \t]*sv-art[ \t]+(.*?)[ \t]*-->")
 
 LOCATIONS_HEADING = "## Locations"
 LOCATION_KEYS = ("clone_root", "work_root", "worktree_root")
-# Optional keys that setup never adds: the vault (absolute or ~) and, relative to it, the dashboard note and template folder.
-VAULT_REL_KEYS = ("dashboard", "templates")
+# Optional keys that setup never adds: the vault (absolute or ~) and, relative to it, the dashboard note, the template
+# folder, and the folder of the images embedded in notes.
+VAULT_REL_KEYS = ("dashboard", "templates", "attachments")
 LOCATIONS_NOTE = ("`python3 .supervisor/state_tool.py prepare-dir` and `prepare-worktree` are the only commands that write outside "
                   "this directory: they clone repositories into `clone_root/<host>/<owner>/<repo>`, create work directories "
                   "and project directories (with a guard hook) under `work_root`, and add worker worktrees under "
@@ -1671,6 +1672,9 @@ def parse_report(text, expect_task=None, expect_worker=None, allow_awaiting_mana
     if not isinstance(answered, list) or not all(
             isinstance(a, dict) and all(isinstance(a.get(k), str) and a[k].strip() for k in ("question", "answer")) for a in answered):
         return {"ok": False, "error": "answered must be a list of {question, answer} with non-empty strings"}
+    figures = report.get("figures", [])
+    if not isinstance(figures, list) or not all(isinstance(f, str) and os.path.isabs(f) for f in figures):
+        return {"ok": False, "error": "figures must be a list of absolute paths"}
     done_sts = report.get("subtasks_done", [])
     if not isinstance(done_sts, list) or not all(isinstance(i, str) and ST_ID_RE.match(i) for i in done_sts):
         return {"ok": False, "error": "subtasks_done must be a list of ST-NNNN ids"}
@@ -4133,6 +4137,9 @@ def cmd_commit(args):
 VAULT_DIR = "vault"
 DASHBOARD_NOTE = "Supervisor.md"
 TEMPLATES_DIR = "_templates"
+ATTACHMENTS_DIR = "_attachments/supervisor"
+# The image formats Obsidian embeds with `![[...]]`.
+IMAGE_EXTS = (".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp")
 
 
 def vault_locations(supervisor_dir):
@@ -5839,6 +5846,54 @@ def outdated_templates(folder):
     return found
 
 
+def attach_name_error(name):
+    """Why a file name cannot be embedded as `![[...]]`, or None."""
+    if os.path.splitext(name)[1].lower() not in IMAGE_EXTS:
+        return f"not an image Obsidian embeds (use {', '.join(IMAGE_EXTS)})"
+    if name.startswith(".") or re.search(r"[\[\]|#^<>%\\:\x00-\x1f]", name):
+        return "the name must not start with '.' or contain [ ] | # ^ < > % \\ : or control characters"
+    return None
+
+
+def attach_image(src, folder):
+    """Copy the image src into folder (created when missing) and return (status, dest). A file of the same name and
+    content is reused; one of the same name and other content keeps its place and the copy gets `-2`, `-3`, ..."""
+    stem, ext = os.path.splitext(os.path.basename(src))
+    data = Path(src).read_bytes()
+    os.makedirs(folder, exist_ok=True)
+    for n in range(1, 1000):
+        dest = os.path.join(folder, f"{stem}{'' if n == 1 else f'-{n}'}{ext}")
+        if not os.path.exists(dest):
+            Path(dest).write_bytes(data)
+            return "created", dest
+        if Path(dest).read_bytes() == data:
+            return "exists", dest
+    raise StateError(f"too many files named {stem}{ext} in {folder}")
+
+
+def cmd_attach(args):
+    sup = os.path.dirname(os.path.abspath(args.state))
+    vault, _, uids = _vault_index(args.state)
+    if args.uid not in uids or re.search(r"[/\\]", args.uid) or args.uid in (".", ".."):
+        raise StateError(f"no note with uid {args.uid!r} in {vault}")
+    text = Path(sup, "CLAUDE.md").read_text(encoding="utf-8") if Path(sup, "CLAUDE.md").exists() else ""
+    rel_dir = f"{parse_locations(text)[0].get('attachments', ATTACHMENTS_DIR)}/{args.uid}"
+    errors = []
+    for src in args.file:
+        error = (not os.path.isfile(src) and "not a file") or attach_name_error(os.path.basename(src))
+        if error:
+            errors.append(f"{src}: {error}")
+    if errors:
+        raise StateError(errors)
+    results = []
+    for src in args.file:
+        status, dest = attach_image(src, os.path.join(vault, rel_dir))
+        rel = f"{rel_dir}/{os.path.basename(dest)}"
+        results.append({"file": src, "status": status, "path": rel, "embed": f"![[{rel}]]"})
+    print(json.dumps(results, ensure_ascii=False))
+    return 0
+
+
 def cmd_check_template(args):
     errors = template_errors(Path(args.file).read_text(encoding="utf-8"), args.kind)
     if errors:
@@ -5959,6 +6014,12 @@ def build_parser():
     p.add_argument("--kind", required=True, choices=("task", "project"))
     p.add_argument("--file", required=True)
     p.set_defaults(func=cmd_check_template)
+
+    p = sub.add_parser("attach", help="copy images into <vault>/<attachments>/<uid>/ and print their ![[...]] embeds (JSON)")
+    p.add_argument("--state", required=True)
+    p.add_argument("--uid", required=True, help="the uid of the note the images are embedded in")
+    p.add_argument("--file", required=True, action="append", help="an image file to copy (repeatable)")
+    p.set_defaults(func=cmd_attach)
 
     p = sub.add_parser("retag-notes", help="give the task and project notes of <dir>/vault the supervised tags (tags only)")
     p.add_argument("--state", required=True)

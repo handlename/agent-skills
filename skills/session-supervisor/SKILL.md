@@ -174,8 +174,9 @@ python3 "<skill-dir>/scripts/state_tool.py" setup --dir "$HOME/supervisor"
 - `worktree_root` (default `~/.claude-worktrees`): git worktrees of workers, `<worktree_root>/<repo name>/<slug>` (6.2). Outside the repositories, so a repository that does not ignore `.claude/` shows no untracked worktree.
 - `vault` (optional, default `<dir>/vault`): the Obsidian vault of the notes, for example the user's main vault. It must not be nested with the three roots above. Every command that reads or writes notes (`notes-scan`, `commit`, `note-show`, `new-note`, `digest`, `watch-vault`) uses it.
 - `dashboard` (optional, default `Supervisor.md`) and `templates` (optional, default `_templates`): the kanban note and the note-template folder, relative to the vault (no `..`; `dashboard` ends in `.md`). Notes in `templates` and the dashboard are never read as task notes.
+- `attachments` (optional, default `_attachments/supervisor`): the folder, relative to the vault (no `..`), of the images embedded in notes; `attach` copies each into `<attachments>/<note uid>/` (section 4, Figures).
 
-`setup` never adds `vault`, `dashboard`, or `templates`; the Vault interview (below) writes them.
+`setup` never adds `vault`, `dashboard`, `templates`, or `attachments`; the Vault interview (below) writes them.
 
 Values are absolute paths or start with `~`. `setup` writes the section when it creates `CLAUDE.md`; on an existing file it adds only the missing keys (appending the section when absent), never changes a value, and prints `updated:`. A key that is still missing falls back to the same default, so `prepare-dir` behaves as after a re-run of `setup`. A value that is not such a path, or an unknown key, makes `setup` and `prepare-dir` print `error: CLAUDE.md:<line>: ...` and exit 1 without writing anything; fix the line and run it again. The roots must not be nested in each other or lie inside `<dir>`.
 
@@ -189,7 +190,7 @@ Values are absolute paths or start with `~`. `setup` writes the section when it 
 The guard (matcher `Edit|MultiEdit|Write|NotebookEdit|Bash`) runs `state_tool.py guard --dir <dir>` before each such tool call of the supervisor and its subagents:
 
 - Edits and writes are allowed under `<dir>`, in Claude's auto-memory directories (`projects/*/memory/` under `$CLAUDE_CONFIG_DIR` or `~/.claude`), and in temp directories. Everything else is blocked, and so are the protected paths inside `<dir>`: `.claude/`, `state.json`, `.supervisor/state_tool.py`, and `sv.sh` (only `setup` and `commit` write them).
-- Edits and writes under the vault are blocked (`vault notes are written only by state_tool commit`).
+- Edits and writes under the vault are blocked (`vault notes are written only by state_tool commit`). `state_tool.py attach` (section 4, Figures) is the one other writer: it only copies image files into `<vault>/<attachments>/<uid>/` of an existing note.
 - Bash commands are blocked when they run a mutating git / jj / gh command (the deny-list described in section 1), including inside `sh -c` and command substitution. Read-only forms pass.
 - `hc` commands: `hc keys`, `exec`, `attach`, `server`, `update`, `machine`, `file`, `put`, and `connect` are blocked anywhere in a command (inside `sh -c` and Python argument lists too); `hc run` is blocked without a `--label sv=...` (only the `launch-plan` argv has one); `hc kill` / `hc rm` are blocked unless the target is `w-NNNN`, `p-NNNN`, `m-p-NNNN`, or `sv-watch`; `hc send --force` is blocked. `hc send`, `ls`, `get`, `read`, `events`, `wait`, and `interrupt` pass.
 - The guard reads the Bash text, not what it means: a blocked command written in a heredoc, a `-c` string, or a double-quoted argument is blocked too, because the guard cannot tell whether it is data or code. Write files with the Write tool, pass long text through files (`--prompt-file`, `--text-file`, `--candidate`), and put `hc send` text in single quotes: single-quoted `hc send` text is literal data, so the guard skips it.
@@ -214,7 +215,7 @@ Tags: a task note has `supervised`, a project note `supervised`, `project`, and 
 
 Run by the Entry session (section 0) after the first setup, and again when the user asks to change the vault. It asks the user, writes only `<dir>/CLAUDE.md`, the drafts under `<dir>/.supervisor/`, and, after approval, the two templates; it never edits other vault files (a template plugin's own list of templates is the user's to update).
 
-1. Ask which Obsidian vault holds the notes, where the dashboard note goes, and which folder holds note templates. Record the answers that differ from the defaults as `vault`, `dashboard`, and `templates` in `## Locations`.
+1. Ask which Obsidian vault holds the notes, where the dashboard note goes, which folder holds note templates, and in which folder the images embedded in notes are saved (section 4, Figures; for example the vault's own attachment folder). Record the answers that differ from the defaults as `vault`, `dashboard`, `templates`, and `attachments` in `## Locations`.
 2. Ask what a note gets when it is done and when it is cancelled (or read the vault's own templates that mark a note done or cancelled, if the user points to them), and record it as `## Note props`:
 
    ```markdown
@@ -340,6 +341,16 @@ Completion report: the completion ask (section 5) tells the user to check `## �
 - the subtasks finished, and by which worker;
 - what was not done or is left to the user, and caveats (not pushed, a draft not posted, a check that could not be made), or that nothing is left.
 Write only what you verified; a worker's claim you did not check is labeled as the worker's report. When the work finishes again after a follow-up, `report_set` replaces the report with one covering the whole task.
+
+Figures: a worker may report images in `figures` (absolute paths under `<dir>/.supervisor/figures/<worker id>/`, [references/worker-prompt.md](references/worker-prompt.md)), with any status. When you record that report, copy them into the vault and embed them in the text you write for it, in the same candidate:
+
+```bash
+python3 "<dir>/.supervisor/state_tool.py" attach --state "<dir>/state.json" --uid "<task uid>" --file "<dir>/.supervisor/figures/w-0004/flow.svg"
+```
+
+- It copies each `--file` (repeatable; an image Obsidian embeds: `avif`, `bmp`, `gif`, `jpeg`, `jpg`, `png`, `svg`, `webp`) into `<vault>/<attachments>/<uid>/` (`## Locations`, default `_attachments/supervisor`) and prints `[{file, status, path, embed}]`. `status` is `created`, or `exists` when the same file is already there; a file of the same name with other content keeps its place and the copy gets `-2`, `-3`, ..., so earlier embeds still show what they showed. A file that is missing, is not such an image, or has a name a wiki link cannot hold (`[ ] | # ^ < > % \ :`, a leading `.`), or a uid with no note, makes it print `error:` lines and copy nothing.
+- Put each `embed` (`![[<path>]]`) on its own line in the text that tells what the figure is about, with one line of explanation: the `log` of the report, the guidance body of a `needs_input` report (6.3 step 4), `report_set` when the work finishes, or an agent reply (`ua_answer`). A figure about the project as a whole goes into the project note's `log` or `kn_set`, attached with the project note's uid. Never write an embed into `## 成果物`; the image is not an artifact.
+- A figure whose file is gone or rejected is not a failure of the report: `log` what `attach` said and go on.
 
 Wording elsewhere in this file maps to schema 2 as follows: add / remove a user action = `ua_add` / `ua_ack`; append / replace an artifact group = `art_add` / `art_replace_group` (a later `url` = `art_set`); record a follow-up = `ua_add {kind: req}` from this chat, `ua_adopt` of the user's `### @agent` from the note (6.7); the read user action of a held investigation worker = the worker id in the task's `held` (add it to hold, remove it to release); `task.request` = the `request` of `note-show` (the `依頼の原文` callout when present, otherwise `## 概要`), which also prints the bodies and answers of the actions and `requests`, every open `req` item including unnumbered ones:
 
@@ -1110,7 +1121,8 @@ Moving a supervisor from the desktop app to Herdr needs no state migration: run 
 - Every user action that was resolved in this session was removed in the candidate that recorded its resolution.
 - Every archived worker had, before `hc kill`, the artifacts its delivery requires, a `no_result` entry of its own, or a cancelled task, and a non-null `archive_consent`.
 - Every answer the user gave to a worker's guidance in a note or in this chat was sent to that worker with the Answer message, and that guidance was acked in the same candidate.
-- No vault note was written except by `commit --notes` (no Edit / Write under the vault), and no note's `status` / `assignee` was set by hand.
+- No vault note was written except by `commit --notes` (no Edit / Write under the vault), no other vault file except the images `attach` copied, and no note's `status` / `assignee` was set by hand.
+- Every figure a worker reported in `figures` in this session was copied with `attach` and embedded in the note text written for that report, or its `attach` error was logged.
 - Nothing of a note was processed while its assignee was `user`, except pause, cancel, close, confirm, and invalid changes (AC-12).
 - The supervisor did not edit or write outside `<dir>` (except Claude's memory and temp directories, `prepare-dir` inside `## Locations`, and `prepare-worktree` / `remove-worktree` inside `worktree_root`) and ran no mutating git / jj / gh command; the guard entry is present in `<dir>/.claude/settings.json`.
 - No inferred target directory was put to the user for confirmation.
