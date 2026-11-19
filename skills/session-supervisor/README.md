@@ -97,7 +97,7 @@ Push and pull request creation happen only when the request or a later message e
 
 ## 5. Projects
 
-Tasks can be grouped into a **project**: a context document (a GitHub issue or a Notion page), a project directory under `work_root`, and a read-only **project manager** session (`p-NNNN`). The manager reviews each project worker's verified result (the worker is archived only after its approval), answers workers' questions, and proposes redo work and new tasks. A proposed task starts only after you approve it. A question about one task appears only in that task's note (asked by its worker, or by the manager when the task has no running worker); the project note gets only project-level questions and the knowledge (`## 知見`) learned from the tasks. The project note shows its own tasks on a kanban split by assignee.
+Tasks can be grouped into a **project**: a context document (a GitHub issue or a Notion page), a project directory under `work_root`, and a read-only **project manager** session (`p-NNNN`). The manager reviews each project worker's verified result (the worker is archived only after its approval), answers workers' questions, and proposes redo work and new tasks. A proposed task starts only after you approve it. A question about one task appears only in that task's note (asked by its worker, or by the manager when the task has no running worker); the project note gets only project-level questions and the knowledge (`## 知見`) learned from the tasks. When you edit the project note (for example `## 概要` or `## 知見`) and leave it for a minute, the manager is told to read the changed sections again. The project note shows its own tasks on a kanban split by assignee.
 
 ---
 

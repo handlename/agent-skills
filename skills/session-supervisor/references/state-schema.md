@@ -161,7 +161,7 @@ Runtime fields:
 | Field | Meaning |
 | :--- | :--- |
 | `uid` | The note's `uid` property. One live task or project per uid; a revived task and its stub share it. |
-| `note_seen` | `{status, assignee, ua_sha, art_sha}`: the values `state_tool` last wrote or the supervisor last handled. A note whose values differ was changed by the user (see User changes). |
+| `note_seen` | `{status, assignee, ua_sha, art_sha, doc_shas}`: the values `state_tool` last wrote or the supervisor last handled. A note whose values differ was changed by the user (see User changes). `doc_shas` is set for project notes only (`null` for tasks): a JSON object `{section: sha}` of every `##` section but `## アクション`, `## 成果物`, `## ログ`, and `## タスク`. A `note_seen` without it (written before session-supervisor 0.86.0) reports no project edit and gets it at the next commit that writes the note. |
 | `user_hold` | `{at, status, assignee, reason}` with `reason` `pause` or `invalid`: the user paused the item, or set values outside the transition table. Props are not written and pending workers / managers are not started while it is set. |
 | `confirmed` | `{at}`: the user marked the item done/user. |
 | `held` | Worker ids of held investigation workers. Each stands for a `Read the result of w-NNNN (held)` user action in the view, so the read-action invariants below apply; a worker whose read action is gone from the view leaves `held` in `split_view`. |
@@ -435,6 +435,9 @@ Note ops (all idempotent): `st_adopt {st: {text, id?}}` numbers the first unnumb
 | 23 | only `## 成果物` changed | dependencies not met | live task | `artifacts_broken` |
 | 24 | in progress/user | in progress/agent | project with `done_proposed` | `reject_done` |
 | 25 | any row whose event is `none` | an open numbered item with `- [x] 完了にする` in its `answer` | | `ua_done` |
+| 26 | only the sections of `doc_shas` changed | same values | project | `project_edit` (with `sections`, the changed section names) |
+
+An ack of a status event or of #22 keeps the seen `art_sha` / `doc_shas` when that section changed too, so the next scan reports it; `commit` accepts such an ack. `notes-scan` holds a `project_edit` back until the note has not been modified for 60 seconds (`PROJECT_EDIT_SETTLE`), so the manager never reads a note the user is still typing. `commit` acks the supervisor's own writes of those sections (`kn_set`) as it does for `## アクション`.
 
 The stub case of #16 is checked right after #19 and before the rows that look at a hold or a worker (#8, #11, #12), so a stub set to in progress/agent or backlog/agent is always `follow_up` (SKILL.md 6.7 (c)). A change to the same values as before stays `none`.
 

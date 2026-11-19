@@ -4,6 +4,7 @@ import copy
 import io
 import json
 import os
+import time
 import re
 import shutil
 import subprocess
@@ -4517,8 +4518,8 @@ class NotePropsTest(unittest.TestCase):
         self.assertEqual(st.validate(new), [])
 
 
-def nv(status, assignee, ua="u0", art="a0"):
-    return {"status": status, "assignee": assignee, "ua_sha": ua, "art_sha": art}
+def nv(status, assignee, ua="u0", art="a0", doc=None):
+    return {"status": status, "assignee": assignee, "ua_sha": ua, "art_sha": art, "doc_shas": doc}
 
 
 IPA, IPU, PU, BU, BA = nv("in progress", "agent"), nv("in progress", "user"), nv("pending", "user"), nv("backlog", "user"), nv("backlog", "agent")
@@ -4591,6 +4592,10 @@ class UserTransitionTest(unittest.TestCase):
         (IPA, nv("in progress", "agent", art="a1"), dict(LIVE, artifacts_ok=False), "artifacts_broken", 23),
         (IPA, IPA, LIVE, "none", 0),
         (IPA, nv("in progress", "agent", ua="u1"), LIVE, "none", 0),
+        (nv("in progress", "agent", doc='{"知見": "a"}'), nv("in progress", "agent", doc='{"知見": "b"}'), PROJ, "project_edit", 26),
+        (nv("in progress", "user", doc='{"概要": "a"}'), nv("in progress", "user", doc='{"概要": "a", "メモ": "b"}'), dict(PROJ, hold="pause"), "project_edit", 26),
+        # A note_seen written before doc_shas existed reports no edit.
+        (IPA, nv("in progress", "agent", doc='{"知見": "b"}'), PROJ, "none", 0),
     ]
 
     def test_table(self):
@@ -4599,7 +4604,9 @@ class UserTransitionTest(unittest.TestCase):
                 got = st.user_transition(seen, cur, ctx)
                 self.assertEqual((got["event"], got["row"]), (event, row))
         rows = {row for *_, row in self.ROWS}
-        self.assertTrue(set(range(1, 25)) <= rows, set(range(1, 25)) - rows)
+        # Row 25 (ua_done) is set by notes_scan, not user_transition.
+        expected = set(range(1, 25)) | {26}
+        self.assertTrue(expected <= rows, expected - rows)
 
     def test_unlisted_combinations_are_invalid(self):
         for seen, cur, ctx in ((DU, IPU, LIVE), (DU, PU, LIVE), (DA, IPA, LIVE), (IPA, DA, PROJ), (BU, IPA, LIVE),
@@ -5531,6 +5538,69 @@ class AttachCliTest(unittest.TestCase):
         self.assertTrue(st.parse_report(block({**base, "figures": ["/tmp/a.svg"]}))["ok"])
         for bad in ("/tmp/a.svg", ["a.svg"], [1]):
             self.assertEqual(st.parse_report(block({**base, "figures": bad}))["error"], "figures must be a list of absolute paths")
+
+
+class ProjectEditTest(unittest.TestCase):
+    def setUp(self):
+        self.env = VaultEnv(self)
+        project = to_v2(add_project(self.env.state), "projects", U2)
+        text = st.new_note_text(U2, "Nature MCP", "project", "in progress", "agent", NOTE_NOW, "ctx https://github.com/org/repo/issues/1")
+        self.env.put(U2, st.set_props(text, {"project_id": "P-0001"}))
+        project.update(note=st._new_note_path(U2), note_seen=self.env.values(U2))
+        self.env.save()
+
+    def edit(self, old, new, age=120):
+        self.env.put(U2, self.env.text(U2).replace(old, new, 1))
+        t = time.time() - age
+        os.utime(self.env.path(U2), (t, t))
+
+    def ack(self, event):
+        cand = self.env.load()
+        find(cand["projects"], "P-0001")["note_seen"] = event["ack"]
+        code, _, err = self.env.commit(cand)
+        self.assertEqual(code, 0, err)
+
+    def test_user_edit_is_reported_once_settled(self):
+        self.edit("issues/1", "issues/1\n\n## 知見\n\n- push しない", age=5)
+        self.assertEqual(self.env.scan()["events"], [])
+        os.utime(self.env.path(U2), (time.time() - 120,) * 2)
+        events = self.env.scan()["events"]
+        self.assertEqual([(e["event"], e["row"], e["sections"]) for e in events], [("project_edit", 26, ["知見"])])
+        self.ack(events[0])
+        self.assertEqual(self.env.scan()["events"], [])
+        self.edit("- push しない", "- push は PR だけ")
+        self.edit("ctx", "目的を変えた")
+        self.assertEqual(self.env.scan()["events"][0]["sections"], ["概要", "知見"])
+
+    def test_supervisor_writes_and_its_own_sections_report_nothing(self):
+        code, _, err = self.env.commit(None, {U2: [{"op": "kn_set", "key": "push", "text": "push しない"},
+                                                   {"op": "log", "text": "知見を追加"}]})
+        self.assertEqual(code, 0, err)
+        os.utime(self.env.path(U2), (time.time() - 120,) * 2)
+        self.assertEqual(self.env.scan()["events"], [])
+        self.edit("知見を追加", "知見を足した")
+        self.assertEqual(self.env.scan()["events"], [])
+
+    def test_an_edit_made_with_a_status_change_is_reported_after_it(self):
+        self.edit("ctx", "目的を変えた")
+        self.edit('assignee: "agent"', 'assignee: "user"')
+        events = self.env.scan()["events"]
+        self.assertEqual([e["event"] for e in events], ["pause"])
+        self.ack(events[0])
+        os.utime(self.env.path(U2), (time.time() - 120,) * 2)
+        self.assertEqual([(e["event"], e["sections"]) for e in self.env.scan()["events"]], [("project_edit", ["概要"])])
+
+    def test_a_seen_without_doc_shas_gets_them_on_the_next_write(self):
+        state = self.env.load()
+        del find(state["projects"], "P-0001")["note_seen"]["doc_shas"]
+        self.env.state = state
+        self.env.save()
+        self.edit("ctx", "目的を変えた")
+        self.assertEqual(self.env.scan()["events"], [])
+        self.assertEqual(self.env.commit(None, {U2: [{"op": "log", "text": "x"}]})[0], 0)
+        self.assertEqual(find(self.env.load()["projects"], "P-0001")["note_seen"], self.env.values(U2))
+        self.edit("目的を変えた", "目的を戻した")
+        self.assertEqual(self.env.scan()["events"][0]["sections"], ["概要"])
 
 
 class VaultGuardTest(unittest.TestCase):

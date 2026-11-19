@@ -95,7 +95,11 @@ UA_DETECTORS = ("worker_report", "worker_started", "archived_observed", "approva
                 "task_done")
 UA_META_KEYS = ("rule", "url", "since")
 HOLD_REASONS = ("pause", "invalid")
-SEEN_KEYS = ("status", "assignee", "ua_sha", "art_sha")
+SEEN_KEYS = ("status", "assignee", "ua_sha", "art_sha", "doc_shas")
+# Sections of a project note that only the supervisor writes (or that are a fixed kanban): editing them is no project_edit.
+DOC_SKIP_SECTIONS = (UA_SECTION, ART_SECTION, LOG_SECTION, "タスク")
+# A project note must stay unchanged this long before its edit is reported, so the manager never reads a half-written note.
+PROJECT_EDIT_SETTLE = 60
 NOTE_MOVED_KEYS = {
     "tasks": ("title", "request", "status", "user_actions", "agent_actions", "followups", "artifacts", "subtasks"),
     "projects": ("name", "context_doc_url", "user_actions"),
@@ -3388,14 +3392,19 @@ def user_transition(seen, cur, ctx):
         return result("invalid", 4, seen)
     prev = (seen.get("status"), seen.get("assignee"))
     art_changed = cur.get("art_sha") != seen.get("art_sha")
+    # A project-note edit left out of another event's ack is reported by the next scan.
+    doc_changed = ctx.get("kind") == "project" and bool(doc_changes(seen, cur))
+    doc_kept = dict(cur, doc_shas=seen.get("doc_shas")) if doc_changed else cur
     if pair == prev:
         if art_changed:
             if ctx.get("artifacts_ok", True) or not (ctx.get("live") and ctx.get("kind") == "task"):
-                return result("artifacts_edit", 22, cur)
-            return result("artifacts_broken", 23, cur)
+                return result("artifacts_edit", 22, doc_kept)
+            return result("artifacts_broken", 23, doc_kept)
+        if doc_changed:
+            return result("project_edit", 26, cur)
         # A checkbox or sub-item edit alone never needs handling: answers are read on resume.
         return result("none", 10 if pair == ("in progress", "user") and ctx.get("open_ua") else 0, cur)
-    ack = dict(cur, art_sha=seen.get("art_sha")) if art_changed else cur
+    ack = dict(doc_kept, art_sha=seen.get("art_sha")) if art_changed else doc_kept
     task = ctx.get("kind") == "task"
     if prev[0] == "archived":
         return result("invalid", 19, seen)
@@ -3485,14 +3494,28 @@ def _text_sha(text):
 
 
 def note_values(text):
-    """{status, assignee, ua_sha, art_sha} of a note (what note_seen tracks), or None when its frontmatter is unreadable."""
+    """{status, assignee, ua_sha, art_sha, doc_shas} of a note (what note_seen tracks), or None when its frontmatter is
+    unreadable. doc_shas (project notes only, else None) is a JSON object {section: sha} of the sections the user writes."""
     props, body, errors = parse_frontmatter(text)
     if errors:
         return None
     sections = parse_sections(body)
+    doc = None
+    if note_kind(props) == "project":
+        doc = json.dumps({k: _text_sha(v.strip())[:16] for k, v in sections.items() if k not in DOC_SKIP_SECTIONS},
+                         ensure_ascii=False, sort_keys=True)
     return {"status": props.get("status"), "assignee": props.get("assignee"),
             "ua_sha": _text_sha(sections.get(UA_SECTION, "")),
-            "art_sha": art_sha(parse_artifacts(sections.get(ART_SECTION, ""))[0])}
+            "art_sha": art_sha(parse_artifacts(sections.get(ART_SECTION, ""))[0]), "doc_shas": doc}
+
+
+def doc_changes(seen, cur):
+    """Names of the project-note sections whose text differs between two note_values (added and removed ones too);
+    empty when either side has no doc_shas (a task note, or a note_seen written before doc_shas existed)."""
+    if not (seen or {}).get("doc_shas") or not (cur or {}).get("doc_shas"):
+        return []
+    old, new = json.loads(seen["doc_shas"]), json.loads(cur["doc_shas"])
+    return sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
 
 
 def _pair(values):
@@ -4427,9 +4450,12 @@ def _commit_v2(args, current):
             uid, seen = item.get("uid"), item.get("note_seen")
             if seen is not None:
                 seen_store.setdefault(uid, seen)
-            if seen is not None and seen != cur_items.get((key, item.get("id")), {}).get("note_seen"):
+            prev = cur_items.get((key, item.get("id")), {}).get("note_seen")
+            if seen is not None and seen != prev:
                 values = note_values(base.get(uid) or "") if base.get(uid) else None
-                if values != {k: seen.get(k) for k in SEEN_KEYS}:
+                # An ack keeps the previous art_sha / doc_shas when it leaves that section change for the next scan.
+                if values is None or any(values[k] != seen.get(k) and not (k in ("art_sha", "doc_shas") and seen.get(k) == (prev or {}).get(k))
+                                         for k in SEEN_KEYS):
                     raise StateError(f"note {uid} changed after notes-scan; run notes-scan again and rebuild the candidate")
     seen_cmp = dict(seen_store, **{uid: e.get("before") for uid, e in pending.items()})
 
@@ -4529,8 +4555,8 @@ def _commit_v2(args, current):
         if uid not in deferred:
             merged.update(status=values["status"], assignee=values["assignee"])
         # Our own section writes are acked, a user's unhandled section change is left for the next scan.
-        for key in ("ua_sha", "art_sha"):
-            if old is None or old[key] == seen.get(key):
+        for key in ("ua_sha", "art_sha", "doc_shas"):
+            if old is None or seen.get(key) is None or old[key] == seen.get(key):
                 merged[key] = values[key]
         new_seen[uid] = merged
     cand_tasks = {t["id"]: t for t in candidate.get("tasks", [])}
@@ -5488,6 +5514,13 @@ def _proposed_uid(path, taken):
     return _free_uid(datetime.fromtimestamp(getattr(st_, "st_birthtime", st_.st_mtime)), taken)
 
 
+def _recently_changed(path):
+    try:
+        return time.time() - os.stat(path).st_mtime < PROJECT_EDIT_SETTLE
+    except OSError:
+        return False
+
+
 def notes_scan(state, texts, uids, vault=None):
     """Events for the notes the user changed (3.4 (2)), without writing anything."""
     view = join_view(state, _notes_by_uid(texts, uids))
@@ -5521,6 +5554,8 @@ def notes_scan(state, texts, uids, vault=None):
         # printed; it is acked with the next event of the note. AC-12: nothing happens while the assignee is user.
         if result["event"] == "none" and not result["clear_invalid"]:
             continue
+        if result["event"] == "project_edit" and vault and _recently_changed(os.path.join(vault, rels[0])):
+            continue
         hold = item.get("user_hold") or {}
         if result["event"] == "invalid" and hold.get("reason") == "invalid" and (hold.get("status"), hold.get("assignee")) == _pair(cur):
             continue
@@ -5534,6 +5569,8 @@ def notes_scan(state, texts, uids, vault=None):
                      user_actions=[_ua_summary(u) for u in uas])
         if kind == "task":
             event["subtasks"] = parse_subtasks(body.get(ST_SECTION, ""))
+        if result["event"] == "project_edit":
+            event["sections"] = doc_changes(seen, cur)
         if needs:
             event["needs"] = needs
         if warning:

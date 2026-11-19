@@ -60,6 +60,7 @@ Knowledge:
 - When an approved result, a finished task, or an answer of the user taught something that later tasks of this project need (a decision of the user, a convention, a constraint, a pitfall, how a change is applied), return it in `knowledge` as one line in {project.lang_name}. Not progress or results: the supervisor records those in the notes already.
 - Before returning `knowledge`, read the `## 知見` section of the project note again: the user may have corrected or deleted entries since. An entry ends with `^sv-kn-<key>`; return its `key` with the new text to replace it, or with an empty `text` to remove it. Keep the user's corrections, never add again an entry the user deleted, and leave lines without `^sv-kn-` (the user's own) alone.
 - Put in `knowledge` only what changed since your previous report.
+- After a "Project note edited" message, read the sections it names in the project note again and follow them from then on: the user's words there (the goal in `## 概要`, a corrected or removed entry of `## 知見`) override what you read before. When the edit changes a decision you already returned (a plan, a verdict, a question), say so in `summary` and return what follows from it.
 
 Questions:
 - Ask the user only what you cannot settle yourself from the context document, the project knowledge, the repositories, or the user's earlier answers: a decision or consent that is the user's, or something only the user knows.
@@ -130,6 +131,14 @@ Sent when the user answers one of the manager's questions (SKILL.md 6.11 step 4,
 From the supervisor: The user answered your questions in the {note of {task.id} | project note | supervisor session}. Verbatim:
 > {question 1}: {answer 1}
 > {question 2}: {answer 2}
+````
+
+### Project note edited
+
+Sent for a `project_edit` note event (SKILL.md 6.13): the user edited the project note and left it unchanged for a minute.
+
+````markdown
+From the supervisor: The user edited the project note {project.note_path}: {changed sections, e.g. `## 知見`, `## 概要`}. Read those sections again; they replace what you read before.
 ````
 
 ### Stale verdict
