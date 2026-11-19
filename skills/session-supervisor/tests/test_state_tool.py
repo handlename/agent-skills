@@ -2934,6 +2934,25 @@ class ProjectCliTest(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertRegex(result["error"], pattern)
 
+    def test_task_questions_go_to_the_task_note(self):
+        find(self.state["tasks"], "T-0020")["uid"] = "20261119_100000"
+        self.state["projects"][0]["uid"] = "20261119_090000"
+        questions = ["プロジェクト全体の方針は?", {"task_id": "T-0020", "text": "Muse を含める?"},
+                     {"task_id": "T-0999", "text": "どこの話?"}]
+        result = self.actions(project_report(status="needs_input", questions=questions))
+        self.assertEqual(result, [
+            {"kind": "question", "uid": "20261119_090000", "text": "プロジェクト全体の方針は?"},
+            {"kind": "question", "task_id": "T-0020", "uid": "20261119_100000", "text": "Muse を含める?"},
+            {"kind": "question", "uid": "20261119_090000", "text": "T-0999: どこの話?"}])
+        self.assertEqual(self.actions(project_report(questions=questions)), [])
+        ua = {"id": "UA-0001", "kind": "auto", "detector": "manager_report", "description": "マネージャーへの回答待ち P-0001",
+              "body": "Muse を含める?", "since": NOW}
+        self.assertIn(st.UA_THREAD_HEAD, st.render_ua_block(ua))
+        for bad in ({"task_id": "T-20", "text": "x"}, {"task_id": "T-0020", "text": ""}, {"text": "x"}, ""):
+            result = st.parse_project_report(project_report(status="needs_input", questions=[bad]), "P-0001")
+            self.assertFalse(result["ok"])
+            self.assertIn("questions must be", result["error"])
+
     def kinds(self, actions):
         return [a["kind"] for a in actions]
 

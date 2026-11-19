@@ -121,7 +121,7 @@ UA_THREAD_HEAD = "#### やりとり"
 UA_AGENT_RE = re.compile(r"^> \[!sv-agent\][ \t]*(.*?)[ \t]*$")
 UA_INPUT_RE = re.compile(r"^> \[!sv-input\]")
 UA_OPTION_OPEN_RE = re.compile(r"^[ \t]*[-*+] \[ \] ")
-UA_ANSWER_DETECTORS = ("worker_report", "pr_closed")
+UA_ANSWER_DETECTORS = ("worker_report", "pr_closed", "manager_report")
 ST_ID_RE = re.compile(r"^ST-(\d+)$")
 # A subtask is a top-level checklist line of `## サブタスク`: `- [ ] [ST-NNNN] @agent|@user text (w-NNNN sha)`. The id,
 # the assignee and the trailing worker mark are optional; state_tool writes the id and the mark.
@@ -3796,8 +3796,10 @@ def parse_project_report(text, expect_project=None):
         return {"ok": False, "error": f"invalid status {report['status']!r}"}
     if not isinstance(report["project_id"], str) or not isinstance(report["summary"], str):
         return {"ok": False, "error": "project_id and summary must be strings"}
-    if not isinstance(report["questions"], list) or not all(isinstance(q, str) and q for q in report["questions"]):
-        return {"ok": False, "error": "questions must be a list of non-empty strings"}
+    if not isinstance(report["questions"], list) or not all(
+            (isinstance(q, str) and q) or (_fields_ok(q, ("task_id", "text")) and TASK_ID_RE.match(q["task_id"]))
+            for q in report["questions"]):
+        return {"ok": False, "error": "questions must be a list of non-empty strings or {task_id: T-NNNN, text} objects"}
     if report["status"] == "needs_input" and not report["questions"]:
         return {"ok": False, "error": "status needs_input requires at least one question"}
     if not isinstance(report["reviews"], list) or not isinstance(report["plans"], list):
@@ -3906,6 +3908,14 @@ def plan_actions(state, project_id, report, running=(), proposal_titles=()):
     if project.get("uid"):
         actions += [{"kind": "knowledge", "uid": project["uid"], "key": k["key"], "text": k["text"].strip()}
                     for k in report.get("knowledge", [])]
+    for q in report.get("questions", []) if report.get("status") == "needs_input" else []:
+        # A question about one task of this project goes to that task's note; anything else stays on the project note.
+        task = tasks.get(q["task_id"]) if isinstance(q, dict) else None
+        if task is not None and task.get("project_id") == project_id:
+            actions.append({"kind": "question", "task_id": task["id"], "uid": task.get("uid"), "text": q["text"]})
+        else:
+            text = f"{q['task_id']}: {q['text']}" if isinstance(q, dict) else q
+            actions.append({"kind": "question", "uid": project.get("uid"), "text": text})
     if report.get("done"):
         actions.append({"kind": "project_done", "summary": report["done"]})
     return actions

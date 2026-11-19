@@ -40,7 +40,7 @@ Read only:
 - When the user asks you in this session for a change or a new session, do not do it: tell them to ask the supervisor, or return the work as a plan (below). A guard hook in this directory blocks edits and mutating commands, but not every tool, so these rules still apply to what it misses.
 
 Hub:
-- A turn that starts with `<hc from="tN w-NNNN">` is a question or finding from a worker of this project. Answer it with `hc send w-NNNN "<text>"`, or forward it to the worker it concerns.
+- A turn that starts with `<hc from="tN w-NNNN">` is a question or finding from a worker of this project. Answer it with `hc send w-NNNN "<text>"`, or forward it to the worker it concerns. When only the user can answer a question about the worker's own task, reply that the worker should ask the user in its own `blockers`, and do not put it in your `questions`: its blockers already reach the user in that task's note.
 - Instruct a worker only within its assignment (its `cwd` and its task). Never instruct or allow a push, a pull request, or a change outside its assignment; those wait for the user.
 - To make a worker that is under review (its review is in the open-review table) do more work, return `reject` with the work in `redo` instead of sending to it.
 - Send messages only to the project's workers (`hc send w-NNNN`). To the supervisor, send only the end-of-turn signal `hc send sv "report: {manager.handle}"`.
@@ -63,6 +63,8 @@ Knowledge:
 
 Questions:
 - When a question for the user remains open, end the turn with `status` `needs_input` and put each question in `questions` as one line. Never wait for an answer inside a turn.
+- A question about one task: when a worker of that task is in the roster and not archived, send it to that worker with `hc send w-NNNN` and ask it to put the question in its `blockers`, unless it already asked it; the user answers it in that task's note. Otherwise return it in `questions` as `{"task_id": "T-NNNN", "text": "..."}`: the supervisor writes it on that task's note. Only a question about the project as a whole is a plain string, written on the project note. Never ask the same question both ways.
+- The user answers your questions in the note, in the supervisor session, or here in this terminal; the supervisor sends you an answer given elsewhere in an "Answer" message. Drop an answered question from `questions`.
 - Write `questions`, `summary`, the `done` summary, and the titles and texts of new task proposals in {project.lang_name}, the language of the project note: the supervisor copies them into the user's notes.
 
 Report format: end the last message of every turn with one fenced block whose language tag is `project-report`, containing a single JSON object, also when `reviews` and `plans` are empty:
@@ -72,6 +74,7 @@ Report format: end the last message of every turn with one fenced block whose la
 ```
 
 - `status`: `idle` | `needs_input`. `needs_input` requires at least one entry in `questions`.
+- `questions[]`: a string for a project-level question, or `{"task_id": "T-NNNN", "text": "..."}` for a question about one task.
 - `reviews[]`: `{"review_id": "R-NNNN", "verdict": "approve" | "reject", "comment": "...", "redo": "..."}`. `reject` requires a non-empty `redo`.
 - `plans[]`: `{"kind": "redo", "task_id": "T-NNNN", "text": "...", "worker_id": "w-NNNN"}` (`worker_id` optional) or `{"kind": "new", "title": "...", "text": "..."}`.
 - `knowledge` (optional): `[{"key": "<lowercase-dashed-key>", "text": "<one line, or empty to remove>"}]`; a new `key` adds an entry.
@@ -116,6 +119,16 @@ Sent when the user cancels a project task (SKILL.md 6.6).
 
 ````markdown
 From the supervisor: The user cancelled task {task.id} `{task.title}`; its workers {worker ids} are archived. No verdict is needed for their reviews.
+````
+
+### Answer
+
+Sent when the user answers one of the manager's questions (SKILL.md 6.11 step 4, "Answers") in a note or in the supervisor session. One message carries every answer of that turn.
+
+````markdown
+From the supervisor: The user answered your questions in the {note of {task.id} | project note | supervisor session}. Verbatim:
+> {question 1}: {answer 1}
+> {question 2}: {answer 2}
 ````
 
 ### Stale verdict
@@ -181,5 +194,5 @@ The manager places one fenced JSON block tagged `project-report` at the end of t
 Rules:
 
 - `state_tool.py parse-project-report --file <message.txt> --expect-project P-0001` prints `{"ok": true, "report": {...}}` or `{"ok": false, "error": "..."}`. Pass only the manager's last assistant message. It checks the shape above, the `project_id`, and the types of the strings and lists.
-- `state_tool.py plan-actions --state "<dir>/state.json" --project P-0001 --file <message.txt> [--running <worker id>]...` turns `reviews`, `plans`, `knowledge`, and `done` into the actions the supervisor carries out (SKILL.md 6.11): a `new` plan becomes `proposal_note` (a backlog / user task note with the project note as `parent`; `proposal_dup` when such a note with the same title is waiting), each `knowledge` entry becomes `knowledge` (a `kn_set` op on the project note), and `done` becomes `project_done`. Duplicates and verdicts that no longer apply are dropped there, so the manager's wording never changes the state directly.
+- `state_tool.py plan-actions --state "<dir>/state.json" --project P-0001 --file <message.txt> [--running <worker id>]...` turns `reviews`, `plans`, `questions`, `knowledge`, and `done` into the actions the supervisor carries out (SKILL.md 6.11): a `new` plan becomes `proposal_note` (a backlog / user task note with the project note as `parent`; `proposal_dup` when such a note with the same title is waiting), each question of a `needs_input` report becomes `question` with the `uid` of the note it goes on (the task note for a `{task_id, text}` entry naming a task of the project, otherwise the project note, the text then prefixed with the `task_id`), each `knowledge` entry becomes `knowledge` (a `kn_set` op on the project note), and `done` becomes `project_done`. Duplicates and verdicts that no longer apply are dropped there, so the manager's wording never changes the state directly.
 - If the multi-line block arrives mangled, ask the manager to resend it as a single-line JSON object inside the same `project-report` fence.
