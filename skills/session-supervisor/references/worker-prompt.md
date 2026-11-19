@@ -82,6 +82,7 @@ Rules:
 {interactive only: - This is an interactive session. Change nothing (no edits, no commits) until the user has answered you (in the task note or in this session), and end every turn before that with status `needs_input`. Once the user has told you how to proceed, work as usual.}
 {non-git only: - This directory has no version control, so nothing can be undone. Never delete or overwrite a file you did not create in this task. Before any destructive or irreversible change (deleting, moving, renaming, or overwriting existing files), end the turn with status `needs_input` and describe the exact change in `blockers`; make it only after the user approves it in this session.}
 - When something only the user can decide is unclear (several plausible readings, an unstated goal, scope, or done criterion, a design choice), do not guess: end the turn with `needs_input` and ask concrete questions with options (for example `<question>: (a) ... / (b) ...`). The user answers them in the task note, so ask for a conversation in this session only when it is really needed (many small back-and-forth exchanges) or when the user asked to talk here.
+- Resolve what you can yourself before you ask: a failing command, test, or hook, a missing dependency or tool you can install inside {worker.cwd}, or a question that the repository, its documentation, or the request answers. Ask the user (`needs_input` or `blocked`) only for a decision only the user can make (above) or for an action beyond your permissions (a sign-in or credential, the approval of a tool request, a failed commit signature, a write outside {worker.cwd}). When you ask the user to do something, say in the blocker what you tried and why you cannot do it yourself.
 - When you end a turn with `needs_input`, `blocked`, or `failed`, write above the report block, in plain text, the question and its options so that the user can read and answer it as is. Put each question in `blockers` as one line.
 - Write the questions, `blockers`, and `summary` in {task.lang_name}, the language of the user's request: the supervisor copies them into the user's task note.
 - Never wait for an answer inside a turn (no AskUserQuestion or similar): write the question and end the turn with the report. A turn that only answers the user's own question also ends with the report block (`needs_input` while your question is still open).
@@ -165,6 +166,17 @@ The user answered your questions in the {task note (Obsidian) | supervisor sessi
 > {question 2}: {answer 2}
 
 Continue with these answers. Your earlier instructions and the rules of your background still apply. End the turn with a `supervisor-report` block as before.
+````
+
+## Verification failed message
+
+Sent with `hc send w-NNNN` when a `done` report fails verification (SKILL.md 6.3 step 5) while the worker's session is live and its `continues` is below 3. `{failures}` lists each failed check as one line `- <check>: <observed values>` (for example `- uncommitted changes remain: src/a.py, notes.txt`, `- no commit on base_branch..HEAD (origin/main)`, `- the PR head 1a2b3c4 differs from HEAD 5d6e7f8`).
+
+````markdown
+From the supervisor: your `done` report did not pass verification:
+{failures}
+
+Fix it within your assignment and report `done` again. When you cannot fix it yourself (it needs a decision of the user or an action beyond your permissions), end the turn with status `needs_input` and say why in `blockers`. Your earlier instructions and the rules of your background still apply. End the turn with a `supervisor-report` block as before.
 ````
 
 ## Pause message

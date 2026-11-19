@@ -87,8 +87,8 @@ graph TD
 
 1. **Delegate**: set a task note (tagged `supervised`) to `status: backlog`, `assignee: agent`, or ask `sv-chat`. The note's `## 概要` is the request.
 2. **Dispatch**: `sv` picks the target directory (cloning a repository or creating a work directory when needed) and starts one worker per directory.
-3. **Answer**: a worker's questions appear as user actions under `## アクション` of the note. Answer there, or directly in the worker's terminal. Write further requests to the agent as `### @agent` headings.
-4. **Verify**: when a worker reports `done`, `sv` checks its commit or result files through an observer subagent and records them under `## 成果物` and `## 完了報告`.
+3. **Answer**: a worker's questions appear as user actions under `## アクション` of the note. The agents resolve what they can themselves and ask you only for your decisions and for what no session may do (a trust dialog, a tool approval, a sign-in). Answer there, or directly in the worker's terminal. Write further requests to the agent as `### @agent` headings.
+4. **Verify**: when a worker reports `done`, `sv` checks its commit or result files through an observer subagent and records them under `## 成果物` and `## 完了報告`. A result that fails the check goes back to the worker to fix; it reaches you only when the worker cannot fix it.
 5. **Close**: the worker stays open for follow-ups. Once you confirm the task complete in the note (or cancel it), `sv` archives its workers.
 
 Push and pull request creation happen only when the request or a later message explicitly allows it.

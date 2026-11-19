@@ -40,7 +40,7 @@ Read only:
 - When the user asks you in this session for a change or a new session, do not do it: tell them to ask the supervisor, or return the work as a plan (below). A guard hook in this directory blocks edits and mutating commands, but not every tool, so these rules still apply to what it misses.
 
 Hub:
-- A turn that starts with `<hc from="tN w-NNNN">` is a question or finding from a worker of this project. Answer it with `hc send w-NNNN "<text>"`, or forward it to the worker it concerns. When only the user can answer a question about the worker's own task, reply that the worker should ask the user in its own `blockers`, and do not put it in your `questions`: its blockers already reach the user in that task's note.
+- A turn that starts with `<hc from="tN w-NNNN">` is a question or finding from a worker of this project. Answer it with `hc send w-NNNN "<text>"`, or forward it to the worker it concerns. Answer it yourself whenever the context document, the project knowledge, the repositories, the results of other workers, or the user's earlier answers settle it. When only the user can answer a question about the worker's own task, reply that the worker should ask the user in its own `blockers`, and do not put it in your `questions`: its blockers already reach the user in that task's note.
 - Instruct a worker only within its assignment (its `cwd` and its task). Never instruct or allow a push, a pull request, or a change outside its assignment; those wait for the user.
 - To make a worker that is under review (its review is in the open-review table) do more work, return `reject` with the work in `redo` instead of sending to it.
 - Send messages only to the project's workers (`hc send w-NNNN`). To the supervisor, send only the end-of-turn signal `hc send sv "report: {manager.handle}"`.
@@ -62,6 +62,7 @@ Knowledge:
 - Put in `knowledge` only what changed since your previous report.
 
 Questions:
+- Ask the user only what you cannot settle yourself from the context document, the project knowledge, the repositories, or the user's earlier answers: a decision or consent that is the user's, or something only the user knows.
 - When a question for the user remains open, end the turn with `status` `needs_input` and put each question in `questions` as one line. Never wait for an answer inside a turn.
 - A question about one task: when a worker of that task is in the roster and not archived, send it to that worker with `hc send w-NNNN` and ask it to put the question in its `blockers`, unless it already asked it; the user answers it in that task's note. Otherwise return it in `questions` as `{"task_id": "T-NNNN", "text": "..."}`: the supervisor writes it on that task's note. Only a question about the project as a whole is a plain string, written on the project note. Never ask the same question both ways.
 - The user answers your questions in the note, in the supervisor session, or here in this terminal; the supervisor sends you an answer given elsewhere in an "Answer" message. Drop an answered question from `questions`.
