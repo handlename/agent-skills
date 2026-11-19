@@ -5416,12 +5416,12 @@ class AttachCliTest(unittest.TestCase):
         self.env = VaultEnv(self)
         self.env.add_task("T-0020", "w-0020", "20261110_090000")
         self.env.save()
-        self.src = self.env.dir / "figs"
-        self.src.mkdir()
+        self.src = self.env.dir / ".supervisor/figures/w-0020"
+        self.src.mkdir(parents=True)
 
-    def attach(self, *names, uid="20261110_090000"):
+    def attach(self, *names, uid="20261110_090000", worker="w-0020"):
         files = [a for n in names for a in ("--file", str(self.src / n))]
-        return self.env.run("attach", "--state", str(self.env.state_path), "--uid", uid, *files)
+        return self.env.run("attach", "--state", str(self.env.state_path), "--uid", uid, "--worker", worker, *files)
 
     def test_copies_into_the_note_folder_and_prints_embeds(self):
         (self.src / "flow.svg").write_text("<svg/>", encoding="utf-8")
@@ -5460,6 +5460,23 @@ class AttachCliTest(unittest.TestCase):
                 code, _, err = self.attach(*names, uid=uid)
                 self.assertEqual(code, 1)
                 self.assertIn(expected, err)
+        self.assertFalse((self.env.vault / "_attachments").exists())
+
+    def test_rejects_files_outside_the_workers_figures_folder(self):
+        (self.src / "ok.png").write_bytes(b"p")
+        outside = self.env.dir / "elsewhere.png"
+        outside.write_bytes(b"p")
+        (self.src / "link.png").symlink_to(outside)
+        other = self.env.dir / ".supervisor/figures/w-0021"
+        other.mkdir()
+        (other / "b.png").write_bytes(b"p")
+        for names, worker in ((("ok.png", "link.png"), "w-0020"), (("../w-0021/b.png",), "w-0020"), (("ok.png",), "w-0021")):
+            with self.subTest(names=names, worker=worker):
+                code, _, err = self.attach(*names, worker=worker)
+                self.assertEqual(code, 1)
+                self.assertIn("not inside", err)
+        code, _, err = self.attach("ok.png", worker="..")
+        self.assertIn("--worker must be a worker id", err)
         self.assertFalse((self.env.vault / "_attachments").exists())
 
     def test_parse_report_checks_figures(self):
@@ -6209,6 +6226,17 @@ class LaunchPlanTest(unittest.TestCase):
             "--allowedTools=Bash(hc send sv:*)", "Fix it."])
         self.assertEqual(argv[-1], "Fix it.")
 
+    def test_worker_gets_its_figures_folder_away_from_the_prompt(self):
+        state = fixture_state()
+        herdr_worker(state)
+        argv = st.launch_argv(state, "w-0030", "Fix it.", {}, figures="/sup/.supervisor/figures/w-0030")
+        i = argv.index("--add-dir")
+        self.assertEqual(argv[i - 3:i + 2], ["claude", "--session-id", SID, "--add-dir", "/sup/.supervisor/figures/w-0030"])
+        self.assertEqual(argv[-2:], ["--allowedTools=Bash(hc send sv:*)", "Fix it."])
+        add_project(state)
+        state["projects"][0]["manager"].update(runtime="herdr", session_id=SID, handle="p-0001")
+        self.assertNotIn("--add-dir", st.launch_argv(state, "p-0001", "Review.", {}, figures="/sup/x"))
+
     def test_git_worker_runs_in_its_worktree_and_non_git_in_its_cwd(self):
         state = fixture_state()
         w = herdr_worker(state)
@@ -6286,7 +6314,10 @@ class LaunchPlanTest(unittest.TestCase):
         code, out, err = env.run("launch-plan", "--state", str(env.state_path), "--claude-md", str(env.dir / "CLAUDE.md"),
                                  "--worker", "w-0030", "--prompt-file", str(env.dir / "prompt.md"))
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out)["argv"][-1], "Fix it.\nThen report.")
+        argv = json.loads(out)["argv"]
+        figures = str(env.dir / ".supervisor/figures/w-0030")
+        self.assertEqual((argv[-1], argv[argv.index("--add-dir") + 1]), ("Fix it.\nThen report.", figures))
+        self.assertFalse(os.path.exists(figures))
         with mock.patch.object(st.subprocess, "run", return_value=subprocess.CompletedProcess([], 3)) as run:
             code, out, err = env.run("launch-plan", "--state", str(env.state_path), "--claude-md", str(env.dir / "CLAUDE.md"),
                                      "--worker", "w-0030", "--prompt-file", str(env.dir / "prompt.md"), "--run")
@@ -6294,6 +6325,7 @@ class LaunchPlanTest(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertEqual(run.call_args.args[0][:2], ["hc", "run"])
         self.assertEqual(run.call_args.args[0][-1], "Fix it.\nThen report.")
+        self.assertTrue(os.path.isdir(figures))
 
 
 class HerdrTranscriptTest(unittest.TestCase):

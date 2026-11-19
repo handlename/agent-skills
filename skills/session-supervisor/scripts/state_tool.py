@@ -5081,9 +5081,15 @@ def _herdr_target(state, ident):
     raise StateError(f"{ident} is neither a worker id nor a manager handle (p-NNNN)")
 
 
-def launch_argv(state, ident, prompt, herdr, parent=None):
+def figures_dir(supervisor_dir, worker_id):
+    """The only folder outside its cwd a worker writes: the images it reports in `figures` (SKILL.md section 4)."""
+    return os.path.join(os.path.abspath(supervisor_dir), ".supervisor", "figures", worker_id)
+
+
+def launch_argv(state, ident, prompt, herdr, parent=None, figures=None):
     """The `hc run` argv that starts the herdr worker or manager `ident`. herdr: parsed `## Herdr` values. parent: the
-    terminal address to start it under instead of `sv` (a project worker under its manager, `project_worker_parent`)."""
+    terminal address to start it under instead of `sv` (a project worker under its manager, `project_worker_parent`).
+    figures: a worker's `figures_dir`, passed with `--add-dir` so that it writes there without a permission prompt."""
     kind, session, cwd, label = _herdr_target(state, ident)
     if session.get("runtime") != "herdr" or session.get("handle") != ident:
         raise StateError(f"{ident} must have runtime 'herdr' and handle {ident!r} in the state before launch")
@@ -5118,6 +5124,8 @@ def launch_argv(state, ident, prompt, herdr, parent=None):
     if herdr.get("worker_path"):
         argv += ["env", f"PATH={herdr['worker_path']}"]
     argv += ["claude", "--session-id", sid]
+    if kind == "worker" and figures:
+        argv += ["--add-dir", figures]
     if session.get("model"):
         argv += ["--model", session["model"]]
     # The prompt goes last: a variadic option right before it would take it as a value.
@@ -5147,8 +5155,11 @@ def cmd_launch_plan(args):
     if errors:
         raise StateError(errors)
     prompt = Path(args.prompt_file).read_text(encoding="utf-8")
-    argv = launch_argv(state, args.worker, prompt, herdr, project_worker_parent(state, args.worker, _run_hc))
+    figures = figures_dir(os.path.dirname(os.path.abspath(args.state)), args.worker)
+    argv = launch_argv(state, args.worker, prompt, herdr, project_worker_parent(state, args.worker, _run_hc), figures)
     if args.run:
+        if "--add-dir" in argv:
+            os.makedirs(figures, exist_ok=True)
         # Run here so the prompt never becomes Bash text, which the guard would scan for blocked commands.
         return subprocess.run(argv).returncode
     print(json.dumps({"argv": argv}, ensure_ascii=False))
@@ -5878,9 +5889,13 @@ def cmd_attach(args):
         raise StateError(f"no note with uid {args.uid!r} in {vault}")
     text = Path(sup, "CLAUDE.md").read_text(encoding="utf-8") if Path(sup, "CLAUDE.md").exists() else ""
     rel_dir = f"{parse_locations(text)[0].get('attachments', ATTACHMENTS_DIR)}/{args.uid}"
+    if not re.fullmatch(r"w-\d+", args.worker):
+        raise StateError(f"--worker must be a worker id w-NNNN, got {args.worker!r}")
+    allowed = os.path.realpath(figures_dir(sup, args.worker)) + os.sep
     errors = []
     for src in args.file:
-        error = (not os.path.isfile(src) and "not a file") or attach_name_error(os.path.basename(src))
+        error = (not os.path.realpath(src).startswith(allowed) and f"not inside {allowed}") or \
+            (not os.path.isfile(src) and "not a file") or attach_name_error(os.path.basename(src))
         if error:
             errors.append(f"{src}: {error}")
     if errors:
@@ -6018,6 +6033,7 @@ def build_parser():
     p = sub.add_parser("attach", help="copy images into <vault>/<attachments>/<uid>/ and print their ![[...]] embeds (JSON)")
     p.add_argument("--state", required=True)
     p.add_argument("--uid", required=True, help="the uid of the note the images are embedded in")
+    p.add_argument("--worker", required=True, help="the worker that reported the images; each --file must be in its figures folder")
     p.add_argument("--file", required=True, action="append", help="an image file to copy (repeatable)")
     p.set_defaults(func=cmd_attach)
 
