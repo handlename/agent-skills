@@ -10,7 +10,7 @@ Field names are agent-neutral:
 
 - `runtime`: `"herdr"` on workers and managers started in Herdr (SKILL.md 6.2). Any other value is an error. Without it, the session was started in the Claude desktop app by an earlier version (SKILL.md section 7).
 - `session_id`: for `runtime: "herdr"`, the Claude Code conversation uuid that the supervisor chooses (a lowercase uuid4, set and committed before the start; `launch-plan` passes it as `claude --session-id`), or `null` before it is set. It locates the session's transcript for its latest message. For a desktop-app session, the id the app returned.
-- `handle`: for `runtime: "herdr"`, the `hc` terminal name and equal to the id: `w-NNNN` for a worker, `p-NNNN` for the manager of `P-NNNN` (lowercase, since `hc` names allow only `a-z 0-9 - _`; a manager started before 0.66.0 keeps `m-p-NNNN` until its next replacement). `validate` checks it. For a desktop-app session, the start-time name, e.g. `t0003-w0004`.
+- `handle`: for `runtime: "herdr"`, the `hc` terminal name without the `name_prefix` of `## Locations`, and equal to the id: `w-NNNN` for a worker, `p-NNNN` for the manager of `P-NNNN` (lowercase, since `hc` names allow only `a-z 0-9 - _`; a manager started before 0.66.0 keeps `m-p-NNNN` until its next replacement). `validate` checks it. It never carries the prefix: with a `name_prefix` the terminal is `<name_prefix><handle>`, which `observe-hc`, `digest`, and `roster` print as `terminal` (SKILL.md section 3, Terminal names and spaces). For a desktop-app session, the start-time name, e.g. `t0003-w0004`.
 - `branch` / `worktree_path`: printed by `state_tool.py prepare-worktree` (SKILL.md 6.2 step 2); copy them from its output, never guess them.
 - `task.id`: `T-NNNN`. `worker.id`: `w-NNNN`. `user_actions[].id`: `UA-NNNN` (kinds `ask` and `auto`). `agent_actions[].id`: `AA-NNNN` (kind `req`, the user's requests to the agent). `UA-` and `AA-` share one number sequence, so `UA-0241` and `AA-0241` never both exist, and `commit` rejects a prefix that does not match the kind; "user-action numbers" below covers both. Allocate the next number after the highest one in the current `tasks` / `workers` / `user_actions`; for task ids also count the `archived` stubs, which keep their task id (a revived task reuses its stub's id, see archived[]). Stubs keep no worker or user-action ids, so those numbers may be reused after a task is archived; uniqueness is checked only within the current state. User-action numbers are allocated across the user actions of `tasks` and `projects` together, so a task and a project never share one, and never reused: the next number is above both the highest open one and `supervisor.last_ua_number` (which covers user actions already acked in the notes).
 - `project.id`: `P-NNNN`, allocated as `supervisor.last_project_number + 1`; the counter is raised in the same candidate and never reused, even after the project is removed.
@@ -191,7 +191,7 @@ Subcommands that read the vault: `notes-scan --state` (the user's changes as eve
 | Field | Meaning |
 | :--- | :--- |
 | `dir` | Absolute path of the supervisor directory (non-git). |
-| `session_ids` | Desktop-app sessions that acted as this supervisor in earlier versions. Kept for the digest; a supervisor on Herdr adds nothing (it is the terminal `sv`). |
+| `session_ids` | Desktop-app sessions that acted as this supervisor in earlier versions. Kept for the digest; a supervisor on Herdr adds nothing (it is the terminal `<name_prefix>sv`). |
 | `archive_consent` | `null`, or `{text, at}` holding the user's verbatim answer to the one-time archive question. Required before a worker that is neither observed `archived` nor `missing` may become `intended_state: archived`. |
 | `last_project_number` | Optional integer >= 0 (absent counts as 0): the highest project number ever allocated. Never decreases. |
 
@@ -264,7 +264,7 @@ Optional (absent counts as an empty list). A project groups tasks under one proj
 | `id`, `task_id` | Worker id and owning task. |
 | `runtime` | Optional, `"herdr"` (see Identifiers). |
 | `session_id`, `started_by` | Session id (see Identifiers) and the starter (`"sv"` on Herdr; a supervisor session id for a desktop-app session). `null` while not set. |
-| `handle`, `title` | The `hc` terminal name (equal to the id on Herdr, see Identifiers) and display title (52 characters or fewer, always set; passed as the Claude session name `-n`, SKILL.md 6.2.2). |
+| `handle`, `title` | The `hc` terminal name without the `name_prefix` (equal to the id on Herdr, see Identifiers) and display title (52 characters or fewer, always set; passed as the Claude session name `-n`, SKILL.md 6.2.2). |
 | `cwd` | Repo root (git) or target directory (non-git), absolute. A git worker runs in its `worktree_path`. |
 | `kind` | `git` or `non-git`. |
 | `delivery` | `push_pr`, `commit`, or `files` (see Value ranges). |

@@ -35,7 +35,7 @@ It creates, among others:
 | Path | Purpose |
 | :--- | :--- |
 | `<dir>/state.json` | Runtime state, written only through `state_tool.py commit`. |
-| `<dir>/CLAUDE.md` | `## Locations` (`clone_root`, `work_root`, `worktree_root`, `vault`, `root`, `reference`, `attachments`, ...) and `## Herdr` (`max_workers`, `worker_path`). |
+| `<dir>/CLAUDE.md` | `## Locations` (`clone_root`, `work_root`, `worktree_root`, `vault`, `root`, `reference`, `attachments`, `name_prefix`, `herdr_space`, ...) and `## Herdr` (`max_workers`, `worker_path`). |
 | `<dir>/.claude/settings.json` | The SessionStart hook (re-injects a digest after compaction) and the PreToolUse guard. |
 | `<dir>/sv.sh` | Starts, restarts, and stops the supervisor's sessions. |
 | `<dir>/chat/` | The directory of `sv-chat`, the conversational front end. |
@@ -66,6 +66,8 @@ The sessions it starts:
 *   **`sv-watch`**: scans the vault every 10 seconds and wakes `sv` when a note changes.
 *   **`sv-chat`**: where you talk in ordinary conversation. It hands your words verbatim to `sv` and shows its answer. Write long instructions here or in notes, not in `sv`, whose input box is shared with `hc` signals.
 *   **`w-NNNN`** (workers) and **`p-NNNN`** (project managers): started by `sv`.
+
+To run a second supervisor in the same Herdr, set it up in another directory and give it a `name_prefix` in `## Locations` (for example `work-`): all of its terminal names then carry it (`work-sv`, `work-w-0001`, ...), and each supervisor sees and messages only its own terminals. With `herdr_space`, `sv.sh` gives `sv`, `sv-chat`, and the project managers their panes in that Herdr space; a terminal that already has a pane stays where it is until `sv.sh restart` or `sv.sh chat` starts it again.
 
 ---
 

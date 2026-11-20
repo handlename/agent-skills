@@ -4,11 +4,13 @@
 // pickup (state_tool.py parent_project_id). Then it renames the note to its `uid` in the same folder (notes-scan finds
 // notes by uid, so the name is free). Cancelling the title dialog keeps the title; cancelling the project picker
 // changes nothing.
+// Only projects in the same root as the note are listed: the root of a note is its folder without a trailing /YYYY/MM.
 // Include it in the task note template with tp.file.include("[[sv-project]]"), or run it as a hotkey on a task note.
 // setup overwrites this file; put a changed copy under another name.
 const file = tp.config.target_file;
 const fmOf = (f) => (app.metadataCache.getFileCache(f) || {}).frontmatter || {};
 const own = fmOf(file);
+const folderRoot = (f) => (f.parent && f.parent.path !== "/" ? f.parent.path : "").replace(/(^|\/)\d{4}\/\d{2}$/, "");
 if (own.task_id) {
   new tp.obsidian.Notice("取り込み済みのタスクのプロジェクトは変えられません");
 } else {
@@ -16,7 +18,7 @@ if (own.task_id) {
   const newTitle = typed && typed.trim();
   const projects = app.vault.getMarkdownFiles()
     .map((f) => ({ f, fm: fmOf(f) }))
-    .filter(({ f, fm }) => f.path !== file.path && [].concat(fm.tags || []).includes("supervised")
+    .filter(({ f, fm }) => f.path !== file.path && folderRoot(f) === folderRoot(file) && [].concat(fm.tags || []).includes("supervised")
       && [].concat(fm.tags || []).includes("project") && fm.project_id && !["done", "archived"].includes(fm.status))
     .sort((a, b) => String(a.fm.project_id).localeCompare(String(b.fm.project_id)));
   const none = { f: null };

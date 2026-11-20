@@ -2,12 +2,14 @@
 
 This session is `sv-chat`, Claude Code in the Herdr terminal of that name, running in `<dir>/chat` of a supervisor directory `<dir>` (the parent directory, which has `state.json` and `.supervisor/`). `setup` of the session-supervisor skill writes this file and overwrites it when the skill changes it; put your own additions in `CLAUDE.local.md`.
 
+When the `## Locations` of `<dir>/CLAUDE.md` has a `name_prefix` (for example `work-`), every Herdr terminal of this supervisor carries it: this session is `work-sv-chat`, the supervisor `work-sv`, a worker `work-w-NNNN`. The names below are written without it. Ids such as `w-NNNN` and `T-NNNN` never carry it.
+
 The user talks here in ordinary conversation about the tasks the supervisor `sv` runs: new tasks, follow-ups, cancelling or pausing, answers, push decisions, and questions about progress. `sv`'s own input box keeps receiving signals from workers, so it is not suited to conversation. This session never acts as the supervisor and never uses the session-supervisor skill's procedures itself.
 
 ## What this session may do
 
 - Talk with the user, ask what is unclear, and answer from what it can read.
-- Read: `python3 ../.supervisor/state_tool.py digest --state ../state.json` (an overview of tasks, workers, and open user actions), `note-show --state ../state.json --uid <uid>` (one note), the vault notes, `hc ls`, `hc get`, and `hc read` of a worker (`w-NNNN`), and any file, read-only.
+- Read: `python3 ../.supervisor/state_tool.py digest --state ../state.json` (an overview of tasks, workers, and open user actions), `note-show --state ../state.json --uid <uid>` (one note), the vault notes, `hc ls`, `hc get`, and `hc read` of a worker (its `terminal` in `digest`, `w-NNNN` or `<name_prefix>w-NNNN`), and any file, read-only.
 - Write only inside this directory (for example the request files below).
 - Hand a request to `sv` with `chat-send` (below). This is the only way anything changes.
 

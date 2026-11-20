@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Start, restart, or stop the sessions of this supervisor directory: sv, sv-watch, and sv-chat.
+# Start, restart, or stop the sessions of this supervisor directory: sv, sv-watch, and sv-chat (each named with the
+# name_prefix of ## Locations in CLAUDE.md, and given a pane in its herdr_space when set).
 # Placed by `state_tool.py setup`, which overwrites a changed copy. Run it from a Herdr terminal other than sv.
 set -eu
 dir=$(cd "$(dirname "$0")" && pwd)
+# An invalid ## Locations stops here, before anything starts under a wrong name.
+p=$(python3 "$dir/.supervisor/state_tool.py" locations --dir "$dir" --key name_prefix)
+space=$(python3 "$dir/.supervisor/state_tool.py" locations --dir "$dir" --key herdr_space)
 
 usage() {
   cat >&2 <<'EOF'
@@ -40,46 +44,85 @@ keep() {
 keep_managers() {
   for t in $(hc ls --json | python3 -c 'import json, re, sys
 for t in json.load(sys.stdin)["terminals"]:
-    if re.fullmatch(r"(m-)?p-[0-9]{4}", t.get("name", "")): print(t["name"])'); do
+    if re.fullmatch(re.escape(sys.argv[1]) + r"(m-)?p-[0-9]{4}", t.get("name", "")): print(t["name"])' "$p"); do
     keep "$t"
   done
 }
 
+# The JSON ids of the Herdr spaces named $space, one per line.
+space_ids() {
+  herdr-app ls | python3 -c 'import json, sys
+for s in json.load(sys.stdin).get("spaces", []):
+    if s.get("name") == sys.argv[1]: print(json.dumps(s["id"]))' "$space"
+}
+
+# With herdr_space, select that space (creating it when missing) so that keep gives the panes there. A failure only warns.
+use_space() {
+  [ -n "$space" ] || return 0
+  if ! ids=$(space_ids); then
+    echo "warning: herdr-app ls failed; the panes go to the current space, not $space" >&2
+    return 0
+  fi
+  created=
+  if [ -z "$ids" ]; then
+    new=$(python3 -c 'import json, sys; print(json.dumps({"name": sys.argv[1], "focus": False}))' "$space")
+    if ! out=$(herdr-app do space.new "$new" 2>&1) || ! ids=$(space_ids) || [ -z "$ids" ]; then
+      echo "warning: could not create the Herdr space $space: ${out:-}; the panes go to the current space" >&2
+      return 0
+    fi
+    created=$ids
+  fi
+  set -- $ids
+  if [ $# -gt 1 ]; then
+    echo "warning: $# Herdr spaces are named $space; using the first ($1)" >&2
+  fi
+  if ! out=$(herdr-app do space.select "{\"id\": $1}" 2>&1); then
+    echo "warning: herdr-app do space.select failed: $out; the panes go to the current space" >&2
+    # Close only a space this run created, never one the user had.
+    for id in $created; do
+      herdr-app do space.close "{\"id\": $id, \"confirmed\": true}" >/dev/null 2>&1 || true
+    done
+  fi
+}
+
 start_sv() {
-  hc run --bg --no-parent --name sv --cwd "$dir" env PATH="$PATH" claude --model opus --permission-mode auto \
+  hc run --bg --no-parent --name "${p}sv" --cwd "$dir" env PATH="$PATH" claude --model opus --permission-mode auto \
     "session-supervisor skill で監督を再開してください"
-  hc run --bg --name sv-watch --parent sv --label sv=watch --outlive-parent --cwd "$dir" \
-    python3 .supervisor/state_tool.py watch-vault --state state.json --notify sv --interval 10
-  keep sv
+  hc run --bg --name "${p}sv-watch" --parent "${p}sv" --label sv=watch --outlive-parent --cwd "$dir" \
+    python3 .supervisor/state_tool.py watch-vault --state state.json --notify "${p}sv" --interval 10
+  keep "${p}sv"
 }
 
 start_chat() {
-  hc run --bg --no-parent --name sv-chat --cwd "$dir/chat" env PATH="$PATH" claude --model opus --permission-mode auto
-  keep sv-chat
+  hc run --bg --no-parent --name "${p}sv-chat" --cwd "$dir/chat" env PATH="$PATH" claude --model opus --permission-mode auto
+  keep "${p}sv-chat"
 }
 
 [ $# -eq 1 ] || usage
 case "$1" in
   start)
-    if hc get sv >/dev/null 2>&1; then
-      echo "error: sv exists; use restart" >&2
+    if hc get "${p}sv" >/dev/null 2>&1; then
+      echo "error: ${p}sv exists; use restart" >&2
       exit 1
     fi
-    end sv-watch
+    end "${p}sv-watch"
+    use_space
     start_sv
-    hc get sv-chat >/dev/null 2>&1 || start_chat
+    hc get "${p}sv-chat" >/dev/null 2>&1 || start_chat
     keep_managers
     ;;
   restart)
-    end sv-watch sv
+    end "${p}sv-watch" "${p}sv"
+    use_space
     start_sv
     keep_managers
     ;;
   stop)
-    end sv-watch sv sv-chat
+    end "${p}sv-watch" "${p}sv" "${p}sv-chat"
     ;;
   chat)
-    end sv-chat
+    end "${p}sv-chat"
+    use_space
     start_chat
     ;;
   *) usage ;;
