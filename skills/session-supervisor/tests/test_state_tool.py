@@ -7753,11 +7753,11 @@ class LauncherPrefixTest(unittest.TestCase):
     def fakes(self, before="", after="", select_exit=0):
         terminals = '{"terminals": [{"address": "t1", "name": "p-0001"}, {"address": "t2", "name": "work-p-0002"}, ' \
                     '{"address": "t3", "name": "work-w-0003"}]}'
-        hc = (f'case "$1" in\n  get) [ "$3" = --json ] && {{ echo \'{{"address": "t9"}}\'; exit 0; }}; exit 1 ;;\n'
+        hc = (f'case "$1" in\n  get) [ "$3" = --json ] && {{ echo \'{{"address": "t9", "labels": {{"herdr.tab": "tb9"}}}}\'; exit 0; }}; exit 1 ;;\n'
               f'  ls) [ "$2" = --json ] && echo \'{terminals}\' ;;\nesac')
         herdr = (f'case "$1 $2" in\n'
                  f'  "ls ") if [ -e "{self.flag}" ]; then echo \'{{"spaces": [{after}]}}\'; else echo \'{{"spaces": [{before}]}}\'; fi ;;\n'
-                 f'  "do space.new") touch "{self.flag}" ;;\n  "do space.select") exit {select_exit} ;;\nesac')
+                 f'  "do space.new") touch "{self.flag}"; echo \'{{"space": "s9", "tab": "tb1", "terminal": "t5"}}\' ;;\n  "do space.select") exit {select_exit} ;;\nesac')
         for name, body in (("hc", hc), ("herdr-app", herdr)):
             (self.bin / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{self.log}"\n{body}\nexit 0\n', encoding="utf-8")
             (self.bin / name).chmod(0o755)
@@ -7770,29 +7770,38 @@ class LauncherPrefixTest(unittest.TestCase):
         return proc, self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
 
     def test_start_with_prefix_creates_and_selects_the_space(self):
-        self.fakes(after='{"id": "s9", "name": "work"}')
+        self.fakes(before='{"id": "s0", "name": "main", "active": true}',
+                   after='{"id": "s0", "name": "main", "active": true}, {"id": "s9", "name": "work"}')
         proc, calls = self.run_sh("start", locations="- name_prefix: work-\n- herdr_space: work\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         keep = "herdr-app do terminal.keep --terminal t9"
-        self.assertEqual(calls[:7], ["hc get work-sv", "hc kill work-sv-watch", "hc rm work-sv-watch", "herdr-app ls",
-                                     'herdr-app do space.new {"name": "work", "focus": false}', "herdr-app ls",
-                                     'herdr-app do space.select {"id": "s9"}'])
+        self.assertEqual(calls[:8], ["hc get work-sv", "hc kill work-sv-watch", "hc rm work-sv-watch", "herdr-app ls",
+                                     "herdr-app ls", 'herdr-app do space.new {"name": "work", "focus": false}',
+                                     "herdr-app ls", 'herdr-app do space.select {"id": "s9"}'])
+        calls = calls[1:]
         self.assertTrue(calls[7].startswith(f"hc run --bg --no-parent --name work-sv --cwd {self.target} env PATH="))
         self.assertEqual(calls[8], f"hc run --bg --name work-sv-watch --parent work-sv --label sv=watch --outlive-parent "
                                    f"--cwd {self.target} python3 .supervisor/state_tool.py watch-vault --state state.json "
                                    f"--notify work-sv --interval 10")
-        self.assertEqual(calls[9:12], ["hc get work-sv --json", keep, "hc get work-sv-chat"])
-        self.assertTrue(calls[12].startswith(f"hc run --bg --no-parent --name work-sv-chat --cwd {self.target / 'chat'} "))
-        self.assertEqual(calls[13:], ["hc get work-sv-chat --json", keep, "hc ls --json", "hc get work-p-0002 --json", keep, "hc ls"])
+        # With herdr_space each keep waits for the pane (hc get --json) before leave_space closes or selects anything.
+        self.assertEqual(calls[9:13], ["hc get work-sv --json", keep, "hc get work-sv --json", "hc get work-sv-chat"])
+        self.assertTrue(calls[13].startswith(f"hc run --bg --no-parent --name work-sv-chat --cwd {self.target / 'chat'} "))
+        self.assertEqual(calls[14:], ["hc get work-sv-chat --json", keep, "hc get work-sv-chat --json", "hc ls --json",
+                                      "hc get work-p-0002 --json", keep, "hc get work-p-0002 --json",
+                                      'herdr-app do tab.close {"id": "tb1", "confirmed": true}',
+                                      'herdr-app do space.select {"id": "s0"}', "hc ls"])
         self.assertNotIn("warning", proc.stderr)
         self.assertFalse(any("space.close" in c for c in calls))
 
     def test_existing_space_is_selected_and_duplicates_warn(self):
-        self.fakes(before='{"id": 3, "name": "work"}, {"id": "s1", "name": "other"}')
+        self.fakes(before='{"id": 3, "name": "work", "active": true}, {"id": "s1", "name": "other"}')
         proc, calls = self.run_sh("chat", locations="- herdr_space: work\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(calls[:4], ["hc kill sv-chat", "hc rm sv-chat", "herdr-app ls", 'herdr-app do space.select {"id": 3}'])
-        self.assertTrue(calls[4].startswith("hc run --bg --no-parent --name sv-chat "))
+        self.assertEqual(calls[:5], ["hc kill sv-chat", "hc rm sv-chat", "herdr-app ls", "herdr-app ls",
+                                     'herdr-app do space.select {"id": 3}'])
+        self.assertTrue(calls[5].startswith("hc run --bg --no-parent --name sv-chat "))
+        # The space was already shown and existed: nothing to show again or close.
+        self.assertEqual([c for c in calls if "space.select" in c or "tab.close" in c], ['herdr-app do space.select {"id": 3}'])
         self.fakes(before='{"id": "a", "name": "work"}, {"id": "b", "name": "work"}')
         proc, calls = self.run_sh("chat", locations="- herdr_space: work\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -7810,6 +7819,7 @@ class LauncherPrefixTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn('herdr-app do space.close {"id": "s9", "confirmed": true}', calls)
         self.assertTrue(any(c.startswith("hc run --bg --no-parent --name sv-chat ") for c in calls))
+        self.assertFalse(any("tab.close" in c for c in calls))
 
     def test_invalid_locations_starts_nothing(self):
         self.fakes()
