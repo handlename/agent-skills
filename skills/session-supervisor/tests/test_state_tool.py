@@ -4791,10 +4791,12 @@ U1, U2, U3 = "20261110_090001", "20261110_090002", "20261110_090003"
 
 
 class VaultEnv:
-    def __init__(self, test):
-        tmp = tempfile.TemporaryDirectory()
-        test.addCleanup(tmp.cleanup)
-        self.dir = Path(tmp.name)
+    def __init__(self, test, dir=None):
+        if dir is None:
+            tmp = tempfile.TemporaryDirectory()
+            test.addCleanup(tmp.cleanup)
+            dir = tmp.name
+        self.dir = Path(dir)
         self.vault = self.dir / "vault"
         self.state_path = self.dir / "state.json"
         self.state = st.empty_state(str(self.dir))
@@ -7101,6 +7103,235 @@ class ObsidianVaultTest(unittest.TestCase):
             outdated = [l for l in proc.stdout.splitlines() if l.startswith("outdated:")]
             self.assertEqual(len(outdated), 1, proc.stdout)
             self.assertIn("project.md (", outdated[0])
+
+
+class SharedVaultRootTest(unittest.TestCase):
+    """`root` and `reference` in ## Locations. The guard runs with an empty TMPDIR, so the system temp folder these
+    paths sit in is not allowed as a temp dir."""
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.sup = self.base / "sup"
+        self.sup.mkdir()
+        self.v = self.base / "v"
+        self.config = self.base / "config"
+        self.ref = self.base / "ref" / "work.md"
+        self.ref.parent.mkdir()
+        self.ref.write_text("ref\n", encoding="utf-8")
+
+    def claude_md(self, *lines):
+        (self.sup / "CLAUDE.md").write_text("## Locations\n" + "".join(f"- {l}\n" for l in lines), encoding="utf-8")
+
+    def env(self):
+        env = VaultEnv(self, self.sup)
+        env.vault = self.v / "sv1"
+        env.vault.mkdir(parents=True, exist_ok=True)
+        self.claude_md(f"vault: {self.v}", "root: sv1")
+        return env
+
+    def guard(self, path, role=None, tool="Edit"):
+        payload = {"tool_name": tool, "tool_input": {"file_path": str(path)}, "cwd": str(self.sup)}
+        return st.guard_decision(payload, str(self.sup), {"CLAUDE_CONFIG_DIR": str(self.config), "TMPDIR": ""}, role)
+
+    def test_parse_root_and_reference(self):
+        self.assertEqual(st.parse_locations("## Locations\n- root: sv1\n- reference: ~/r.md\n- templates: _t/sv\n")[0],
+                         {"root": "sv1", "reference": "~/r.md", "templates": "_t/sv"})
+        for bad in ("- root: /sv1", "- root: ../sv1", "- root: ~/sv1", "- root: sv1.md", "- reference: ref/work.md",
+                    "- root: _templates", "- root: _templates/sv", "- templates: sv1\n- root: sv1"):
+            self.assertTrue(st.parse_locations(f"## Locations\n{bad}\n")[1], bad)
+        self.assertFalse(st.parse_locations("## Locations\n- templates: sv1/_t\n- root: sv1\n")[1])
+        self.assertNotIn("root", st.LOCATION_KEYS)
+        self.assertNotIn("reference", st.LOCATION_KEYS)
+
+    def test_notes_root(self):
+        self.assertEqual(st.notes_root(str(self.sup)), (str(self.sup / "vault"), "", None))
+        self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {self.ref}")
+        self.assertEqual(st.notes_root(str(self.sup)), (str(self.v / "sv1"), "sv1", str(self.ref)))
+        self.assertEqual(st.vault_locations(str(self.sup)), (str(self.v), "sv1/Supervisor.md", "_templates"))
+        for inside in (self.sup / "state.json", self.sup / ".claude/settings.json", self.sup / ".supervisor/state_tool.py",
+                       self.sup / "sv.sh", self.v / "sv1/2026/11/x.md"):
+            self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {inside}")
+            with self.subTest(inside=inside), self.assertRaisesRegex(st.StateError, "must be outside"):
+                st.notes_root(str(self.sup))
+
+    def test_notes_are_created_and_scanned_only_under_the_root(self):
+        env = self.env()
+        env.add_task("T-0020", "w-0020", U1)
+        env.save()
+        self.assertTrue((self.v / "sv1" / st._new_note_path(U1)).exists())
+        (self.v / "other").mkdir()
+        (self.v / "other/x.md").write_text(st.new_note_text("20261110_080000", "外", "task", "backlog", "agent", NOW), encoding="utf-8")
+        self.assertEqual(env.scan(), {"events": [], "warnings": []})
+        code, out, err = env.run("new-note", "--state", str(env.state_path), "--kind", "project", "--count", "2")
+        project_note, task_note = json.loads(out)
+        self.assertEqual(project_note["path"], st._new_note_path(project_note["uid"]))
+        cand = env.load()
+        to_v2(add_project(cand), "projects", project_note["uid"])["manager"].update(intended_state="pending", observed_state="none")
+        git_task(cand, "T-0022", "w-0022")
+        find(cand["workers"], "w-0022").update(cwd="/repo/c", intended_state="pending", observed_state="none", session_id=None)
+        to_v2(find(cand["tasks"], "T-0022"), "tasks", task_note["uid"])["project_id"] = "P-0001"
+        code, out, err = env.commit(cand, {
+            project_note["uid"]: [{"op": "create", "uid": project_note["uid"], "title": "P", "kind": "project",
+                                   "status": "in progress", "assignee": "agent", "request": "p https://github.com/org/repo/issues/1"}],
+            task_note["uid"]: [{"op": "create", "uid": task_note["uid"], "title": "T", "kind": "task", "status": "in progress",
+                                "assignee": "agent", "request": "t", "parent": project_note["uid"]}]})
+        self.assertEqual(code, 0, err)
+        project_text = (self.v / "sv1" / project_note["path"]).read_text(encoding="utf-8")
+        self.assertEqual(project_text.count(st.PROJECT_TASKS_FILTER), 2)
+        props = st.parse_frontmatter((self.v / "sv1" / task_note["path"]).read_text(encoding="utf-8"))[0]
+        self.assertTrue(props["parent"].startswith(f"[[{project_note['uid']}"), props["parent"])
+        self.assertFalse((self.v / project_note["path"]).exists())
+        code, out, err = env.run("note-show", "--state", str(env.state_path), "--uid", task_note["uid"])
+        self.assertEqual(json.loads(out)["abs_path"], str(self.v / "sv1" / task_note["path"]), err)
+        proc = subprocess.run([sys.executable, str(SCRIPT), "digest", "--state", str(env.state_path)], capture_output=True, text=True)
+        self.assertNotIn("外", proc.stdout)
+        self.assertNotIn("reference:", proc.stdout)
+
+    def test_uids_are_taken_only_in_the_root(self):
+        env = self.env()
+        env.save()
+        (self.v / "2026/11").mkdir(parents=True)
+        (self.v / "2026/11/20261110_090000.md").write_text('---\nuid: "20261110_090000"\n---\n', encoding="utf-8")
+
+        class Fixed(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 11, 10, 9, 0, 0)
+        with mock.patch.object(st, "datetime", Fixed):
+            code, out, err = env.run("new-note", "--state", str(env.state_path), "--kind", "task")
+        self.assertEqual(json.loads(out)["uid"], "20261110_090000", err)
+
+    def test_missing_root_folder(self):
+        env = self.env()
+        env.add_task("T-0020", "w-0020", U1)
+        env.save()
+        shutil.rmtree(self.v / "sv1")
+        code, _, err = env.run("notes-scan", "--state", str(env.state_path))
+        self.assertEqual(code, 1)
+        self.assertIn("does not exist", err)
+        code, _, err = env.commit()
+        self.assertEqual(code, 1)
+        self.assertIn("does not exist", err)
+        proc = subprocess.run([sys.executable, str(SCRIPT), "digest", "--state", str(env.state_path)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn(f"{U1} ({st._new_note_path(U1)})", proc.stdout)
+
+    def test_setup_places_the_dashboard_in_the_root(self):
+        self.claude_md(f"vault: {self.v}", "root: sv1")
+        proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(self.sup)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        board = (self.v / "sv1/Supervisor.md").read_text(encoding="utf-8")
+        self.assertEqual(board, st.supervisor_note("_templates", root="sv1"))
+        self.assertEqual(board.count("type: kanban"), 3)
+        self.assertEqual(board.count('    - file.inFolder("sv1")\n'), 3)
+        self.assertFalse((self.v / "Supervisor.md").exists())
+        self.assertNotIn("inFolder(\"sv1\")", st.supervisor_note("_templates"))
+
+    def test_setup_creates_the_root_when_the_dashboard_is_outside(self):
+        env = VaultEnv(self, self.sup)
+        env.vault = self.v / "sv1"
+        env.save()
+        self.claude_md(f"vault: {self.v}", "root: sv1", "dashboard: Board.md")
+        proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(self.sup)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue((self.v / "Board.md").exists())
+        self.assertTrue((self.v / "sv1").is_dir())
+        self.assertEqual(env.run("notes-scan", "--state", str(env.state_path))[0], 0)
+
+    def test_index_skips_the_dashboard_and_templates_inside_the_root(self):
+        env = self.env()
+        env.save()
+        self.claude_md(f"vault: {self.v}", "root: sv1", "templates: sv1/_t")
+        for rel in ("sv1/Supervisor.md", "sv1/_t/task.md", "sv1/2026/11/20261111_090000.md", "x.md"):
+            (self.v / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.v / rel).write_text('---\nuid: "20261111_090000"\n---\n', encoding="utf-8")
+        notes_dir, texts, _ = st._vault_index(str(env.state_path))
+        self.assertEqual((notes_dir, list(texts)), (str(self.v / "sv1"), ["2026/11/20261111_090000.md"]))
+
+    def test_attach_copies_into_the_vault_attachments(self):
+        env = self.env()
+        env.add_task("T-0020", "w-0020", U1)
+        env.save()
+        src = self.sup / ".supervisor/figures/w-0020"
+        src.mkdir(parents=True)
+        (src / "a.png").write_bytes(b"png")
+        code, out, err = env.run("attach", "--state", str(env.state_path), "--uid", U1, "--worker", "w-0020", "--file", str(src / "a.png"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)[0]["path"], f"{st.ATTACHMENTS_DIR}/{U1}/a.png")
+        self.assertTrue((self.v / st.ATTACHMENTS_DIR / U1 / "a.png").exists())
+
+    def test_retag_notes_refuses_a_root(self):
+        env = VaultEnv(self, self.sup)
+        env.save()
+        (self.sup / "vault/sv1").mkdir(parents=True)
+        self.claude_md("root: sv1")
+        code, _, err = env.run("retag-notes", "--state", str(env.state_path))
+        self.assertEqual(code, 1)
+        self.assertIn("runs only on", err)
+
+    def test_guard_covers_the_root(self):
+        self.claude_md(f"vault: {self.v}", "root: sv1")
+        self.assertIn("vault notes are written only by state_tool commit", self.guard(self.v / "sv1/2026/11/x.md"))
+        self.assertIn("outside the supervisor directory", self.guard(self.v / "CLAUDE.md"))
+        self.claude_md("root: sv1")
+        self.assertIsNone(self.guard(self.sup / "vault/other.md"))
+        self.assertIn("vault notes are written only by state_tool commit", self.guard(self.sup / "vault/sv1/x.md"))
+
+    def test_guard_allows_only_the_reference_file(self):
+        self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {self.ref}")
+        for tool in ("Edit", "Write"):
+            self.assertIsNone(self.guard(self.ref, tool=tool))
+        for path in (self.ref.parent / "other.md", self.ref.parent / "sub/work.md", self.ref.parent, self.base / "work.md",
+                     self.v / "other.md"):
+            self.assertIn("outside the supervisor directory", self.guard(path), path)
+        self.assertIn("vault notes are written only by state_tool commit", self.guard(self.v / "sv1/x.md"))
+        link = self.base / "link.md"
+        link.symlink_to(self.ref)
+        self.assertIsNone(self.guard(link))
+        for role in ("manager", "chat"):
+            self.assertIn("outside the supervisor directory", self.guard(self.ref, role=role))
+        self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {self.ref}", "cache: /x")
+        self.assertIn("outside the supervisor directory", self.guard(self.ref))
+
+    def test_guard_compares_the_resolved_reference(self):
+        target = self.base / "real.md"
+        target.write_text("r\n", encoding="utf-8")
+        self.ref.unlink()
+        self.ref.symlink_to(target)
+        self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {self.ref}")
+        self.assertIsNone(self.guard(self.ref))
+        self.assertIsNone(self.guard(target))
+
+    def test_reference_never_opens_protected_files(self):
+        settings = self.config / "settings.json"
+        self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {settings}")
+        self.assertIn("inside Claude's configuration directory", self.guard(settings))
+        for protected in (self.sup / "state.json", self.sup / ".claude/settings.json"):
+            self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {protected}")
+            self.assertIn("written only by setup or commit", self.guard(protected))
+            # Even a reference that slipped past the Locations check is denied before the final branch.
+            with mock.patch.object(st, "notes_root", return_value=(str(self.v / "sv1"), "sv1", str(protected))):
+                self.assertIn("written only by setup or commit", self.guard(protected))
+        note = self.v / "sv1/x.md"
+        with mock.patch.object(st, "notes_root", return_value=(str(self.v / "sv1"), "sv1", str(note))):
+            self.assertIn("vault notes are written only by state_tool commit", self.guard(note))
+
+    def test_digest_shows_the_reference(self):
+        env = self.env()
+        env.save()
+
+        def digest():
+            proc = subprocess.run([sys.executable, str(SCRIPT), "digest", "--state", str(env.state_path)], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0)
+            return [l for l in proc.stdout.splitlines() if l.startswith("reference:")]
+        self.assertEqual(digest(), [])
+        self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {self.ref}")
+        self.assertEqual(digest(), [f"reference: {self.ref} (read it at session start; you may append what you learn)"])
+        self.ref.unlink()
+        self.assertEqual(digest(), [f"reference: {self.ref} (missing: create it when there is something to record)"])
+        self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {self.ref}", "cache: /x")
+        self.assertEqual(digest(), [])
 
 
 class CancelWithoutWorkersTest(unittest.TestCase):

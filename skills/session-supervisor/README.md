@@ -35,11 +35,11 @@ It creates, among others:
 | Path | Purpose |
 | :--- | :--- |
 | `<dir>/state.json` | Runtime state, written only through `state_tool.py commit`. |
-| `<dir>/CLAUDE.md` | `## Locations` (`clone_root`, `work_root`, `worktree_root`, `vault`, `attachments`, ...) and `## Herdr` (`max_workers`, `worker_path`). |
+| `<dir>/CLAUDE.md` | `## Locations` (`clone_root`, `work_root`, `worktree_root`, `vault`, `root`, `reference`, `attachments`, ...) and `## Herdr` (`max_workers`, `worker_path`). |
 | `<dir>/.claude/settings.json` | The SessionStart hook (re-injects a digest after compaction) and the PreToolUse guard. |
 | `<dir>/sv.sh` | Starts, restarts, and stops the supervisor's sessions. |
 | `<dir>/chat/` | The directory of `sv-chat`, the conversational front end. |
-| `<vault>/Supervisor.md` | The kanban dashboard note. |
+| `<vault>/Supervisor.md` | The kanban dashboard note (`<vault>/<root>/Supervisor.md` when `root` sets the notes folder in a shared vault). |
 
 Before the first worker in a git repository, open that repository once with `claude` and answer the trust dialog. The supervisor never answers it.
 

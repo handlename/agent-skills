@@ -139,9 +139,9 @@ ART_COMMENT_RE = re.compile(r"<!--[ \t]*sv-art[ \t]+(.*?)[ \t]*-->")
 
 LOCATIONS_HEADING = "## Locations"
 LOCATION_KEYS = ("clone_root", "work_root", "worktree_root")
-# Optional keys that setup never adds: the vault (absolute or ~) and, relative to it, the dashboard note, the template
-# folder, and the folder of the images embedded in notes.
-VAULT_REL_KEYS = ("dashboard", "templates", "attachments")
+# Optional keys that setup never adds: the vault and the reference file (absolute or ~) and, relative to the vault, the
+# dashboard note, the template folder, the folder of the images embedded in notes, and the root folder of the notes.
+VAULT_REL_KEYS = ("dashboard", "templates", "attachments", "root")
 LOCATIONS_NOTE = ("`python3 .supervisor/state_tool.py prepare-dir` and `prepare-worktree` are the only commands that write outside "
                   "this directory: they clone repositories into `clone_root/<host>/<owner>/<repo>`, create work directories "
                   "and project directories (with a guard hook) under `work_root`, and add worker worktrees under "
@@ -527,13 +527,13 @@ def bash_violations(command, role=None):
     return violations
 
 
-def path_violation(path, cwd, supervisor_dir, config_dir, tmp_dirs):
+def path_violation(path, cwd, supervisor_dir, config_dir, tmp_dirs, allow_reference=False):
     full = _real(os.path.join(_real(cwd), os.path.expanduser(path)))
     try:
-        vault = vault_locations(supervisor_dir)[0]
+        notes_dir, _, reference = notes_root(supervisor_dir)
     except (StateError, OSError):
-        vault = os.path.join(supervisor_dir, VAULT_DIR)
-    if _under(full, vault):
+        notes_dir, reference = os.path.join(supervisor_dir, VAULT_DIR), None
+    if _under(full, notes_dir):
         return f"{full} (vault notes are written only by state_tool commit)"
     if _under(full, supervisor_dir):
         if any(_under(full, os.path.join(supervisor_dir, rel)) for rel in GUARD_PROTECTED):
@@ -545,6 +545,9 @@ def path_violation(path, cwd, supervisor_dir, config_dir, tmp_dirs):
             return None
         return f"{full} (inside Claude's configuration directory)"
     if any(_under(full, d) for d in tmp_dirs):
+        return None
+    # Last, so that a reference pointing at a protected file, Claude's configuration or a note stays blocked above.
+    if allow_reference and reference and full == reference:
         return None
     return f"{full} (outside the supervisor directory)"
 
@@ -569,7 +572,7 @@ def guard_decision(payload, supervisor_dir, env, role=None):
     else:
         config_dir = env.get("CLAUDE_CONFIG_DIR") or "~/.claude"
         tmp_dirs = [d for d in (env.get("TMPDIR"), "/tmp") if d]
-        found = path_violation(value, payload.get("cwd") or supervisor_dir, supervisor_dir, config_dir, tmp_dirs)
+        found = path_violation(value, payload.get("cwd") or supervisor_dir, supervisor_dir, config_dir, tmp_dirs, role is None)
         violations = [f"{tool} {found}"] if found else []
     if not violations:
         return None
@@ -1591,7 +1594,7 @@ def _digest_follow_up(ua):
     return f" [follow-up {fu.get('rule')} {fu.get('done')}]{tail}"
 
 
-def digest(state, state_path, limit=DIGEST_LIMIT):
+def digest(state, state_path, limit=DIGEST_LIMIT, reference=None):
     sup = state.get("supervisor", {})
     workers_by_id = {w.get("id"): w for w in state.get("workers", [])}
     lines = [
@@ -1599,6 +1602,11 @@ def digest(state, state_path, limit=DIGEST_LIMIT):
         "Before acting: use the session-supervisor skill, run its capability check, then reconcile workers with the live session list. "
         "If any worker is running, idle or needs_input, resume the periodic reconciliation loop.",
         f"state: {state_path}",
+    ]
+    if reference:
+        lines.append(f"reference: {reference} " + ("(read it at session start; you may append what you learn)" if os.path.exists(reference)
+                                                   else "(missing: create it when there is something to record)"))
+    lines += [
         f"supervisor session_ids: {', '.join(sup.get('session_ids', [])) or '(none)'}",
         f"archive_consent: {'recorded' if sup.get('archive_consent') else 'missing (ask the user once)'}",
         f"archived tasks: {len(state.get('archived', []))}",
@@ -1835,8 +1843,8 @@ def parse_locations(text):
         if not m:
             continue
         key, value = m.group(1), m.group(2).strip()
-        if key not in LOCATION_KEYS + VAULT_REL_KEYS + ("vault",):
-            errors.append(f"CLAUDE.md:{i + 1}: unknown key {key!r} (use {list(LOCATION_KEYS + ('vault',) + VAULT_REL_KEYS)})")
+        if key not in LOCATION_KEYS + VAULT_REL_KEYS + ("vault", "reference"):
+            errors.append(f"CLAUDE.md:{i + 1}: unknown key {key!r} (use {list(LOCATION_KEYS + ('vault', 'reference') + VAULT_REL_KEYS)})")
         elif key in values:
             errors.append(f"CLAUDE.md:{i + 1}: duplicate key {key!r}")
         elif key in VAULT_REL_KEYS:
@@ -1851,6 +1859,9 @@ def parse_locations(text):
             errors.append(f"CLAUDE.md:{i + 1}: {key} must be an absolute path or start with ~, got {value!r}")
         else:
             values[key] = value
+    templates, root = values.get("templates", TEMPLATES_DIR), values.get("root")
+    if root and (root == templates or root.startswith(templates + "/")):
+        errors.append(f"CLAUDE.md: root {root!r} must not be the template folder {templates!r} or inside it")
     return ({}, errors) if errors else (values, [])
 
 
@@ -4192,17 +4203,39 @@ def vault_locations(supervisor_dir):
             root = _real(values.get(key, defaults[key]))
             if _cwds_overlap(vault, root):
                 raise StateError(f"vault {vault} and {key} {root} are nested")
-    return vault, values.get("dashboard", DASHBOARD_NOTE), values.get("templates", TEMPLATES_DIR)
+    dashboard = f"{values['root']}/{DASHBOARD_NOTE}" if "root" in values else DASHBOARD_NOTE
+    return vault, values.get("dashboard", dashboard), values.get("templates", TEMPLATES_DIR)
+
+
+def notes_root(supervisor_dir):
+    """(notes_dir, root, reference): the folder of the supervisor's notes (<vault>/<root>, or the vault without root),
+    root ("" without it), and the resolved reference file (None without it), which lies outside both <dir> and notes_dir."""
+    sup = os.path.abspath(supervisor_dir)
+    vault = vault_locations(sup)[0]
+    claude_md = os.path.join(sup, "CLAUDE.md")
+    values = parse_locations(Path(claude_md).read_text(encoding="utf-8") if os.path.exists(claude_md) else "")[0]
+    root = values.get("root", "")
+    notes_dir = os.path.join(vault, root) if root else vault
+    reference = _real(values["reference"]) if "reference" in values else None
+    if reference and (_under(reference, sup) or _under(reference, notes_dir)):
+        raise StateError(f"reference {reference} must be outside the supervisor directory {sup} and the notes folder {notes_dir}")
+    return notes_dir, root, reference
 
 
 def _vault_path(state_path):
-    return vault_locations(os.path.dirname(os.path.abspath(state_path)))[0]
+    return notes_root(os.path.dirname(os.path.abspath(state_path)))[0]
 
 
 def _vault_index(state_path):
-    """(vault, texts, uids) of the vault configured for this supervisor directory."""
-    vault, dashboard, templates = vault_locations(os.path.dirname(os.path.abspath(state_path)))
-    return (vault, *_index_vault(vault, dashboard, templates))
+    """(notes_dir, texts, uids) of the notes configured for this supervisor directory."""
+    sup = os.path.dirname(os.path.abspath(state_path))
+    _, dashboard, templates = vault_locations(sup)
+    notes_dir, root, _ = notes_root(sup)
+    if root:
+        if not os.path.isdir(notes_dir):
+            raise FileNotFoundError(f"notes folder {notes_dir} (root {root!r}) does not exist")
+        dashboard, templates = (p[len(root) + 1:] if p.startswith(root + "/") else None for p in (dashboard, templates))
+    return (notes_dir, *_index_vault(notes_dir, dashboard, templates))
 
 
 def _new_note_path(uid):
@@ -4608,7 +4641,11 @@ def cmd_digest(args):
         state = _load_view(args.state)
         if not isinstance(state, dict):
             raise ValueError("state is not a JSON object")
-        print(digest(state, os.path.abspath(args.state)))
+        try:
+            reference = notes_root(os.path.dirname(os.path.abspath(args.state)))[2]
+        except (StateError, OSError):
+            reference = None
+        print(digest(state, os.path.abspath(args.state), reference=reference))
     except Exception as e:  # The hook must never fail the session start.
         print(f"[session-supervisor] state not readable at {args.state} ({type(e).__name__}: {e}); use the session-supervisor skill to recover.")
     return 0
@@ -4730,9 +4767,10 @@ TASK_SORT = ("\n    sort:\n      - property: formula.priority_rank\n        dire
 TASK_ORDER = "[formula.title, summary, priority, subtasks, task_id, project_id, created_at]"
 
 
-def _kanban_base(name, filters, templates, order=KANBAN_ORDER, sort="", formulas=""):
+def _kanban_base(name, filters, templates, order=KANBAN_ORDER, sort="", formulas="", root=None):
+    in_root = (f'file.inFolder("{root}")',) if root else ()
     in_templates = (f"""'!file.inFolder("{templates}")'""",) if templates else ()
-    lines = "".join(f"\n    - {f}" for f in in_templates + filters)
+    lines = "".join(f"\n    - {f}" for f in in_root + in_templates + filters)
     return f"""```base
 filters:
   and:
@@ -4766,22 +4804,22 @@ PROJECT_TASKS_SECTION = "## タスク\n\n" + "\n".join(
     for heading, name, who in (("ユーザーの番", "ユーザー", "user"), ("エージェントの番", "エージェント", "agent")))
 
 
-def supervisor_note(templates, order=TASK_ORDER, sort=TASK_SORT, formulas=PRIORITY_FORMULA):
+def supervisor_note(templates, order=TASK_ORDER, sort=TASK_SORT, formulas=PRIORITY_FORMULA, root=None):
     """Tasks on two kanbans by assignee, sorted by priority, and projects, which stay in progress / agent until closed,
     on their own. The defaults after templates are the current layout; older ones generate earlier dashboards."""
-    user = _kanban_base("ユーザー", (_NOT_PROJECT, _ASSIGNEE_IS.format("user")), templates, order, sort, formulas)
-    agent = _kanban_base("エージェント", (_NOT_PROJECT, _ASSIGNEE_IS.format("agent")), templates, order, sort, formulas)
+    user = _kanban_base("ユーザー", (_NOT_PROJECT, _ASSIGNEE_IS.format("user")), templates, order, sort, formulas, root)
+    agent = _kanban_base("エージェント", (_NOT_PROJECT, _ASSIGNEE_IS.format("agent")), templates, order, sort, formulas, root)
     project = _kanban_base("プロジェクト", ('file.hasTag("project")',), templates,
-                           "[formula.title, summary, project_id, assignee, created_at]")
+                           "[formula.title, summary, project_id, assignee, created_at]", root=root)
     return f"## ユーザーの番\n\n{user}\n## エージェントの番\n\n{agent}\n## プロジェクト\n\n{project}"
 
 
-def legacy_supervisor_notes(templates):
+def legacy_supervisor_notes(templates, root=None):
     """Dashboards that earlier setups generated, which setup may replace because the user never edited them."""
-    return tuple(f"## ユーザーの番\n\n{_kanban_base('ユーザー', (_ASSIGNEE_IS.format('user'),), templates, order)}\n"
-                 f"## エージェントの番\n\n{_kanban_base('エージェント', (_ASSIGNEE_IS.format('agent'),), templates, order)}"
+    return tuple(f"## ユーザーの番\n\n{_kanban_base('ユーザー', (_ASSIGNEE_IS.format('user'),), templates, order, root=root)}\n"
+                 f"## エージェントの番\n\n{_kanban_base('エージェント', (_ASSIGNEE_IS.format('agent'),), templates, order, root=root)}"
                  for order in (KANBAN_ORDER, "[formula.title, task_id, project_id, created_at]")) + (
-        supervisor_note(templates, KANBAN_ORDER, "", ""),)
+        supervisor_note(templates, KANBAN_ORDER, "", "", root),)
 
 
 def _setup_vault(supervisor_dir):
@@ -4789,10 +4827,13 @@ def _setup_vault(supervisor_dir):
     except the Templater scripts sv-status.md and sv-project.md, which are placed in the template folder, and the CSS
     snippet sv-kanban.css in .obsidian/snippets (created, exists or updated)."""
     vault, dashboard, templates = vault_locations(supervisor_dir)
-    files = ((Path(vault) / dashboard, supervisor_note(templates)),)
+    root = notes_root(supervisor_dir)[1]
+    if root:
+        (Path(vault) / root).mkdir(parents=True, exist_ok=True)
+    files = ((Path(vault) / dashboard, supervisor_note(templates, root=root)),)
     report = []
     for path, text in files:
-        if path.exists() and path.read_text(encoding="utf-8") in legacy_supervisor_notes(templates):
+        if path.exists() and path.read_text(encoding="utf-8") in legacy_supervisor_notes(templates, root):
             _write_atomic(str(path), text)
             report.append(("updated", path))
         elif path.exists():
@@ -5872,7 +5913,7 @@ def cmd_note_show(args):
     sections = parse_sections(body)
     uas = parse_user_actions(sections.get(UA_SECTION, ""))
     items, problems = parse_artifacts(sections.get(ART_SECTION, ""))
-    print(json.dumps({"uid": args.uid, "path": rel, "props": props, "frontmatter_errors": errors, "sections": sections,
+    print(json.dumps({"uid": args.uid, "path": rel, "abs_path": os.path.join(vault, rel), "props": props, "frontmatter_errors": errors, "sections": sections,
                       "request": _request_text(sections.get("概要")), "lang": note_lang(_request_text(sections.get("概要"))),
                       "user_actions": [_ua_summary(u) for u in uas],
                       "requests": [_ua_summary(u) for u in uas if u["kind"] == "req" and ua_open(u)],
@@ -5968,7 +6009,8 @@ def attach_image(src, folder):
 
 def cmd_attach(args):
     sup = os.path.dirname(os.path.abspath(args.state))
-    vault, _, uids = _vault_index(args.state)
+    _, _, uids = _vault_index(args.state)
+    vault = vault_locations(sup)[0]
     if args.uid not in uids or re.search(r"[/\\]", args.uid) or args.uid in (".", ".."):
         raise StateError(f"no note with uid {args.uid!r} in {vault}")
     text = Path(sup, "CLAUDE.md").read_text(encoding="utf-8") if Path(sup, "CLAUDE.md").exists() else ""
