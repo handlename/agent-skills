@@ -58,5 +58,5 @@ If any of these thoughts occur to you, **stop** — do not run the write. Propos
 When a skill's **explicit purpose is a write operation**, that write is authorized as part of running the skill — no separate confirmation is needed. Examples in this repository:
 
 - `create-pr` — creating a pull request.
-- `plan-to-issue` — creating an issue or posting a comment.
+- `plan-to-issue` — creating an issue, posting a comment, or creating or editing a plan issue artifact.
 - `setup-tagpr` — configuring release automation (e.g. workflow files, secrets, release PRs).
