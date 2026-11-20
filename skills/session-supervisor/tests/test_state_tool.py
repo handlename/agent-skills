@@ -5675,7 +5675,7 @@ class SetupVaultTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "sup"
             shortcut = target / "vault" / "_templates" / "sv-status.md"
-            asset = (SKILL / "assets" / "sv-status.md").read_text(encoding="utf-8")
+            asset = st._stamped("sv-status.md", (SKILL / "assets" / "sv-status.md").read_text(encoding="utf-8"), st.plugin_version())
             reports = []
             for change in (None, None, "mine\n"):
                 if change:
@@ -5690,7 +5690,7 @@ class SetupVaultTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "sup"
             snippet = target / "vault" / ".obsidian" / "snippets" / "sv-kanban.css"
-            asset = (SKILL / "assets" / "sv-kanban.css").read_text(encoding="utf-8")
+            asset = st._stamped("sv-kanban.css", (SKILL / "assets" / "sv-kanban.css").read_text(encoding="utf-8"), st.plugin_version())
             reports = []
             for change in (None, "obsidian", None, "mine\n"):
                 if change == "obsidian":
@@ -5702,6 +5702,40 @@ class SetupVaultTest(unittest.TestCase):
                 reports += [l.split(":")[0] for l in proc.stdout.splitlines() if l.endswith("sv-kanban.css")]
             self.assertEqual(snippet.read_text(encoding="utf-8"), asset)
             self.assertEqual(reports, ["created", "exists", "updated"])
+
+    def test_vault_copies_carry_the_plugin_version_and_a_newer_one_is_kept(self):
+        version = st.plugin_version()
+        self.assertEqual(version, tuple(int(n) for n in json.loads(
+            (SKILL.parent.parent / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"].split(".")))
+        asset = (SKILL / "assets" / "sv-status.md").read_text(encoding="utf-8")
+        stamped = st._stamped("sv-status.md", asset, version)
+        self.assertTrue(stamped.startswith("<%*\n// session-supervisor-version: "))
+        self.assertEqual(st._stamp_of(stamped), version)
+        self.assertEqual(st._stamped("sv-kanban.css", "x\n", (1, 2, 3)), "/* session-supervisor-version: 1.2.3 */\nx\n")
+        self.assertEqual(st._stamped("sv-status.md", asset, None), asset)
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "sup"
+            shortcut = target / "vault" / "_templates" / "sv-status.md"
+            subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True, check=True)
+            # Another machine with a newer plugin wrote it through the synced vault: setup keeps it and warns.
+            newer = (version[0], version[1] + 1, 0)
+            theirs = st._stamped("sv-status.md", "<%*\nnewer\n%>\n", newer)
+            shortcut.write_text(theirs, encoding="utf-8")
+            proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn(f"newer: {shortcut} ({'.'.join(map(str, newer))} > {'.'.join(map(str, version))}; "
+                          f"update the plugin on this machine)", proc.stdout)
+            self.assertEqual(shortcut.read_text(encoding="utf-8"), theirs)
+            # An older one is overwritten.
+            shortcut.write_text(st._stamped("sv-status.md", "<%*\nolder\n%>\n", (0, 1, 0)), encoding="utf-8")
+            proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
+            self.assertIn(f"updated: {shortcut}", proc.stdout)
+            self.assertEqual(shortcut.read_text(encoding="utf-8"), stamped)
+            # Without a plugin version (a skill installed without the plugin) it copies the asset as it is, as before.
+            shortcut.write_text(theirs, encoding="utf-8")
+            with mock.patch.object(st, "plugin_version", return_value=None):
+                st._setup_vault(str(target))
+            self.assertEqual(shortcut.read_text(encoding="utf-8"), asset)
 
 
 class DigestFallbackTest(unittest.TestCase):

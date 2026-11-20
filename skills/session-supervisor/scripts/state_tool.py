@@ -4902,6 +4902,37 @@ def legacy_supervisor_notes(templates, root=None):
         supervisor_note(templates, KANBAN_ORDER, "", "", root),)
 
 
+VERSION_MARK = "session-supervisor-version: "
+VERSION_MARK_RE = re.compile(re.escape(VERSION_MARK) + r"(\d+)\.(\d+)\.(\d+)")
+
+
+def plugin_version():
+    """(major, minor, patch) of the plugin this skill belongs to (.claude-plugin/plugin.json), or None when the skill was
+    installed without it."""
+    try:
+        version = json.loads((HERE.parents[2] / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
+        return tuple(int(n) for n in version.split("."))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError):
+        return None
+
+
+def _stamped(name, text, version):
+    """text of the vault file name with the version mark: a comment after the Templater opening line of a script, at
+    the top of the CSS snippet. Without a version, text unchanged."""
+    if version is None:
+        return text
+    mark = VERSION_MARK + ".".join(map(str, version))
+    if name.endswith(".css"):
+        return f"/* {mark} */\n{text}"
+    head, _, rest = text.partition("\n")
+    return f"{head}\n// {mark}\n{rest}"
+
+
+def _stamp_of(text):
+    m = VERSION_MARK_RE.search(text[:500])
+    return tuple(int(n) for n in m.groups()) if m else None
+
+
 def _setup_vault(supervisor_dir):
     """Create the dashboard note when it is missing; never overwrite it unless it is an unedited earlier version. Templates are built with the user (section 3),
     except the Templater scripts sv-status.md and sv-project.md, which are placed in the template folder, and the CSS
@@ -4927,15 +4958,24 @@ def _setup_vault(supervisor_dir):
     copies = [(name, Path(vault) / templates / name) for name in ("sv-status.md", "sv-project.md")]
     if (Path(vault) / ".obsidian").is_dir():
         copies.append(("sv-kanban.css", Path(vault) / ".obsidian" / "snippets" / "sv-kanban.css"))
+    # They are shared by every machine that syncs the vault: a copy stamped by a newer plugin is never overwritten.
+    version = plugin_version()
     for name, dest in copies:
         src = HERE.parent / "assets" / name
         if not src.exists():
             report.append(("skipped", dest))
             continue
-        status = "exists" if dest.exists() and dest.read_bytes() == src.read_bytes() else ("updated" if dest.exists() else "created")
+        text = _stamped(name, src.read_text(encoding="utf-8"), version)
+        old = dest.read_bytes() if dest.exists() else None
+        theirs = _stamp_of(old.decode("utf-8", "replace")) if old is not None else None
+        if version and theirs and theirs > version:
+            report.append(("newer", f"{dest} ({'.'.join(map(str, theirs))} > {'.'.join(map(str, version))}; "
+                                    f"update the plugin on this machine)"))
+            continue
+        status = "exists" if old == text.encode("utf-8") else ("updated" if old is not None else "created")
         if status != "exists":
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dest)
+            _write_atomic(str(dest), text)
         report.append((status, dest))
     # Note templates are the user's: setup only reports those whose notes would differ from the ones state_tool creates.
     report += [("outdated", f"{path} ({'; '.join(errors)})") for path, errors in outdated_templates(Path(vault) / templates)]
