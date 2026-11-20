@@ -5128,10 +5128,18 @@ def figures_dir(supervisor_dir, worker_id):
     return os.path.join(os.path.abspath(supervisor_dir), ".supervisor", "figures", worker_id)
 
 
-def launch_argv(state, ident, prompt, herdr, parent=None, figures=None):
+def missing_done_criteria(done_when, prompt):
+    """The lines of a task note's `## 完了条件` body that the prompt does not contain (each compared without its
+    surrounding whitespace; blank lines are skipped)."""
+    lines = [line.strip() for line in (done_when or "").split("\n")]
+    return [line for line in lines if line and line not in prompt]
+
+
+def launch_argv(state, ident, prompt, herdr, parent=None, figures=None, done_when=None):
     """The `hc run` argv that starts the herdr worker or manager `ident`. herdr: parsed `## Herdr` values. parent: the
     terminal address to start it under instead of `sv` (a project worker under its manager, `project_worker_parent`).
-    figures: a worker's `figures_dir`, passed with `--add-dir` so that it writes there without a permission prompt."""
+    figures: a worker's `figures_dir`, passed with `--add-dir` so that it writes there without a permission prompt.
+    done_when: the body of `## 完了条件` of the worker's task note; every line of it must be in the prompt."""
     kind, session, cwd, label = _herdr_target(state, ident)
     if session.get("runtime") != "herdr" or session.get("handle") != ident:
         raise StateError(f"{ident} must have runtime 'herdr' and handle {ident!r} in the state before launch")
@@ -5157,6 +5165,11 @@ def launch_argv(state, ident, prompt, herdr, parent=None, figures=None):
             if not serial["ready"]:
                 raise StateError(f"{task_id} runs after {serial['waiting_for']} (serial queue); start {ident} once "
                                  f"{serial['waiting_for']} has finished its work")
+        missing = missing_done_criteria(done_when, prompt)
+        if missing:
+            raise StateError([f"the prompt of {ident} lacks these lines of `## 完了条件` of the {task_id} note; put the "
+                              "section's body under \"Done when:\" (references/worker-prompt.md) and run launch-plan again:"]
+                             + [f"  {line}" for line in missing])
     argv = ["hc", "run", "--bg", "--json", "--name", ident, "--cwd", cwd, "--label", f"sv={kind}", "--label", label,
             "--outlive-parent"]
     if parent:
@@ -5190,6 +5203,19 @@ def project_worker_parent(state, ident, runner):
     return got.get("address") if got.get("state") == "live" else None
 
 
+def task_done_when(state_path, state, ident):
+    """The body of `## 完了条件` of the note of worker `ident`'s task, or None (a manager, a task without a uid, or a
+    note that is not in the vault)."""
+    worker = next((w for w in state.get("workers", []) if w.get("id") == ident), None)
+    task = next((t for t in state.get("tasks", []) if worker and t.get("id") == worker.get("task_id")), None)
+    if not (task and task.get("uid")):
+        return None
+    _, texts, uids = _vault_index(state_path)
+    if task["uid"] not in uids:
+        return None
+    return parse_sections(parse_frontmatter(texts[uids[task["uid"]][0]])[1]).get(DONE_WHEN_SECTION)
+
+
 def cmd_launch_plan(args):
     state = _read_json(args.state)
     text = Path(args.claude_md).read_text(encoding="utf-8") if os.path.exists(args.claude_md) else ""
@@ -5198,7 +5224,8 @@ def cmd_launch_plan(args):
         raise StateError(errors)
     prompt = Path(args.prompt_file).read_text(encoding="utf-8")
     figures = figures_dir(os.path.dirname(os.path.abspath(args.state)), args.worker)
-    argv = launch_argv(state, args.worker, prompt, herdr, project_worker_parent(state, args.worker, _run_hc), figures)
+    argv = launch_argv(state, args.worker, prompt, herdr, project_worker_parent(state, args.worker, _run_hc), figures,
+                       task_done_when(args.state, state, args.worker))
     if args.run:
         if "--add-dir" in argv:
             os.makedirs(figures, exist_ok=True)

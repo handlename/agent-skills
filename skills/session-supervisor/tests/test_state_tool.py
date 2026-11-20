@@ -6443,6 +6443,52 @@ class LaunchPlanTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(figures))
 
 
+    def test_worker_prompt_must_hold_every_done_criterion(self):
+        state = fixture_state()
+        herdr_worker(state)
+        done_when = "\n- テストが通る\n  - 既存の計画コメントが Hide(Duplicate) されている\n\n"
+        self.assertEqual(st.missing_done_criteria(done_when, "Done when:\n- テストが通る\n"),
+                         ["- 既存の計画コメントが Hide(Duplicate) されている"])
+        with self.assertRaises(st.StateError) as caught:
+            st.launch_argv(state, "w-0030", "Done when:\n- テストが通る\n", {}, done_when=done_when)
+        self.assertIn("## 完了条件", caught.exception.errors[0])
+        self.assertEqual(caught.exception.errors[1:], ["  - 既存の計画コメントが Hide(Duplicate) されている"])
+        prompt = "Done when:\n- テストが通る\n- 既存の計画コメントが Hide(Duplicate) されている\n- committed"
+        self.assertEqual(st.launch_argv(state, "w-0030", prompt, {}, done_when=done_when)[-1], prompt)
+        # A task without `## 完了条件` (or with an empty one) still starts.
+        for empty in (None, "", "\n  \n"):
+            self.assertTrue(st.launch_argv(state, "w-0030", "Fix it.", {}, done_when=empty))
+        add_project(state)
+        state["projects"][0]["manager"].update(runtime="herdr", session_id=SID, handle="p-0001")
+        self.assertTrue(st.launch_argv(state, "p-0001", "Review.", {}, done_when=done_when))
+
+    def test_cli_reads_the_done_criteria_from_the_task_note(self):
+        env = VaultEnv(self)
+        uid = "20261120_090000"
+        task = env.add_task("T-0020", "w-0020", uid)
+        find(env.state["workers"], "w-0020").update(runtime="herdr", session_id=SID, handle="w-0020", title="fix",
+                                                     worktree_path="/trees/a/fix")
+        env.save()
+        claude_md, prompt_file = str(env.dir / "CLAUDE.md"), env.dir / "prompt.md"
+        prompt_file.write_text("Fix it.\nDone when:\n- committed\n", encoding="utf-8")
+        run = lambda: env.run("launch-plan", "--state", str(env.state_path), "--claude-md", claude_md,
+                              "--worker", "w-0020", "--prompt-file", str(prompt_file))
+        code, out, err = run()
+        self.assertEqual(code, 0, err)
+        text = env.text(uid)
+        self.assertIn("## 完了条件\n\n\n## サブタスク", text)
+        env.put(uid, text.replace("## 完了条件\n", "## 完了条件\n\n- テストが通る\n- コメントが Hide されている\n"))
+        code, out, err = run()
+        self.assertEqual(code, 1)
+        self.assertIn("T-0020", err)
+        self.assertIn("error:   - テストが通る\nerror:   - コメントが Hide されている", err)
+        prompt_file.write_text("Fix it.\nDone when:\n- テストが通る\n- コメントが Hide されている\n- committed\n",
+                               encoding="utf-8")
+        code, out, err = run()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(task["uid"], uid)
+
+
 class HerdrTranscriptTest(unittest.TestCase):
     def test_last_assistant_message_joins_the_last_message_parts(self):
         with open(FIXTURES / "transcript_small.jsonl", encoding="utf-8") as f:

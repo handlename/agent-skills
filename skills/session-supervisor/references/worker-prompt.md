@@ -24,7 +24,7 @@ What to do:
 
 Done when:
 {completion criteria, for example: change implemented, tests pass, committed with a clean working tree}
-{task with `## 完了条件` only: the body of that section (`sections["完了条件"]` of `note-show`) comes first, as the user's own done criteria, followed by the delivery's own criteria (committed, pushed, ...)}
+{task with `## 完了条件` only: the body of that section (`sections["完了条件"]` of `note-show --uid <task uid>`, read from the note when you write this brief, never from an earlier prompt file) comes first, copied line by line, as the user's own done criteria, followed by the delivery's own criteria (committed, pushed, ...). `launch-plan` refuses a prompt file that lacks any non-blank line of that section and names the missing lines; a task without the section, or with an empty one, starts without this check}
 {investigation only: for example: the conclusion is reported in `summary`}
 
 Delivery:
@@ -121,7 +121,7 @@ Consent paragraph:
 
 ## Replacement worker
 
-A replacement worker (`replaced_by`, SKILL.md 6.8) takes over the role of a worker that went missing or was archived outside the supervisor before its result was verified. It uses the same brief variant as the old worker (normal, push-only, or follow-up): the same `prompt` and `background` templates above with the old worker's `kind`, `cwd`, `delivery`, and `base_branch`, filled from `state.json`. A push-only replacement keeps the pushed `{branch}` and `{commit}` of the old worker. A project worker's replacement gets the same project, proposal, and redo fields as the old worker, filled from the task's `proposal` and `redos`. A replacement in a task with `investigation` or `derived_from` gets the `{investigation only: ...}` rules or the `{derived from an investigation only: ...}` block, filled from the task, and a replacement of an `interactive` worker gets the `{interactive only: ...}` parts.
+A replacement worker (`replaced_by`, SKILL.md 6.8) takes over the role of a worker that went missing or was archived outside the supervisor before its result was verified. It uses the same brief variant as the old worker (normal, push-only, or follow-up): the same `prompt` and `background` templates above with the old worker's `kind`, `cwd`, `delivery`, and `base_branch`, filled from `state.json`. A push-only replacement keeps the pushed `{branch}` and `{commit}` of the old worker. A project worker's replacement gets the same project, proposal, and redo fields as the old worker, filled from the task's `proposal` and `redos`. Whether the brief is written anew or adapted from the old worker's prompt file, read `## 完了条件` of the task note again and put its current body under "Done when" (`launch-plan` checks it). A replacement in a task with `investigation` or `derived_from` gets the `{investigation only: ...}` rules or the `{derived from an investigation only: ...}` block, filled from the task, and a replacement of an `interactive` worker gets the `{interactive only: ...}` parts.
 
 ## Follow-up message
 
@@ -198,6 +198,7 @@ A `push_pr` worker added after the task's commit was verified (SKILL.md 6.3 step
 
 - The `{git only: ...}` line of `prompt` is replaced by: `You are in a git worktree started from branch {branch}. Do not commit, do not edit files, and do not switch branches.` (The normal line asks for a commit, which a push-only worker must not make.)
 - "What to do" and "Delivery" both hold the push-only order below; "Done when" is `The remote branch {branch} on origin points at {commit}.` plus, when a PR is allowed, `A pull request with head {branch} exists.`
+- For a task with `## 完了条件`, "Done when" ends with `The task's done criteria, already met by {commit} (context, not work for you):` followed by the body of that section, because `launch-plan` requires every line of it in every worker's prompt.
 - `background` uses the `push_pr` consent paragraph.
 
 Fields: `{pr_base_flag}` is ` --base <bare branch name>` (with a leading space, without `origin/`) only when the pull request must be stacked on the original branch, and empty otherwise; the supervisor decides it from the pull request state (SKILL.md 6.3 step 7), the worker never does. `{branch}` is `worker.branch` (the pushed branch, not the new branch of this worktree), `{repo}` is `worker.cwd`, `{commit}` is the expected sha of SKILL.md 6.3 step 7. A PR is allowed when `push_consent.text` grants one; otherwise drop the PR step.
