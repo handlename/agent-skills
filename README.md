@@ -59,7 +59,7 @@ Every plugin entry in `.claude-plugin/marketplace.json` points at the repository
 
 ### Migrating from the `handlename` bundle plugin
 
-Up to version 0.x, all skills were bundled into a single `handlename` plugin. It no longer exists. Uninstall it and install the plugins you want:
+Up to version 0.91.x, all skills were bundled into a single `handlename` plugin. It no longer exists. Uninstall it and install the plugins you want:
 
 ```bash
 claude plugin uninstall handlename@handlename
