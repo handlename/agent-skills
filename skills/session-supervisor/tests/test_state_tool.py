@@ -4791,10 +4791,12 @@ U1, U2, U3 = "20261110_090001", "20261110_090002", "20261110_090003"
 
 
 class VaultEnv:
-    def __init__(self, test):
-        tmp = tempfile.TemporaryDirectory()
-        test.addCleanup(tmp.cleanup)
-        self.dir = Path(tmp.name)
+    def __init__(self, test, dir=None):
+        if dir is None:
+            tmp = tempfile.TemporaryDirectory()
+            test.addCleanup(tmp.cleanup)
+            dir = tmp.name
+        self.dir = Path(dir)
         self.vault = self.dir / "vault"
         self.state_path = self.dir / "state.json"
         self.state = st.empty_state(str(self.dir))
@@ -5673,7 +5675,7 @@ class SetupVaultTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "sup"
             shortcut = target / "vault" / "_templates" / "sv-status.md"
-            asset = (SKILL / "assets" / "sv-status.md").read_text(encoding="utf-8")
+            asset = st._stamped("sv-status.md", (SKILL / "assets" / "sv-status.md").read_text(encoding="utf-8"), st.plugin_version())
             reports = []
             for change in (None, None, "mine\n"):
                 if change:
@@ -5688,7 +5690,7 @@ class SetupVaultTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "sup"
             snippet = target / "vault" / ".obsidian" / "snippets" / "sv-kanban.css"
-            asset = (SKILL / "assets" / "sv-kanban.css").read_text(encoding="utf-8")
+            asset = st._stamped("sv-kanban.css", (SKILL / "assets" / "sv-kanban.css").read_text(encoding="utf-8"), st.plugin_version())
             reports = []
             for change in (None, "obsidian", None, "mine\n"):
                 if change == "obsidian":
@@ -5700,6 +5702,40 @@ class SetupVaultTest(unittest.TestCase):
                 reports += [l.split(":")[0] for l in proc.stdout.splitlines() if l.endswith("sv-kanban.css")]
             self.assertEqual(snippet.read_text(encoding="utf-8"), asset)
             self.assertEqual(reports, ["created", "exists", "updated"])
+
+    def test_vault_copies_carry_the_plugin_version_and_a_newer_one_is_kept(self):
+        version = st.plugin_version()
+        self.assertEqual(version, tuple(int(n) for n in json.loads(
+            (SKILL.parent.parent / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"].split(".")))
+        asset = (SKILL / "assets" / "sv-status.md").read_text(encoding="utf-8")
+        stamped = st._stamped("sv-status.md", asset, version)
+        self.assertTrue(stamped.startswith("<%*\n// session-supervisor-version: "))
+        self.assertEqual(st._stamp_of(stamped), version)
+        self.assertEqual(st._stamped("sv-kanban.css", "x\n", (1, 2, 3)), "/* session-supervisor-version: 1.2.3 */\nx\n")
+        self.assertEqual(st._stamped("sv-status.md", asset, None), asset)
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "sup"
+            shortcut = target / "vault" / "_templates" / "sv-status.md"
+            subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True, check=True)
+            # Another machine with a newer plugin wrote it through the synced vault: setup keeps it and warns.
+            newer = (version[0], version[1] + 1, 0)
+            theirs = st._stamped("sv-status.md", "<%*\nnewer\n%>\n", newer)
+            shortcut.write_text(theirs, encoding="utf-8")
+            proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn(f"newer: {shortcut} ({'.'.join(map(str, newer))} > {'.'.join(map(str, version))}; "
+                          f"update the plugin on this machine)", proc.stdout)
+            self.assertEqual(shortcut.read_text(encoding="utf-8"), theirs)
+            # An older one is overwritten.
+            shortcut.write_text(st._stamped("sv-status.md", "<%*\nolder\n%>\n", (0, 1, 0)), encoding="utf-8")
+            proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(target)], capture_output=True, text=True)
+            self.assertIn(f"updated: {shortcut}", proc.stdout)
+            self.assertEqual(shortcut.read_text(encoding="utf-8"), stamped)
+            # Without a plugin version (a skill installed without the plugin) it copies the asset as it is, as before.
+            shortcut.write_text(theirs, encoding="utf-8")
+            with mock.patch.object(st, "plugin_version", return_value=None):
+                st._setup_vault(str(target))
+            self.assertEqual(shortcut.read_text(encoding="utf-8"), asset)
 
 
 class DigestFallbackTest(unittest.TestCase):
@@ -6443,6 +6479,52 @@ class LaunchPlanTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(figures))
 
 
+    def test_worker_prompt_must_hold_every_done_criterion(self):
+        state = fixture_state()
+        herdr_worker(state)
+        done_when = "\n- テストが通る\n  - 既存の計画コメントが Hide(Duplicate) されている\n\n"
+        self.assertEqual(st.missing_done_criteria(done_when, "Done when:\n- テストが通る\n"),
+                         ["- 既存の計画コメントが Hide(Duplicate) されている"])
+        with self.assertRaises(st.StateError) as caught:
+            st.launch_argv(state, "w-0030", "Done when:\n- テストが通る\n", {}, done_when=done_when)
+        self.assertIn("## 完了条件", caught.exception.errors[0])
+        self.assertEqual(caught.exception.errors[1:], ["  - 既存の計画コメントが Hide(Duplicate) されている"])
+        prompt = "Done when:\n- テストが通る\n- 既存の計画コメントが Hide(Duplicate) されている\n- committed"
+        self.assertEqual(st.launch_argv(state, "w-0030", prompt, {}, done_when=done_when)[-1], prompt)
+        # A task without `## 完了条件` (or with an empty one) still starts.
+        for empty in (None, "", "\n  \n"):
+            self.assertTrue(st.launch_argv(state, "w-0030", "Fix it.", {}, done_when=empty))
+        add_project(state)
+        state["projects"][0]["manager"].update(runtime="herdr", session_id=SID, handle="p-0001")
+        self.assertTrue(st.launch_argv(state, "p-0001", "Review.", {}, done_when=done_when))
+
+    def test_cli_reads_the_done_criteria_from_the_task_note(self):
+        env = VaultEnv(self)
+        uid = "20261120_090000"
+        task = env.add_task("T-0020", "w-0020", uid)
+        find(env.state["workers"], "w-0020").update(runtime="herdr", session_id=SID, handle="w-0020", title="fix",
+                                                     worktree_path="/trees/a/fix")
+        env.save()
+        claude_md, prompt_file = str(env.dir / "CLAUDE.md"), env.dir / "prompt.md"
+        prompt_file.write_text("Fix it.\nDone when:\n- committed\n", encoding="utf-8")
+        run = lambda: env.run("launch-plan", "--state", str(env.state_path), "--claude-md", claude_md,
+                              "--worker", "w-0020", "--prompt-file", str(prompt_file))
+        code, out, err = run()
+        self.assertEqual(code, 0, err)
+        text = env.text(uid)
+        self.assertIn("## 完了条件\n\n\n## サブタスク", text)
+        env.put(uid, text.replace("## 完了条件\n", "## 完了条件\n\n- テストが通る\n- コメントが Hide されている\n"))
+        code, out, err = run()
+        self.assertEqual(code, 1)
+        self.assertIn("T-0020", err)
+        self.assertIn("error:   - テストが通る\nerror:   - コメントが Hide されている", err)
+        prompt_file.write_text("Fix it.\nDone when:\n- テストが通る\n- コメントが Hide されている\n- committed\n",
+                               encoding="utf-8")
+        code, out, err = run()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(task["uid"], uid)
+
+
 class HerdrTranscriptTest(unittest.TestCase):
     def test_last_assistant_message_joins_the_last_message_parts(self):
         with open(FIXTURES / "transcript_small.jsonl", encoding="utf-8") as f:
@@ -7057,6 +7139,240 @@ class ObsidianVaultTest(unittest.TestCase):
             self.assertIn("project.md (", outdated[0])
 
 
+class SharedVaultRootTest(unittest.TestCase):
+    """`root` and `reference` in ## Locations. The guard runs with an empty TMPDIR, so the system temp folder these
+    paths sit in is not allowed as a temp dir."""
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.sup = self.base / "sup"
+        self.sup.mkdir()
+        self.v = self.base / "v"
+        self.config = self.base / "config"
+        self.ref = self.base / "ref" / "work.md"
+        self.ref.parent.mkdir()
+        self.ref.write_text("ref\n", encoding="utf-8")
+
+    def claude_md(self, *lines):
+        (self.sup / "CLAUDE.md").write_text("## Locations\n" + "".join(f"- {l}\n" for l in lines), encoding="utf-8")
+
+    def env(self):
+        env = VaultEnv(self, self.sup)
+        env.vault = self.v / "sv1"
+        env.vault.mkdir(parents=True, exist_ok=True)
+        self.claude_md(f"vault: {self.v}", "root: sv1")
+        return env
+
+    def guard(self, path, role=None, tool="Edit"):
+        payload = {"tool_name": tool, "tool_input": {"file_path": str(path)}, "cwd": str(self.sup)}
+        return st.guard_decision(payload, str(self.sup), {"CLAUDE_CONFIG_DIR": str(self.config), "TMPDIR": ""}, role)
+
+    def test_parse_root_and_reference(self):
+        self.assertEqual(st.parse_locations("## Locations\n- root: sv1\n- reference: ~/r.md\n- templates: _t/sv\n")[0],
+                         {"root": "sv1", "reference": "~/r.md", "templates": "_t/sv"})
+        for bad in ("- root: /sv1", "- root: ../sv1", "- root: ~/sv1", "- root: sv1.md", "- reference: ref/work.md",
+                    "- root: _templates", "- root: _templates/sv", "- templates: sv1\n- root: sv1"):
+            self.assertTrue(st.parse_locations(f"## Locations\n{bad}\n")[1], bad)
+        self.assertFalse(st.parse_locations("## Locations\n- templates: sv1/_t\n- root: sv1\n")[1])
+        self.assertNotIn("root", st.LOCATION_KEYS)
+        self.assertNotIn("reference", st.LOCATION_KEYS)
+
+    def test_guard_keeps_the_configured_vault_blocked_when_reference_is_invalid(self):
+        self.claude_md("vault: " + str(self.sup / "myvault"), "root: sv1", f"reference: {self.sup / 'bad.md'}")
+        self.assertIsNotNone(self.guard(self.sup / "myvault" / "sv1" / "2026" / "11" / "x.md"))
+        self.assertIsNotNone(self.guard(self.sup / "myvault" / "y.md"))
+
+    def test_notes_root(self):
+        self.assertEqual(st.notes_root(str(self.sup)), (str(self.sup / "vault"), "", None))
+        self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {self.ref}")
+        self.assertEqual(st.notes_root(str(self.sup)), (str(self.v / "sv1"), "sv1", str(self.ref)))
+        self.assertEqual(st.vault_locations(str(self.sup)), (str(self.v), "sv1/Supervisor.md", "_templates"))
+        for inside in (self.sup / "state.json", self.sup / ".claude/settings.json", self.sup / ".supervisor/state_tool.py",
+                       self.sup / "sv.sh", self.v / "sv1/2026/11/x.md"):
+            self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {inside}")
+            with self.subTest(inside=inside), self.assertRaisesRegex(st.StateError, "must be outside"):
+                st.notes_root(str(self.sup))
+
+    def test_notes_are_created_and_scanned_only_under_the_root(self):
+        env = self.env()
+        env.add_task("T-0020", "w-0020", U1)
+        env.save()
+        self.assertTrue((self.v / "sv1" / st._new_note_path(U1)).exists())
+        (self.v / "other").mkdir()
+        (self.v / "other/x.md").write_text(st.new_note_text("20261110_080000", "外", "task", "backlog", "agent", NOW), encoding="utf-8")
+        self.assertEqual(env.scan(), {"events": [], "warnings": []})
+        code, out, err = env.run("new-note", "--state", str(env.state_path), "--kind", "project", "--count", "2")
+        project_note, task_note = json.loads(out)
+        self.assertEqual(project_note["path"], st._new_note_path(project_note["uid"]))
+        cand = env.load()
+        to_v2(add_project(cand), "projects", project_note["uid"])["manager"].update(intended_state="pending", observed_state="none")
+        git_task(cand, "T-0022", "w-0022")
+        find(cand["workers"], "w-0022").update(cwd="/repo/c", intended_state="pending", observed_state="none", session_id=None)
+        to_v2(find(cand["tasks"], "T-0022"), "tasks", task_note["uid"])["project_id"] = "P-0001"
+        code, out, err = env.commit(cand, {
+            project_note["uid"]: [{"op": "create", "uid": project_note["uid"], "title": "P", "kind": "project",
+                                   "status": "in progress", "assignee": "agent", "request": "p https://github.com/org/repo/issues/1"}],
+            task_note["uid"]: [{"op": "create", "uid": task_note["uid"], "title": "T", "kind": "task", "status": "in progress",
+                                "assignee": "agent", "request": "t", "parent": project_note["uid"]}]})
+        self.assertEqual(code, 0, err)
+        project_text = (self.v / "sv1" / project_note["path"]).read_text(encoding="utf-8")
+        self.assertEqual(project_text.count(st.PROJECT_TASKS_FILTER), 2)
+        props = st.parse_frontmatter((self.v / "sv1" / task_note["path"]).read_text(encoding="utf-8"))[0]
+        self.assertTrue(props["parent"].startswith(f"[[{project_note['uid']}"), props["parent"])
+        self.assertFalse((self.v / project_note["path"]).exists())
+        code, out, err = env.run("note-show", "--state", str(env.state_path), "--uid", task_note["uid"])
+        self.assertEqual(json.loads(out)["abs_path"], str(self.v / "sv1" / task_note["path"]), err)
+        proc = subprocess.run([sys.executable, str(SCRIPT), "digest", "--state", str(env.state_path)], capture_output=True, text=True)
+        self.assertNotIn("外", proc.stdout)
+        self.assertNotIn("reference:", proc.stdout)
+
+    def test_uids_are_taken_only_in_the_root(self):
+        env = self.env()
+        env.save()
+        (self.v / "2026/11").mkdir(parents=True)
+        (self.v / "2026/11/20261110_090000.md").write_text('---\nuid: "20261110_090000"\n---\n', encoding="utf-8")
+
+        class Fixed(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 11, 10, 9, 0, 0)
+        with mock.patch.object(st, "datetime", Fixed):
+            code, out, err = env.run("new-note", "--state", str(env.state_path), "--kind", "task")
+        self.assertEqual(json.loads(out)["uid"], "20261110_090000", err)
+
+    def test_missing_root_folder(self):
+        env = self.env()
+        env.add_task("T-0020", "w-0020", U1)
+        env.save()
+        shutil.rmtree(self.v / "sv1")
+        code, _, err = env.run("notes-scan", "--state", str(env.state_path))
+        self.assertEqual(code, 1)
+        self.assertIn("does not exist", err)
+        code, _, err = env.commit()
+        self.assertEqual(code, 1)
+        self.assertIn("does not exist", err)
+        proc = subprocess.run([sys.executable, str(SCRIPT), "digest", "--state", str(env.state_path)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn(f"{U1} ({st._new_note_path(U1)})", proc.stdout)
+
+    def test_setup_places_the_dashboard_in_the_root(self):
+        self.claude_md(f"vault: {self.v}", "root: sv1")
+        proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(self.sup)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        board = (self.v / "sv1/Supervisor.md").read_text(encoding="utf-8")
+        self.assertEqual(board, st.supervisor_note("_templates", root="sv1"))
+        self.assertEqual(board.count("type: kanban"), 3)
+        self.assertEqual(board.count('    - file.inFolder("sv1")\n'), 3)
+        self.assertFalse((self.v / "Supervisor.md").exists())
+        self.assertNotIn("inFolder(\"sv1\")", st.supervisor_note("_templates"))
+
+    def test_setup_creates_the_root_when_the_dashboard_is_outside(self):
+        env = VaultEnv(self, self.sup)
+        env.vault = self.v / "sv1"
+        env.save()
+        self.claude_md(f"vault: {self.v}", "root: sv1", "dashboard: Board.md")
+        proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(self.sup)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue((self.v / "Board.md").exists())
+        self.assertTrue((self.v / "sv1").is_dir())
+        self.assertEqual(env.run("notes-scan", "--state", str(env.state_path))[0], 0)
+
+    def test_index_skips_the_dashboard_and_templates_inside_the_root(self):
+        env = self.env()
+        env.save()
+        self.claude_md(f"vault: {self.v}", "root: sv1", "templates: sv1/_t")
+        for rel in ("sv1/Supervisor.md", "sv1/_t/task.md", "sv1/2026/11/20261111_090000.md", "x.md"):
+            (self.v / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.v / rel).write_text('---\nuid: "20261111_090000"\n---\n', encoding="utf-8")
+        notes_dir, texts, _ = st._vault_index(str(env.state_path))
+        self.assertEqual((notes_dir, list(texts)), (str(self.v / "sv1"), ["2026/11/20261111_090000.md"]))
+
+    def test_attach_copies_into_the_vault_attachments(self):
+        env = self.env()
+        env.add_task("T-0020", "w-0020", U1)
+        env.save()
+        src = self.sup / ".supervisor/figures/w-0020"
+        src.mkdir(parents=True)
+        (src / "a.png").write_bytes(b"png")
+        code, out, err = env.run("attach", "--state", str(env.state_path), "--uid", U1, "--worker", "w-0020", "--file", str(src / "a.png"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)[0]["path"], f"{st.ATTACHMENTS_DIR}/{U1}/a.png")
+        self.assertTrue((self.v / st.ATTACHMENTS_DIR / U1 / "a.png").exists())
+
+    def test_retag_notes_refuses_a_root(self):
+        env = VaultEnv(self, self.sup)
+        env.save()
+        (self.sup / "vault/sv1").mkdir(parents=True)
+        self.claude_md("root: sv1")
+        code, _, err = env.run("retag-notes", "--state", str(env.state_path))
+        self.assertEqual(code, 1)
+        self.assertIn("runs only on", err)
+
+    def test_guard_covers_the_root(self):
+        self.claude_md(f"vault: {self.v}", "root: sv1")
+        self.assertIn("vault notes are written only by state_tool commit", self.guard(self.v / "sv1/2026/11/x.md"))
+        self.assertIn("outside the supervisor directory", self.guard(self.v / "CLAUDE.md"))
+        self.claude_md("root: sv1")
+        self.assertIsNone(self.guard(self.sup / "vault/other.md"))
+        self.assertIn("vault notes are written only by state_tool commit", self.guard(self.sup / "vault/sv1/x.md"))
+
+    def test_guard_allows_only_the_reference_file(self):
+        self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {self.ref}")
+        for tool in ("Edit", "Write"):
+            self.assertIsNone(self.guard(self.ref, tool=tool))
+        for path in (self.ref.parent / "other.md", self.ref.parent / "sub/work.md", self.ref.parent, self.base / "work.md",
+                     self.v / "other.md"):
+            self.assertIn("outside the supervisor directory", self.guard(path), path)
+        self.assertIn("vault notes are written only by state_tool commit", self.guard(self.v / "sv1/x.md"))
+        link = self.base / "link.md"
+        link.symlink_to(self.ref)
+        self.assertIsNone(self.guard(link))
+        for role in ("manager", "chat"):
+            self.assertIn("outside the supervisor directory", self.guard(self.ref, role=role))
+        self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {self.ref}", "cache: /x")
+        self.assertIn("outside the supervisor directory", self.guard(self.ref))
+
+    def test_guard_compares_the_resolved_reference(self):
+        target = self.base / "real.md"
+        target.write_text("r\n", encoding="utf-8")
+        self.ref.unlink()
+        self.ref.symlink_to(target)
+        self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {self.ref}")
+        self.assertIsNone(self.guard(self.ref))
+        self.assertIsNone(self.guard(target))
+
+    def test_reference_never_opens_protected_files(self):
+        settings = self.config / "settings.json"
+        self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {settings}")
+        self.assertIn("inside Claude's configuration directory", self.guard(settings))
+        for protected in (self.sup / "state.json", self.sup / ".claude/settings.json"):
+            self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {protected}")
+            self.assertIn("written only by setup or commit", self.guard(protected))
+            # Even a reference that slipped past the Locations check is denied before the final branch.
+            with mock.patch.object(st, "notes_root", return_value=(str(self.v / "sv1"), "sv1", str(protected))):
+                self.assertIn("written only by setup or commit", self.guard(protected))
+        note = self.v / "sv1/x.md"
+        with mock.patch.object(st, "notes_root", return_value=(str(self.v / "sv1"), "sv1", str(note))):
+            self.assertIn("vault notes are written only by state_tool commit", self.guard(note))
+
+    def test_digest_shows_the_reference(self):
+        env = self.env()
+        env.save()
+
+        def digest():
+            proc = subprocess.run([sys.executable, str(SCRIPT), "digest", "--state", str(env.state_path)], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0)
+            return [l for l in proc.stdout.splitlines() if l.startswith("reference:")]
+        self.assertEqual(digest(), [])
+        self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {self.ref}")
+        self.assertEqual(digest(), [f"reference: {self.ref} (read it at session start; you may append what you learn)"])
+        self.ref.unlink()
+        self.assertEqual(digest(), [f"reference: {self.ref} (missing: create it when there is something to record)"])
+        self.claude_md(f"vault: {self.v}", "root: sv1", f"reference: {self.ref}", "cache: /x")
+        self.assertEqual(digest(), [])
+
+
 class CancelWithoutWorkersTest(unittest.TestCase):
     def test_cancel_of_a_task_waiting_for_where_to_work(self):
         cur = json.loads((FIXTURES / "state_valid.json").read_text(encoding="utf-8"))
@@ -7212,6 +7528,346 @@ class SubtaskTest(unittest.TestCase):
         block = '```supervisor-report\n{"task_id": "T-1", "worker_id": "w-1", "status": "done", "summary": "", "artifacts": {}, "blockers": [], "next_action": "", "subtasks_done": %s}\n```'
         self.assertTrue(st.parse_report(block % '["ST-0012"]')["ok"])
         self.assertFalse(st.parse_report(block % '["12"]')["ok"])
+
+
+PREFIX_MD = "## Locations\n- name_prefix: work-\n"
+
+
+class NamePrefixTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name).resolve()
+
+    def write_md(self, text=PREFIX_MD):
+        (self.dir / "CLAUDE.md").write_text(text, encoding="utf-8")
+
+    def run_cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = st.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_parse_name_prefix_and_herdr_space(self):
+        for value in ("work-", "a_", "a-", "x" * 23 + "-", "sv2-", "a-b_"):
+            with self.subTest(value=value):
+                self.assertEqual(st.parse_locations(f"## Locations\n- name_prefix: {value}\n"), ({"name_prefix": value}, []))
+        for value in ("-", "", "x" * 24 + "-", "Work-", "work", "-work-", "m-", "a-m-", "wo rk-", "é-"):
+            with self.subTest(value=value):
+                values, errors = st.parse_locations(f"## Locations\n- name_prefix: {value}\n")
+                self.assertEqual(values, {})
+                self.assertTrue(errors[0].startswith("CLAUDE.md:2: name_prefix must be"), errors)
+        self.assertEqual(st.parse_locations("## Locations\n- herdr_space: Work space\n"), ({"herdr_space": "Work space"}, []))
+        self.assertTrue(st.parse_locations("## Locations\n- herdr_space:\n")[1][0].startswith("CLAUDE.md:2: herdr_space must not be empty"))
+        self.assertEqual(st.name_prefix("# T\n"), "")
+        self.assertEqual(st.name_prefix(PREFIX_MD), "work-")
+        with self.assertRaises(st.StateError):
+            st.name_prefix("## Locations\n- name_prefix: Bad\n")
+
+    def test_own_terminals(self):
+        terminals = [{"address": "t1", "name": "w-0001"}, {"address": "t2", "name": "work-w-0001"},
+                     {"address": "t3", "name": "sv"}, {"address": "t4", "name": "work-sv"},
+                     {"address": "t5", "name": "m-p-0002"}, {"address": "t6", "name": "helper"}, {"address": "t7"}]
+        self.assertIs(st.own_terminals(terminals, ""), terminals)
+        self.assertEqual([t.get("name") for t in st.own_terminals(terminals, "work-")],
+                         [None, "w-0001", None, "sv", None, "helper", None])
+        self.assertEqual(terminals[1]["name"], "work-w-0001")
+
+    def test_launch_argv_and_manager_parent(self):
+        state = fixture_state()
+        herdr_worker(state)
+        argv = st.launch_argv(state, "w-0030", "Fix it.", {}, prefix="work-")
+        self.assertEqual(argv[argv.index("--name") + 1], "work-w-0030")
+        self.assertEqual(argv[-2:], ["--allowedTools=Bash(hc send work-sv:*)", "Fix it."])
+        self.assertEqual(argv[argv.index("-n") + 1], "T-0030|w-0030 fix it")
+        self.assertEqual(st.launch_argv(state, "w-0030", "Fix it.", {}), st.launch_argv(state, "w-0030", "Fix it.", {}, prefix=""))
+        add_project(state)
+        find(state["tasks"], "T-0030")["project_id"] = "P-0001"
+        hc = FakeHc()
+        st.project_worker_parent(state, "w-0030", hc, "work-")
+        self.assertEqual(hc.calls, [["hc", "get", "work-p-0001", "--json"]])
+
+    def test_launch_plan_cli_reads_the_prefix(self):
+        state = fixture_state()
+        herdr_worker(state)
+        (self.dir / "state.json").write_text(st.serialize(state), encoding="utf-8")
+        self.write_md()
+        (self.dir / "prompt.md").write_text("Fix it.", encoding="utf-8")
+        code, out, err = self.run_cli("launch-plan", "--state", str(self.dir / "state.json"), "--claude-md",
+                                      str(self.dir / "CLAUDE.md"), "--worker", "w-0030", "--prompt-file", str(self.dir / "prompt.md"))
+        self.assertEqual(code, 0, err)
+        argv = json.loads(out)["argv"]
+        self.assertIn("work-w-0030", argv)
+        self.assertIn("--allowedTools=Bash(hc send work-sv:*)", argv)
+
+    def project_state(self):
+        state = fixture_state()
+        project = add_project(state)
+        project["manager"].update(runtime="herdr", session_id=SID, handle="p-0001")
+        w = project_worker(state)
+        w.update(runtime="herdr", handle="w-0020")
+        return state
+
+    def test_observe_hc_digest_and_roster_show_the_terminal(self):
+        state = self.project_state()
+        (self.dir / "state.json").write_text(st.serialize(state), encoding="utf-8")
+        mixed = {"terminals": [{"address": "t1", "name": "w-0020", "state": "live", "status": "blocked"},
+                               {"address": "t2", "name": "work-w-0020", "state": "live", "status": "working"},
+                               {"address": "t3", "name": "p-0001", "state": "finished"},
+                               {"address": "t4", "name": "work-p-0001", "state": "live", "status": "done"}]}
+        (self.dir / "ls.json").write_text(json.dumps(mixed), encoding="utf-8")
+        observe = lambda: {o["id"]: o for o in json.loads(self.run_cli("observe-hc", "--state", str(self.dir / "state.json"),
+                                                                       "--from", str(self.dir / "ls.json"))[1])}
+        got = observe()
+        self.assertEqual({k: v["terminal"] for k, v in got.items()}, {"w-0020": "w-0020", "p-0001": "p-0001"})
+        self.write_md()
+        got = observe()
+        self.assertEqual({k: (v["terminal"], v["address"], v["observed_state"]) for k, v in got.items()},
+                         {"w-0020": ("work-w-0020", "t2", "running"), "p-0001": ("work-p-0001", "t4", "idle")})
+        code, out, err = self.run_cli("roster", "--state", str(self.dir / "state.json"), "--project", "P-0001")
+        self.assertEqual(code, 0, err)
+        self.assertIn("| terminal |", out)
+        self.assertIn("| work-w-0020 |", out)
+        text = st.digest(state, "/s/state.json", prefix="work-")
+        self.assertIn("idle terminal work-w-0020", text)
+        self.assertIn("| terminal work-p-0001", text)
+        self.assertIn("idle terminal w-0020", st.digest(state, "/s/state.json"))
+
+    def test_digest_leaves_out_terminals_when_locations_is_invalid(self):
+        (self.dir / "state.json").write_text(st.serialize(self.project_state()), encoding="utf-8")
+        self.write_md("## Locations\n- name_prefix: Bad\n")
+        code, out, _ = self.run_cli("digest", "--state", str(self.dir / "state.json"))
+        self.assertEqual(code, 0)
+        self.assertIn("warning: the ## Locations of CLAUDE.md is unreadable; hc terminal names are left out", out)
+        self.assertNotIn("terminal w-0020", out)
+        self.assertIn("tasks:", out)
+
+    def test_manager_reconcile_matches_only_its_own_terminals(self):
+        state = self.project_state()
+        (self.dir / "state.json").write_text(st.serialize(state), encoding="utf-8")
+        self.write_md()
+        mixed = {"terminals": [{"address": "t3", "name": "p-0001", "state": "finished"},
+                               {"address": "t5", "name": "work-p-0001", "state": "live", "status": {"state": "blocked", "msg": "ok?"}},
+                               {"address": "t6", "name": "helper", "parent": "t5", "state": "live", "status": "working"},
+                               {"address": "t7", "name": "work-w-0020", "parent": "t5", "state": "live", "status": "working"}]}
+        (self.dir / "ls.json").write_text(json.dumps(mixed), encoding="utf-8")
+        code, out, err = self.run_cli("manager-reconcile", "--state", str(self.dir / "state.json"), "--project", "P-0001",
+                                      "--from", str(self.dir / "ls.json"))
+        self.assertEqual(code, 0, err)
+        decisions = json.loads(out)
+        self.assertIn({"decision": "foreign_session", "session_id": "helper"}, decisions)
+        self.assertIn({"decision": "pending_approval", "session_id": SID}, decisions)
+        self.assertNotIn("external_archive", [d["decision"] for d in decisions])
+        self.assertEqual([d for d in decisions if d["decision"] == "foreign_session"], [{"decision": "foreign_session", "session_id": "helper"}])
+
+    def test_watch_vault_defaults_to_the_prefixed_sv_and_forwards_only_its_own(self):
+        env = VaultEnv(self, self.dir)
+        env.save()
+        self.write_md()
+        hc = FakeHc([{"address": "t4", "name": "w-0009", "state": "finished", "parent": "t8"},
+                     {"address": "t5", "name": "work-w-0009", "state": "finished", "parent": "t8"}])
+        args = st.build_parser().parse_args(["watch-vault", "--state", str(env.state_path), "--once"])
+        self.assertEqual(st.cmd_watch_vault(args, runner=hc), 0)
+        self.assertEqual(hc.sent(), ["worker: w-0009 finished (hc read t5)"])
+        self.assertIn(["hc", "get", "work-sv", "--json"], hc.calls)
+        self.assertEqual([c[:3] for c in hc.calls if c[1] == "send"], [["hc", "send", "work-sv"]])
+
+    def test_tab_renames_use_the_prefixed_names(self):
+        state = fixture_state()
+        herdr_worker(state)
+        tabs = [{"id": "tb1", "name": "work-w-0030", "terminals": [{"terminal": "t5", "name": "work-w-0030"}]},
+                {"id": "tb2", "name": "w-0030", "terminals": [{"terminal": "t6", "name": "w-0030"}]}]
+        self.assertEqual(st.tab_renames(state, [{"tabs": tabs}], "work-"), [("tb1", "work-w-0030 T-0030|w-0030 fix it")])
+
+    def test_chat_send_defaults_to_the_prefixed_sv(self):
+        (self.dir / "state.json").write_text("{}", encoding="utf-8")
+        self.write_md()
+        hc = FakeHc()
+        args = st.build_parser().parse_args(["chat-send", "--state", str(self.dir / "state.json"), "--text", "hello"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(args.func(args, runner=hc), 0)
+        self.assertEqual(hc.calls, [["hc", "send", "work-sv", "chat: C-0001"]])
+        self.write_md("## Locations\n- name_prefix: Bad\n")
+        self.assertEqual(self.run_cli("chat-send", "--state", str(self.dir / "state.json"), "--text", "again")[0], 1)
+        self.assertEqual(sorted(p.name for p in (self.dir / ".supervisor" / "chat").iterdir()), ["C-0001.json"])
+
+    def test_locations_cli(self):
+        self.assertEqual(self.run_cli("locations", "--dir", str(self.dir), "--key", "name_prefix")[:2], (0, "\n"))
+        self.write_md(PREFIX_MD + "- herdr_space: work\n")
+        self.assertEqual(self.run_cli("locations", "--dir", str(self.dir), "--key", "name_prefix")[:2], (0, "work-\n"))
+        self.assertEqual(self.run_cli("locations", "--dir", str(self.dir), "--key", "herdr_space")[:2], (0, "work\n"))
+        self.write_md("## Locations\n- name_prefix: m-\n")
+        code, out, err = self.run_cli("locations", "--dir", str(self.dir), "--key", "herdr_space")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("name_prefix must be", err)
+
+    def guard(self, command, role=None, directory=None):
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(directory or self.dir)}
+        return st.guard_decision(payload, str(directory or self.dir), {"TMPDIR": ""}, role)
+
+    def test_sv_guard_limits_hc_targets_to_its_own_terminals(self):
+        self.write_md()
+        for command in ("hc send work-w-0001 'continue'", "hc kill work-w-0001", "hc rm work-p-0002", "hc rm work-m-p-0002",
+                        "hc kill work-sv-watch", "hc send t12 'x'", "hc send work-sv 'x'", "hc send work-sv-chat 'x'",
+                        "bash -c 'hc send work-p-0001 x'", "hc get w-0001 --json", "hc read --lines 5 sv"):
+            with self.subTest(command=command):
+                self.assertIsNone(self.guard(command))
+        for command in ("hc send w-0001 'x'", "hc kill w-0001", "hc send other-sv 'x'", "hc send sv 'x'", "hc rm p-0002",
+                        "hc kill t12", "hc kill work-sv", "hc send work-w-0001x 'x'", "sh -c 'hc send w-0001 x'"):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.guard(command))
+        self.assertIn("only this supervisor's terminals work-sv,", self.guard("hc send w-0001 'x'"))
+        self.assertIn("only terminals named work-w-NNNN", self.guard("hc kill w-0001"))
+
+    def test_sv_guard_without_prefix(self):
+        for command in ("hc send w-0001 'x'", "hc send sv 'x'", "hc send t3 'x'", "hc kill w-0001", "hc kill sv-watch"):
+            with self.subTest(command=command):
+                self.assertIsNone(self.guard(command))
+        for command in ("hc send work-w-0001 'x'", "hc send other-sv 'x'", "hc kill work-w-0001", "hc kill t1"):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.guard(command))
+
+    def test_sv_guard_denies_hc_targets_when_locations_is_unreadable(self):
+        self.write_md("## Locations\n- name_prefix: Bad\n")
+        for command in ("hc send work-sv 'x'", "hc send t3 'x'", "hc kill work-w-0001", "hc rm w-0001"):
+            with self.subTest(command=command):
+                self.assertIn("unreadable", self.guard(command))
+        self.assertIsNone(self.guard("hc ls --all --json"))
+        (self.dir / "CLAUDE.md").unlink()
+        (self.dir / "CLAUDE.md").mkdir()
+        self.assertIn("unreadable", self.guard("hc send sv 'x'"))
+
+    def test_manager_and_chat_guards_do_not_check_send_targets(self):
+        sup = self.dir / "sup"
+        (sup / ".supervisor").mkdir(parents=True)
+        shutil.copyfile(SCRIPT, sup / ".supervisor" / "state_tool.py")
+        (sup / "CLAUDE.md").write_text(PREFIX_MD + f"- work_root: {self.dir / 'work'}\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(st.main(["prepare-dir", "--claude-md", str(sup / "CLAUDE.md"), "--project", "P-0001-x"]), 0)
+        dest = self.dir / "work" / "P-0001-x"
+        command = json.loads((dest / ".claude" / "settings.json").read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        for text in ('hc send work-sv "report: p-0001"', 'hc send work-w-0001 "the API is ready"'):
+            with self.subTest(command=text):
+                self.assertIsNone(self.guard(text, "manager", dest))
+                payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": text}, "cwd": str(dest)})
+                self.assertEqual(subprocess.run(["sh", "-c", command], input=payload, capture_output=True, text=True).returncode, 0)
+        self.assertIsNotNone(self.guard("hc kill work-w-0001", "manager", dest))
+        self.assertIsNone(self.guard("hc read --lines 5 work-w-0001", "chat", sup))
+
+    def test_prompts_name_terminals_only_through_placeholders(self):
+        pattern = re.compile(r"hc send (sv|w-|p-|\{manager\.handle\}|\{worker\.id\})"
+                             r"|terminal `(sv|w-NNNN|p-NNNN|\{manager\.handle\}|\{worker\.id\})`|from `sv`|tN sv\b")
+        for name in ("worker-prompt.md", "manager-prompt.md"):
+            text = (SKILL / "references" / name).read_text(encoding="utf-8")
+            with self.subTest(name=name):
+                self.assertEqual([m.group(0) for m in pattern.finditer(text)], [])
+                self.assertIn("{supervisor_terminal}", text)
+                self.assertIn("{manager.terminal}", text)
+        self.assertIn("{worker.terminal}", (SKILL / "references" / "worker-prompt.md").read_text(encoding="utf-8"))
+        text = (SKILL / "references" / "state-schema.md").read_text(encoding="utf-8")
+        self.assertEqual([m.group(0) for m in pattern.finditer(text)], [])
+
+
+class LauncherPrefixTest(unittest.TestCase):
+    """sv.sh with name_prefix / herdr_space, against fake hc and herdr-app that record their argv."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name).resolve()
+        self.target, self.bin, self.log, self.flag = root / "sup", root / "bin", root / "calls.log", root / "space-made"
+        self.env = dict(os.environ, HOME=str(root / "home"), PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}")
+        proc = subprocess.run([sys.executable, str(SCRIPT), "setup", "--dir", str(self.target)], capture_output=True,
+                              text=True, env=self.env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.bin.mkdir()
+        self.md = self.target / "CLAUDE.md"
+        self.base_md = self.md.read_text(encoding="utf-8")
+
+    def fakes(self, before="", after="", select_exit=0):
+        terminals = '{"terminals": [{"address": "t1", "name": "p-0001"}, {"address": "t2", "name": "work-p-0002"}, ' \
+                    '{"address": "t3", "name": "work-w-0003"}]}'
+        hc = (f'case "$1" in\n  get) [ "$3" = --json ] && {{ echo \'{{"address": "t9", "labels": {{"herdr.tab": "tb9"}}}}\'; exit 0; }}; exit 1 ;;\n'
+              f'  ls) [ "$2" = --json ] && echo \'{terminals}\' ;;\nesac')
+        herdr = (f'case "$1 $2" in\n'
+                 f'  "ls ") if [ -e "{self.flag}" ]; then echo \'{{"spaces": [{after}]}}\'; else echo \'{{"spaces": [{before}]}}\'; fi ;;\n'
+                 f'  "do space.new") touch "{self.flag}"; echo \'{{"space": "s9", "tab": "tb1", "terminal": "t5"}}\' ;;\n  "do space.select") exit {select_exit} ;;\nesac')
+        for name, body in (("hc", hc), ("herdr-app", herdr)):
+            (self.bin / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{self.log}"\n{body}\nexit 0\n', encoding="utf-8")
+            (self.bin / name).chmod(0o755)
+
+    def run_sh(self, *argv, locations=""):
+        self.md.write_text(self.base_md.replace("## Locations\n", "## Locations\n" + locations, 1), encoding="utf-8")
+        if self.log.exists():
+            self.log.unlink()
+        proc = subprocess.run([str(self.target / "sv.sh"), *argv], capture_output=True, text=True, env=self.env)
+        return proc, self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
+
+    def test_start_with_prefix_creates_and_selects_the_space(self):
+        self.fakes(before='{"id": "s0", "name": "main", "active": true}',
+                   after='{"id": "s0", "name": "main", "active": true}, {"id": "s9", "name": "work"}')
+        proc, calls = self.run_sh("start", locations="- name_prefix: work-\n- herdr_space: work\n")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        keep = "herdr-app do terminal.keep --terminal t9"
+        self.assertEqual(calls[:8], ["hc get work-sv", "hc kill work-sv-watch", "hc rm work-sv-watch", "herdr-app ls",
+                                     "herdr-app ls", 'herdr-app do space.new {"name": "work", "focus": false}',
+                                     "herdr-app ls", 'herdr-app do space.select {"id": "s9"}'])
+        calls = calls[1:]
+        self.assertTrue(calls[7].startswith(f"hc run --bg --no-parent --name work-sv --cwd {self.target} env PATH="))
+        self.assertEqual(calls[8], f"hc run --bg --name work-sv-watch --parent work-sv --label sv=watch --outlive-parent "
+                                   f"--cwd {self.target} python3 .supervisor/state_tool.py watch-vault --state state.json "
+                                   f"--notify work-sv --interval 10")
+        # With herdr_space each keep waits for the pane (hc get --json) before leave_space closes or selects anything.
+        self.assertEqual(calls[9:13], ["hc get work-sv --json", keep, "hc get work-sv --json", "hc get work-sv-chat"])
+        self.assertTrue(calls[13].startswith(f"hc run --bg --no-parent --name work-sv-chat --cwd {self.target / 'chat'} "))
+        self.assertEqual(calls[14:], ["hc get work-sv-chat --json", keep, "hc get work-sv-chat --json", "hc ls --json",
+                                      "hc get work-p-0002 --json", keep, "hc get work-p-0002 --json",
+                                      'herdr-app do tab.close {"id": "tb1", "confirmed": true}',
+                                      'herdr-app do space.select {"id": "s0"}', "hc ls"])
+        self.assertNotIn("warning", proc.stderr)
+        self.assertFalse(any("space.close" in c for c in calls))
+
+    def test_existing_space_is_selected_and_duplicates_warn(self):
+        self.fakes(before='{"id": 3, "name": "work", "active": true}, {"id": "s1", "name": "other"}')
+        proc, calls = self.run_sh("chat", locations="- herdr_space: work\n")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(calls[:5], ["hc kill sv-chat", "hc rm sv-chat", "herdr-app ls", "herdr-app ls",
+                                     'herdr-app do space.select {"id": 3}'])
+        self.assertTrue(calls[5].startswith("hc run --bg --no-parent --name sv-chat "))
+        # The space was already shown and existed: nothing to show again or close.
+        self.assertEqual([c for c in calls if "space.select" in c or "tab.close" in c], ['herdr-app do space.select {"id": 3}'])
+        self.fakes(before='{"id": "a", "name": "work"}, {"id": "b", "name": "work"}')
+        proc, calls = self.run_sh("chat", locations="- herdr_space: work\n")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('herdr-app do space.select {"id": "a"}', calls)
+        self.assertIn('warning: 2 Herdr spaces are named work; using the first ("a")', proc.stderr)
+
+    def test_a_space_it_created_is_closed_when_select_fails(self):
+        self.fakes(before='{"id": "s1", "name": "work"}', select_exit=1)
+        proc, calls = self.run_sh("chat", locations="- herdr_space: work\n")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(any("space.close" in c for c in calls))
+        self.assertIn("warning: herdr-app do space.select failed", proc.stderr)
+        self.fakes(after='{"id": "s9", "name": "work"}', select_exit=1)
+        proc, calls = self.run_sh("chat", locations="- herdr_space: work\n")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('herdr-app do space.close {"id": "s9", "confirmed": true}', calls)
+        self.assertTrue(any(c.startswith("hc run --bg --no-parent --name sv-chat ") for c in calls))
+        self.assertFalse(any("tab.close" in c for c in calls))
+
+    def test_invalid_locations_starts_nothing(self):
+        self.fakes()
+        proc, calls = self.run_sh("restart", locations="- name_prefix: Work-\n")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("name_prefix must be", proc.stderr)
+        self.assertEqual(calls, [])
+
+    def test_stop_with_prefix(self):
+        self.fakes()
+        proc, calls = self.run_sh("stop", locations="- name_prefix: work-\n")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(calls, ["hc kill work-sv-watch", "hc rm work-sv-watch", "hc kill work-sv", "hc rm work-sv",
+                                 "hc kill work-sv-chat", "hc rm work-sv-chat", "hc ls"])
 
 if __name__ == "__main__":
     unittest.main()

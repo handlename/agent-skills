@@ -139,9 +139,13 @@ ART_COMMENT_RE = re.compile(r"<!--[ \t]*sv-art[ \t]+(.*?)[ \t]*-->")
 
 LOCATIONS_HEADING = "## Locations"
 LOCATION_KEYS = ("clone_root", "work_root", "worktree_root")
-# Optional keys that setup never adds: the vault (absolute or ~) and, relative to it, the dashboard note, the template
-# folder, and the folder of the images embedded in notes.
-VAULT_REL_KEYS = ("dashboard", "templates", "attachments")
+# Optional keys that setup never adds: the vault and the reference file (absolute or ~) and, relative to the vault, the
+# dashboard note, the template folder, the folder of the images embedded in notes, and the root folder of the notes.
+VAULT_REL_KEYS = ("dashboard", "templates", "attachments", "root")
+# Optional keys for running several supervisors side by side: the prefix of every Herdr terminal name of this supervisor
+# (2-24 characters, ending in - or _; not in m-, which old manager names m-p-NNNN would blur) and the Herdr space for sv.sh.
+HERDR_NAME_KEYS = ("name_prefix", "herdr_space")
+NAME_PREFIX_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,22}[-_]$")
 LOCATIONS_NOTE = ("`python3 .supervisor/state_tool.py prepare-dir` and `prepare-worktree` are the only commands that write outside "
                   "this directory: they clone repositories into `clone_root/<host>/<owner>/<repo>`, create work directories "
                   "and project directories (with a guard hook) under `work_root`, and add worker worktrees under "
@@ -173,7 +177,10 @@ GUARD_WORD_RE = re.compile(r"(?<![\w./-])(git|jj|gh|hc)(?![\w.-])")
 HC_DENY = frozenset({"keys", "exec", "attach", "server", "update", "machine", "file", "put", "connect"})
 # Catches the denied hc subcommands also where tokens cannot see them, e.g. a Python list ['hc', 'keys', ...].
 HC_DENY_RE = re.compile(r"(?<![\w./-])hc(?![\w.-])['\"]?\s*,?\s*['\"]?(" + "|".join(sorted(HC_DENY)) + r")(?![\w-])")
-HC_TARGET_RE = re.compile(r"^(w-\d+|(?:m-)?p-\d+|sv-watch)$")
+# Terminal names (after the name_prefix) that the supervisor may kill / rm, and that it may send to.
+HC_KILL_NAMES = r"w-\d+|(?:m-)?p-\d+|sv-watch"
+HC_SEND_NAMES = r"sv|sv-watch|sv-chat|w-\d+|(?:m-)?p-\d+"
+MANAGED_NAME_RE = re.compile(f"^(?:{HC_SEND_NAMES})$")
 # The chat session (role chat) only reads hc and state; its requests reach sv through state_tool chat-send.
 CHAT_HC_ALLOW = frozenset({"ls", "get", "read", "events", "wait"})
 CHAT_TOOL_ALLOW = frozenset({"chat-send", "chat-wait", "digest", "note-show", "version"})
@@ -437,17 +444,26 @@ def _hc_labels(args):
     return labels + [a.split("=", 1)[1] for a in args if a.startswith("--label=")]
 
 
-def _hc_violation(sub, args, role=None):
+def _hc_violation(sub, args, role=None, prefix=None):
+    """prefix: the name_prefix whose terminals the supervisor (role None) may send to, kill and rm; None checks no send
+    target (a manager or chat guard), False denies them all (`## Locations` is unreadable)."""
     if sub in HC_DENY:
         return f"{sub} (the supervisor never types into, attaches to or manages terminals directly)"
     if role == "chat" and sub not in CHAT_HC_ALLOW:
         return f"{sub} (the chat session only reads terminals; requests go to sv through state_tool chat-send)"
     if sub == "run" and not any(label.startswith("sv=") for label in _hc_labels(args)):
         return "run without --label sv=... (start sessions only with the argv from launch-plan)"
-    if sub in ("kill", "rm"):
-        pos = _positionals(args)
-        if not pos or not HC_TARGET_RE.match(pos[0]):
-            return f"{sub} {pos[0] if pos else ''} (only terminals named w-NNNN, p-NNNN, m-p-NNNN or sv-watch)".replace("  ", " ")
+    if sub in ("kill", "rm", "send") and prefix is False:
+        return f"{sub} (the ## Locations of CLAUDE.md is unreadable, so its name_prefix is unknown; fix it first)"
+    pos = _positionals(args)
+    target = pos[0] if pos else ""
+    p = prefix or ""
+    if sub in ("kill", "rm") and not re.fullmatch(f"{re.escape(p)}(?:{HC_KILL_NAMES})", target):
+        return f"{sub} {target} (only terminals named {p}w-NNNN, {p}p-NNNN, {p}m-p-NNNN or {p}sv-watch)".replace("  ", " ")
+    if sub == "send" and prefix is not None and not (re.fullmatch(f"{re.escape(p)}(?:{HC_SEND_NAMES})", target)
+                                                     or re.fullmatch(r"t\d+", target)):
+        return (f"send {target} (only this supervisor's terminals {p}sv, {p}sv-watch, {p}sv-chat, {p}w-NNNN, {p}p-NNNN, "
+                f"{p}m-p-NNNN, or an address tN)").replace("send  (", "send (")
     if sub == "send" and _has_flag(args, ("--force",)):
         return "send --force (never answer a blocked dialog for the user)"
     return None
@@ -463,7 +479,7 @@ def _split_subcommand(tool, args):
     return (args[i], args[i + 1:]) if i < len(args) else (None, [])
 
 
-def _tool_violations(words, role=None):
+def _tool_violations(words, role=None, prefix=None):
     for i, tok in enumerate(words):
         tool = os.path.basename(tok)
         if role == "chat" and tool == "state_tool.py":
@@ -473,19 +489,19 @@ def _tool_violations(words, role=None):
         if tool in GUARD_CHECKS:
             sub, args = _split_subcommand(tool, words[i + 1:])
             check = GUARD_CHECKS[tool]
-            found = (check(sub, args, role) if tool == "hc" else check(sub, args)) if sub else None
+            found = (check(sub, args, role, prefix) if tool == "hc" else check(sub, args)) if sub else None
             return [f"{tool} {found}"] if found else []
     return []
 
 
-def _shell_c_violations(words, role=None):
+def _shell_c_violations(words, role=None, prefix=None):
     for i, tok in enumerate(words):
         if os.path.basename(tok) not in GUARD_SHELLS:
             continue
         has_c = False
         for opt in words[i + 1:]:
             if not opt.startswith("-"):
-                return bash_violations(opt, role) if has_c else []
+                return bash_violations(opt, role, prefix) if has_c else []
             has_c = has_c or (not opt.startswith("--") and "c" in opt[1:])
         return []
     return []
@@ -500,8 +516,9 @@ def _quoted_send_text(words, command):
     return texts if all(f"'{t}'" in command for t in texts) else []
 
 
-def bash_violations(command, role=None):
-    """Deny-list matches of git / jj / gh / hc in a Bash command. A guardrail, not a security boundary."""
+def bash_violations(command, role=None, prefix=None):
+    """Deny-list matches of git / jj / gh / hc in a Bash command. A guardrail, not a security boundary. prefix: see
+    _hc_violation."""
     command = command.replace("\\\n", "")
     try:
         tokens = _shell_tokens(command)
@@ -519,7 +536,7 @@ def bash_violations(command, role=None):
         if ("`" in text or "$(" in text) and GUARD_WORD_RE.search(text):
             violations.append("command substitution (split the command; command substitution around git/jj/gh/hc is not inspected)")
             continue
-        violations += _shell_c_violations(words, role) + _tool_violations(words, role)
+        violations += _shell_c_violations(words, role, prefix) + _tool_violations(words, role, prefix)
     hidden = {m.group(1) for m in HC_DENY_RE.finditer(scanned)}
     named = " ".join(violations)
     violations += [f"hc {sub} (the supervisor never types into, attaches to or manages terminals directly)"
@@ -527,13 +544,17 @@ def bash_violations(command, role=None):
     return violations
 
 
-def path_violation(path, cwd, supervisor_dir, config_dir, tmp_dirs):
+def path_violation(path, cwd, supervisor_dir, config_dir, tmp_dirs, allow_reference=False):
     full = _real(os.path.join(_real(cwd), os.path.expanduser(path)))
     try:
-        vault = vault_locations(supervisor_dir)[0]
+        notes_dir, _, reference = notes_root(supervisor_dir)
     except (StateError, OSError):
-        vault = os.path.join(supervisor_dir, VAULT_DIR)
-    if _under(full, vault):
+        reference = None
+        try:
+            notes_dir = vault_locations(supervisor_dir)[0]
+        except (StateError, OSError):
+            notes_dir = os.path.join(supervisor_dir, VAULT_DIR)
+    if _under(full, notes_dir):
         return f"{full} (vault notes are written only by state_tool commit)"
     if _under(full, supervisor_dir):
         if any(_under(full, os.path.join(supervisor_dir, rel)) for rel in GUARD_PROTECTED):
@@ -545,6 +566,9 @@ def path_violation(path, cwd, supervisor_dir, config_dir, tmp_dirs):
             return None
         return f"{full} (inside Claude's configuration directory)"
     if any(_under(full, d) for d in tmp_dirs):
+        return None
+    # Last, so that a reference pointing at a protected file, Claude's configuration or a note stays blocked above.
+    if allow_reference and reference and full == reference:
         return None
     return f"{full} (outside the supervisor directory)"
 
@@ -565,11 +589,17 @@ def guard_decision(payload, supervisor_dir, env, role=None):
     if not isinstance(value, str) or not value:
         return None
     if tool == "Bash":
-        violations = bash_violations(value, role)
+        prefix = None
+        if role is None:
+            try:
+                prefix = dir_name_prefix(supervisor_dir)
+            except (StateError, OSError):
+                prefix = False
+        violations = bash_violations(value, role, prefix)
     else:
         config_dir = env.get("CLAUDE_CONFIG_DIR") or "~/.claude"
         tmp_dirs = [d for d in (env.get("TMPDIR"), "/tmp") if d]
-        found = path_violation(value, payload.get("cwd") or supervisor_dir, supervisor_dir, config_dir, tmp_dirs)
+        found = path_violation(value, payload.get("cwd") or supervisor_dir, supervisor_dir, config_dir, tmp_dirs, role is None)
         violations = [f"{tool} {found}"] if found else []
     if not violations:
         return None
@@ -1591,7 +1621,8 @@ def _digest_follow_up(ua):
     return f" [follow-up {fu.get('rule')} {fu.get('done')}]{tail}"
 
 
-def digest(state, state_path, limit=DIGEST_LIMIT):
+def digest(state, state_path, limit=DIGEST_LIMIT, reference=None, prefix=""):
+    """prefix: the name_prefix of the hc terminal names shown for herdr sessions; None leaves them out."""
     sup = state.get("supervisor", {})
     workers_by_id = {w.get("id"): w for w in state.get("workers", [])}
     lines = [
@@ -1599,6 +1630,13 @@ def digest(state, state_path, limit=DIGEST_LIMIT):
         "Before acting: use the session-supervisor skill, run its capability check, then reconcile workers with the live session list. "
         "If any worker is running, idle or needs_input, resume the periodic reconciliation loop.",
         f"state: {state_path}",
+    ]
+    if prefix is None:
+        lines.append("warning: the ## Locations of CLAUDE.md is unreadable; hc terminal names are left out")
+    if reference:
+        lines.append(f"reference: {reference} " + ("(read it at session start; you may append what you learn)" if os.path.exists(reference)
+                                                   else "(missing: create it when there is something to record)"))
+    lines += [
         f"supervisor session_ids: {', '.join(sup.get('session_ids', [])) or '(none)'}",
         f"archive_consent: {'recorded' if sup.get('archive_consent') else 'missing (ask the user once)'}",
         f"archived tasks: {len(state.get('archived', []))}",
@@ -1623,13 +1661,15 @@ def digest(state, state_path, limit=DIGEST_LIMIT):
             reviews = [(w.get("review") or {}).get("id") for w in state.get("workers", [])
                        if any(w.get("task_id") == t.get("id") for t in mine) and (w.get("review") or {}).get("state") == "requested"]
             closed = " | closed" if p.get("close") else ""
+            terminal = f" | terminal {prefix}{manager_handle(p)}" if prefix is not None and m.get("runtime") == "herdr" else ""
             lines.append(f"- {pid} {p.get('name')} | manager {m.get('session_id')} {m.get('observed_state')} | doc {p.get('context_doc_url')}"
-                         f" | open reviews: {', '.join(reviews) or '(none)'} | tasks: {', '.join(t.get('id') for t in mine) or '(none)'}{closed}")
+                         f" | open reviews: {', '.join(reviews) or '(none)'} | tasks: {', '.join(t.get('id') for t in mine) or '(none)'}{closed}{terminal}")
     lines.append("tasks:")
     task_lines = []
     for t in state.get("tasks", []):
         ws = "; ".join(
             f"{wid} {workers_by_id.get(wid, {}).get('session_id')} {workers_by_id.get(wid, {}).get('observed_state')}"
+            + (f" terminal {prefix}{workers_by_id[wid]['handle']}" if prefix is not None and workers_by_id.get(wid, {}).get("handle") else "")
             for wid in t.get("worker_ids", [])
         )
         project = f"[{t['project_id']}] " if t.get("project_id") else ""
@@ -1835,10 +1875,22 @@ def parse_locations(text):
         if not m:
             continue
         key, value = m.group(1), m.group(2).strip()
-        if key not in LOCATION_KEYS + VAULT_REL_KEYS + ("vault",):
-            errors.append(f"CLAUDE.md:{i + 1}: unknown key {key!r} (use {list(LOCATION_KEYS + ('vault',) + VAULT_REL_KEYS)})")
+        if key not in LOCATION_KEYS + VAULT_REL_KEYS + HERDR_NAME_KEYS + ("vault", "reference"):
+            errors.append(f"CLAUDE.md:{i + 1}: unknown key {key!r} "
+                          f"(use {list(LOCATION_KEYS + ('vault', 'reference') + VAULT_REL_KEYS + HERDR_NAME_KEYS)})")
         elif key in values:
             errors.append(f"CLAUDE.md:{i + 1}: duplicate key {key!r}")
+        elif key == "name_prefix":
+            if NAME_PREFIX_RE.match(value) and not value.endswith("m-"):
+                values[key] = value
+            else:
+                errors.append(f"CLAUDE.md:{i + 1}: name_prefix must be 2-24 characters of a-z 0-9 - _, start with a letter "
+                              f"or digit, end in - or _, and not end in m-, got {value!r}")
+        elif key == "herdr_space":
+            if value:
+                values[key] = value
+            else:
+                errors.append(f"CLAUDE.md:{i + 1}: herdr_space must not be empty")
         elif key in VAULT_REL_KEYS:
             parts = value.split("/")
             if not value or value.startswith(("/", "~")) or any(p in ("", ".", "..") for p in parts) or \
@@ -1851,7 +1903,39 @@ def parse_locations(text):
             errors.append(f"CLAUDE.md:{i + 1}: {key} must be an absolute path or start with ~, got {value!r}")
         else:
             values[key] = value
+    templates, root = values.get("templates", TEMPLATES_DIR), values.get("root")
+    if root and (root == templates or root.startswith(templates + "/")):
+        errors.append(f"CLAUDE.md: root {root!r} must not be the template folder {templates!r} or inside it")
     return ({}, errors) if errors else (values, [])
+
+
+def name_prefix(text):
+    """The name_prefix of the `## Locations` of CLAUDE.md text ("" without it). Raises StateError when it is invalid."""
+    values, errors = parse_locations(text)
+    if errors:
+        raise StateError(errors)
+    return values.get("name_prefix", "")
+
+
+def dir_name_prefix(supervisor_dir):
+    claude_md = os.path.join(supervisor_dir, "CLAUDE.md")
+    return name_prefix(Path(claude_md).read_text(encoding="utf-8") if os.path.exists(claude_md) else "")
+
+
+def own_terminals(terminals, prefix):
+    """`hc ls` terminals as this supervisor sees them: its own names without the prefix, and no name for a terminal
+    named like a managed one without the prefix (another supervisor's). Other terminals keep their names."""
+    if not prefix:
+        return terminals
+    out = []
+    for t in terminals:
+        name = t.get("name") or ""
+        if name.startswith(prefix):
+            t = dict(t, name=name[len(prefix):])
+        elif MANAGED_NAME_RE.match(name):
+            t = dict(t, name=None)
+        out.append(t)
+    return out
 
 
 def default_locations(supervisor_dir):
@@ -3994,8 +4078,9 @@ def _cell(value):
     return ("-" if value in (None, "") else str(value)).replace("|", "\\|").replace("\n", " ")
 
 
-def roster(state, project_id):
-    """Markdown roster of a project's workers and open reviews, sent to its manager session."""
+def roster(state, project_id, prefix=""):
+    """Markdown roster of a project's workers and open reviews, sent to its manager session. `terminal` is the hc name
+    of a herdr worker (prefix + handle)."""
     project = _project(state, project_id)
     tasks = {t["id"]: t for t in state.get("tasks", []) if t.get("project_id") == project_id}
     workers = [w for w in state.get("workers", []) if w.get("task_id") in tasks]
@@ -4003,14 +4088,15 @@ def roster(state, project_id):
     if not workers:
         lines.append("(no workers)")
     else:
-        lines += ["| worker | task | task title | worker title | cwd | session_id | observed | report | review |",
-                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+        lines += ["| worker | task | task title | worker title | cwd | session_id | observed | report | review | terminal |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
         for w in workers:
             review = w.get("review") or {}
             rv = f"{review['id']} {review['state']}" if review else ""
             lines.append("| " + " | ".join(_cell(v) for v in (
                 w["id"], w["task_id"], tasks[w["task_id"]].get("title"), w.get("title"), w.get("cwd"), w.get("session_id"),
-                w.get("observed_state"), (w.get("last_report") or {}).get("status"), rv)) + " |")
+                w.get("observed_state"), (w.get("last_report") or {}).get("status"), rv,
+                prefix + w["handle"] if w.get("handle") else "")) + " |")
     lines += ["", "### Open reviews", ""]
     open_reviews = [w for w in workers if (w.get("review") or {}).get("state") == "requested" and not w.get("replaced_by")
                     and not tasks[w["task_id"]].get("cancel")]
@@ -4192,17 +4278,39 @@ def vault_locations(supervisor_dir):
             root = _real(values.get(key, defaults[key]))
             if _cwds_overlap(vault, root):
                 raise StateError(f"vault {vault} and {key} {root} are nested")
-    return vault, values.get("dashboard", DASHBOARD_NOTE), values.get("templates", TEMPLATES_DIR)
+    dashboard = f"{values['root']}/{DASHBOARD_NOTE}" if "root" in values else DASHBOARD_NOTE
+    return vault, values.get("dashboard", dashboard), values.get("templates", TEMPLATES_DIR)
+
+
+def notes_root(supervisor_dir):
+    """(notes_dir, root, reference): the folder of the supervisor's notes (<vault>/<root>, or the vault without root),
+    root ("" without it), and the resolved reference file (None without it), which lies outside both <dir> and notes_dir."""
+    sup = os.path.abspath(supervisor_dir)
+    vault = vault_locations(sup)[0]
+    claude_md = os.path.join(sup, "CLAUDE.md")
+    values = parse_locations(Path(claude_md).read_text(encoding="utf-8") if os.path.exists(claude_md) else "")[0]
+    root = values.get("root", "")
+    notes_dir = os.path.join(vault, root) if root else vault
+    reference = _real(values["reference"]) if "reference" in values else None
+    if reference and (_under(reference, sup) or _under(reference, notes_dir)):
+        raise StateError(f"reference {reference} must be outside the supervisor directory {sup} and the notes folder {notes_dir}")
+    return notes_dir, root, reference
 
 
 def _vault_path(state_path):
-    return vault_locations(os.path.dirname(os.path.abspath(state_path)))[0]
+    return notes_root(os.path.dirname(os.path.abspath(state_path)))[0]
 
 
 def _vault_index(state_path):
-    """(vault, texts, uids) of the vault configured for this supervisor directory."""
-    vault, dashboard, templates = vault_locations(os.path.dirname(os.path.abspath(state_path)))
-    return (vault, *_index_vault(vault, dashboard, templates))
+    """(notes_dir, texts, uids) of the notes configured for this supervisor directory."""
+    sup = os.path.dirname(os.path.abspath(state_path))
+    _, dashboard, templates = vault_locations(sup)
+    notes_dir, root, _ = notes_root(sup)
+    if root:
+        if not os.path.isdir(notes_dir):
+            raise FileNotFoundError(f"notes folder {notes_dir} (root {root!r}) does not exist")
+        dashboard, templates = (p[len(root) + 1:] if p.startswith(root + "/") else None for p in (dashboard, templates))
+    return (notes_dir, *_index_vault(notes_dir, dashboard, templates))
 
 
 def _new_note_path(uid):
@@ -4608,7 +4716,16 @@ def cmd_digest(args):
         state = _load_view(args.state)
         if not isinstance(state, dict):
             raise ValueError("state is not a JSON object")
-        print(digest(state, os.path.abspath(args.state)))
+        sup = os.path.dirname(os.path.abspath(args.state))
+        try:
+            reference = notes_root(sup)[2]
+        except (StateError, OSError):
+            reference = None
+        try:
+            prefix = dir_name_prefix(sup)
+        except (StateError, OSError):
+            prefix = None
+        print(digest(state, os.path.abspath(args.state), reference=reference, prefix=prefix))
     except Exception as e:  # The hook must never fail the session start.
         print(f"[session-supervisor] state not readable at {args.state} ({type(e).__name__}: {e}); use the session-supervisor skill to recover.")
     return 0
@@ -4730,9 +4847,10 @@ TASK_SORT = ("\n    sort:\n      - property: formula.priority_rank\n        dire
 TASK_ORDER = "[formula.title, summary, priority, subtasks, task_id, project_id, created_at]"
 
 
-def _kanban_base(name, filters, templates, order=KANBAN_ORDER, sort="", formulas=""):
+def _kanban_base(name, filters, templates, order=KANBAN_ORDER, sort="", formulas="", root=None):
+    in_root = (f'file.inFolder("{root}")',) if root else ()
     in_templates = (f"""'!file.inFolder("{templates}")'""",) if templates else ()
-    lines = "".join(f"\n    - {f}" for f in in_templates + filters)
+    lines = "".join(f"\n    - {f}" for f in in_root + in_templates + filters)
     return f"""```base
 filters:
   and:
@@ -4766,22 +4884,53 @@ PROJECT_TASKS_SECTION = "## タスク\n\n" + "\n".join(
     for heading, name, who in (("ユーザーの番", "ユーザー", "user"), ("エージェントの番", "エージェント", "agent")))
 
 
-def supervisor_note(templates, order=TASK_ORDER, sort=TASK_SORT, formulas=PRIORITY_FORMULA):
+def supervisor_note(templates, order=TASK_ORDER, sort=TASK_SORT, formulas=PRIORITY_FORMULA, root=None):
     """Tasks on two kanbans by assignee, sorted by priority, and projects, which stay in progress / agent until closed,
     on their own. The defaults after templates are the current layout; older ones generate earlier dashboards."""
-    user = _kanban_base("ユーザー", (_NOT_PROJECT, _ASSIGNEE_IS.format("user")), templates, order, sort, formulas)
-    agent = _kanban_base("エージェント", (_NOT_PROJECT, _ASSIGNEE_IS.format("agent")), templates, order, sort, formulas)
+    user = _kanban_base("ユーザー", (_NOT_PROJECT, _ASSIGNEE_IS.format("user")), templates, order, sort, formulas, root)
+    agent = _kanban_base("エージェント", (_NOT_PROJECT, _ASSIGNEE_IS.format("agent")), templates, order, sort, formulas, root)
     project = _kanban_base("プロジェクト", ('file.hasTag("project")',), templates,
-                           "[formula.title, summary, project_id, assignee, created_at]")
+                           "[formula.title, summary, project_id, assignee, created_at]", root=root)
     return f"## ユーザーの番\n\n{user}\n## エージェントの番\n\n{agent}\n## プロジェクト\n\n{project}"
 
 
-def legacy_supervisor_notes(templates):
+def legacy_supervisor_notes(templates, root=None):
     """Dashboards that earlier setups generated, which setup may replace because the user never edited them."""
-    return tuple(f"## ユーザーの番\n\n{_kanban_base('ユーザー', (_ASSIGNEE_IS.format('user'),), templates, order)}\n"
-                 f"## エージェントの番\n\n{_kanban_base('エージェント', (_ASSIGNEE_IS.format('agent'),), templates, order)}"
+    return tuple(f"## ユーザーの番\n\n{_kanban_base('ユーザー', (_ASSIGNEE_IS.format('user'),), templates, order, root=root)}\n"
+                 f"## エージェントの番\n\n{_kanban_base('エージェント', (_ASSIGNEE_IS.format('agent'),), templates, order, root=root)}"
                  for order in (KANBAN_ORDER, "[formula.title, task_id, project_id, created_at]")) + (
-        supervisor_note(templates, KANBAN_ORDER, "", ""),)
+        supervisor_note(templates, KANBAN_ORDER, "", "", root),)
+
+
+VERSION_MARK = "session-supervisor-version: "
+VERSION_MARK_RE = re.compile(re.escape(VERSION_MARK) + r"(\d+)\.(\d+)\.(\d+)")
+
+
+def plugin_version():
+    """(major, minor, patch) of the plugin this skill belongs to (.claude-plugin/plugin.json), or None when the skill was
+    installed without it."""
+    try:
+        version = json.loads((HERE.parents[2] / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
+        return tuple(int(n) for n in version.split("."))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError):
+        return None
+
+
+def _stamped(name, text, version):
+    """text of the vault file name with the version mark: a comment after the Templater opening line of a script, at
+    the top of the CSS snippet. Without a version, text unchanged."""
+    if version is None:
+        return text
+    mark = VERSION_MARK + ".".join(map(str, version))
+    if name.endswith(".css"):
+        return f"/* {mark} */\n{text}"
+    head, _, rest = text.partition("\n")
+    return f"{head}\n// {mark}\n{rest}"
+
+
+def _stamp_of(text):
+    m = VERSION_MARK_RE.search(text[:500])
+    return tuple(int(n) for n in m.groups()) if m else None
 
 
 def _setup_vault(supervisor_dir):
@@ -4789,10 +4938,13 @@ def _setup_vault(supervisor_dir):
     except the Templater scripts sv-status.md and sv-project.md, which are placed in the template folder, and the CSS
     snippet sv-kanban.css in .obsidian/snippets (created, exists or updated)."""
     vault, dashboard, templates = vault_locations(supervisor_dir)
-    files = ((Path(vault) / dashboard, supervisor_note(templates)),)
+    root = notes_root(supervisor_dir)[1]
+    if root:
+        (Path(vault) / root).mkdir(parents=True, exist_ok=True)
+    files = ((Path(vault) / dashboard, supervisor_note(templates, root=root)),)
     report = []
     for path, text in files:
-        if path.exists() and path.read_text(encoding="utf-8") in legacy_supervisor_notes(templates):
+        if path.exists() and path.read_text(encoding="utf-8") in legacy_supervisor_notes(templates, root):
             _write_atomic(str(path), text)
             report.append(("updated", path))
         elif path.exists():
@@ -4806,15 +4958,24 @@ def _setup_vault(supervisor_dir):
     copies = [(name, Path(vault) / templates / name) for name in ("sv-status.md", "sv-project.md")]
     if (Path(vault) / ".obsidian").is_dir():
         copies.append(("sv-kanban.css", Path(vault) / ".obsidian" / "snippets" / "sv-kanban.css"))
+    # They are shared by every machine that syncs the vault: a copy stamped by a newer plugin is never overwritten.
+    version = plugin_version()
     for name, dest in copies:
         src = HERE.parent / "assets" / name
         if not src.exists():
             report.append(("skipped", dest))
             continue
-        status = "exists" if dest.exists() and dest.read_bytes() == src.read_bytes() else ("updated" if dest.exists() else "created")
+        text = _stamped(name, src.read_text(encoding="utf-8"), version)
+        old = dest.read_bytes() if dest.exists() else None
+        theirs = _stamp_of(old.decode("utf-8", "replace")) if old is not None else None
+        if version and theirs and theirs > version:
+            report.append(("newer", f"{dest} ({'.'.join(map(str, theirs))} > {'.'.join(map(str, version))}; "
+                                    f"update the plugin on this machine)"))
+            continue
+        status = "exists" if old == text.encode("utf-8") else ("updated" if old is not None else "created")
         if status != "exists":
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dest)
+            _write_atomic(str(dest), text)
         report.append((status, dest))
     # Note templates are the user's: setup only reports those whose notes would differ from the ones state_tool creates.
     report += [("outdated", f"{path} ({'; '.join(errors)})") for path, errors in outdated_templates(Path(vault) / templates)]
@@ -4899,6 +5060,15 @@ def _install_hooks(settings_path, settings, wanted, defaults=None):
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     _write_atomic(str(settings_path), json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
     return "updated" if existed else "created"
+
+
+def cmd_locations(args):
+    claude_md = os.path.join(args.dir, "CLAUDE.md")
+    values, errors = parse_locations(Path(claude_md).read_text(encoding="utf-8") if os.path.exists(claude_md) else "")
+    if errors:
+        raise StateError(errors)
+    print(values.get(args.key, ""))
+    return 0
 
 
 def cmd_guard(args):
@@ -5104,7 +5274,7 @@ def cmd_prepare_dir(args):
     return 0
 
 
-REPORT_TOOL = "--allowedTools=Bash(hc send sv:*)"
+REPORT_TOOL = "--allowedTools=Bash(hc send {}sv:*)"
 
 
 def _session_cwd(worker):
@@ -5128,10 +5298,19 @@ def figures_dir(supervisor_dir, worker_id):
     return os.path.join(os.path.abspath(supervisor_dir), ".supervisor", "figures", worker_id)
 
 
-def launch_argv(state, ident, prompt, herdr, parent=None, figures=None):
+def missing_done_criteria(done_when, prompt):
+    """The lines of a task note's `## 完了条件` body that the prompt does not contain (each compared without its
+    surrounding whitespace; blank lines are skipped)."""
+    lines = [line.strip() for line in (done_when or "").split("\n")]
+    return [line for line in lines if line and line not in prompt]
+
+
+def launch_argv(state, ident, prompt, herdr, parent=None, figures=None, done_when=None, prefix=""):
     """The `hc run` argv that starts the herdr worker or manager `ident`. herdr: parsed `## Herdr` values. parent: the
     terminal address to start it under instead of `sv` (a project worker under its manager, `project_worker_parent`).
-    figures: a worker's `figures_dir`, passed with `--add-dir` so that it writes there without a permission prompt."""
+    figures: a worker's `figures_dir`, passed with `--add-dir` so that it writes there without a permission prompt.
+    done_when: the body of `## 完了条件` of the worker's task note; every line of it must be in the prompt.
+    prefix: the name_prefix of the terminal names (the terminal is prefix + ident)."""
     kind, session, cwd, label = _herdr_target(state, ident)
     if session.get("runtime") != "herdr" or session.get("handle") != ident:
         raise StateError(f"{ident} must have runtime 'herdr' and handle {ident!r} in the state before launch")
@@ -5157,7 +5336,12 @@ def launch_argv(state, ident, prompt, herdr, parent=None, figures=None):
             if not serial["ready"]:
                 raise StateError(f"{task_id} runs after {serial['waiting_for']} (serial queue); start {ident} once "
                                  f"{serial['waiting_for']} has finished its work")
-    argv = ["hc", "run", "--bg", "--json", "--name", ident, "--cwd", cwd, "--label", f"sv={kind}", "--label", label,
+        missing = missing_done_criteria(done_when, prompt)
+        if missing:
+            raise StateError([f"the prompt of {ident} lacks these lines of `## 完了条件` of the {task_id} note; put the "
+                              "section's body under \"Done when:\" (references/worker-prompt.md) and run launch-plan again:"]
+                             + [f"  {line}" for line in missing])
+    argv = ["hc", "run", "--bg", "--json", "--name", prefix + ident, "--cwd", cwd, "--label", f"sv={kind}", "--label", label,
             "--outlive-parent"]
     if parent:
         # Shown under its manager in Herdr; hc's own blocked / exit notes would go to the manager's input box, so they
@@ -5171,11 +5355,11 @@ def launch_argv(state, ident, prompt, herdr, parent=None, figures=None):
     if session.get("model"):
         argv += ["--model", session["model"]]
     # The prompt goes last: a variadic option right before it would take it as a value.
-    argv += ["--permission-mode", "auto", "-n", session.get("title") or ident, REPORT_TOOL, prompt]
+    argv += ["--permission-mode", "auto", "-n", session.get("title") or ident, REPORT_TOOL.format(prefix), prompt]
     return argv
 
 
-def project_worker_parent(state, ident, runner):
+def project_worker_parent(state, ident, runner, prefix=""):
     """Address of the live manager terminal of the project of worker `ident`, or None (not a project worker, or the
     manager is not live: the worker then starts under `sv`)."""
     worker = next((w for w in state.get("workers", []) if w.get("id") == ident), None)
@@ -5184,10 +5368,23 @@ def project_worker_parent(state, ident, runner):
         return None
     try:
         project = next((p for p in _projects(state) if p.get("id") == task["project_id"]), {"id": task["project_id"]})
-        got = _hc_json(runner, ["hc", "get", manager_handle(project), "--json"])
+        got = _hc_json(runner, ["hc", "get", prefix + manager_handle(project), "--json"])
     except (StateError, OSError, ValueError):
         return None
     return got.get("address") if got.get("state") == "live" else None
+
+
+def task_done_when(state_path, state, ident):
+    """The body of `## 完了条件` of the note of worker `ident`'s task, or None (a manager, a task without a uid, or a
+    note that is not in the vault)."""
+    worker = next((w for w in state.get("workers", []) if w.get("id") == ident), None)
+    task = next((t for t in state.get("tasks", []) if worker and t.get("id") == worker.get("task_id")), None)
+    if not (task and task.get("uid")):
+        return None
+    _, texts, uids = _vault_index(state_path)
+    if task["uid"] not in uids:
+        return None
+    return parse_sections(parse_frontmatter(texts[uids[task["uid"]][0]])[1]).get(DONE_WHEN_SECTION)
 
 
 def cmd_launch_plan(args):
@@ -5196,9 +5393,11 @@ def cmd_launch_plan(args):
     herdr, errors = parse_herdr(text)
     if errors:
         raise StateError(errors)
+    prefix = name_prefix(text)
     prompt = Path(args.prompt_file).read_text(encoding="utf-8")
     figures = figures_dir(os.path.dirname(os.path.abspath(args.state)), args.worker)
-    argv = launch_argv(state, args.worker, prompt, herdr, project_worker_parent(state, args.worker, _run_hc), figures)
+    argv = launch_argv(state, args.worker, prompt, herdr, project_worker_parent(state, args.worker, _run_hc, prefix), figures,
+                       task_done_when(args.state, state, args.worker), prefix)
     if args.run:
         if "--add-dir" in argv:
             os.makedirs(figures, exist_ok=True)
@@ -5216,8 +5415,9 @@ def _herdr_sessions(state):
     return out
 
 
-def observe_hc(state, terminals):
-    """Observed facts of each herdr worker and manager from `hc ls --all --json` terminals, matched by name."""
+def observe_hc(state, terminals, prefix=""):
+    """Observed facts of each herdr worker and manager from `hc ls --all --json` terminals (`own_terminals`), matched
+    by name. `terminal` is the hc name to use in hc commands."""
     by_name = {t.get("name"): t for t in terminals if t.get("name")}
     out = []
     for handle, session in _herdr_sessions(state):
@@ -5236,7 +5436,7 @@ def observe_hc(state, terminals):
             observed = "needs_input"
         else:
             observed = "idle"
-        out.append({"id": handle, "address": (t or {}).get("address"), "observed_state": observed,
+        out.append({"id": handle, "terminal": prefix + handle, "address": (t or {}).get("address"), "observed_state": observed,
                     "status_state": state_word, "turn": (t or {}).get("turn"),
                     "blocked_msg": status.get("msg") if state_word == "blocked" else None,
                     "exit_code": (t or {}).get("exit_code"), "reason": (t or {}).get("reason"),
@@ -5333,7 +5533,8 @@ def cmd_observe_hc(args):
         data = _read_json(args.from_file)
     else:
         data = _hc_json(_run_hc, ["hc", "ls", "--all", "--json"])
-    print(json.dumps(observe_hc(state, data.get("terminals", [])), ensure_ascii=False))
+    prefix = dir_name_prefix(os.path.dirname(os.path.abspath(args.state)))
+    print(json.dumps(observe_hc(state, own_terminals(data.get("terminals", []), prefix), prefix), ensure_ascii=False))
     return 0
 
 
@@ -5460,7 +5661,7 @@ def cmd_plan_actions(args):
 
 
 def cmd_roster(args):
-    print(roster(_load_view(args.state), args.project), end="")
+    print(roster(_load_view(args.state), args.project, dir_name_prefix(os.path.dirname(os.path.abspath(args.state)))), end="")
     return 0
 
 
@@ -5474,7 +5675,8 @@ def cmd_manager_reconcile(args):
     project = _project(view, args.project)
     data = _read_json(args.from_file) if args.from_file else _hc_json(_run_hc, ["hc", "ls", "--all", "--json"])
     workers = {w.get("handle") for w in view.get("workers", []) if w.get("runtime") == "herdr"}
-    rows = manager_rows_from_hc(project["manager"], manager_handle(project), data.get("terminals", []), workers)
+    terminals = own_terminals(data.get("terminals", []), dir_name_prefix(os.path.dirname(os.path.abspath(args.state))))
+    rows = manager_rows_from_hc(project["manager"], manager_handle(project), terminals, workers)
     events = {"last_message_ref": args.last_message_ref, "pending_approval": any(r.get("blocked") for r in rows)}
     print(json.dumps(manager_reconcile(project["manager"], rows, events), ensure_ascii=False))
     return 0
@@ -5682,13 +5884,14 @@ def watch_messages(scan, terminals, notify_address, memo):
     return messages
 
 
-def tab_renames(state, spaces):
+def tab_renames(state, spaces, prefix=""):
     """(tab id, new name) for each Herdr tab that is still named after the herdr worker or manager in it, as Herdr names
-    the tab when the user gives that terminal a pane: `w-NNNN <task title>` / `p-NNNN <project name>`. A tab the user
-    named otherwise is left alone. spaces: `herdr-app ls` spaces."""
-    purpose = {w.get("handle"): w.get("title") for w in state.get("workers", []) if w.get("runtime") == "herdr"}
+    the tab when the user gives that terminal a pane: `w-NNNN <task title>` / `p-NNNN <project name>` (with the
+    name_prefix). A tab the user named otherwise is left alone. spaces: `herdr-app ls` spaces."""
+    purpose = {prefix + w.get("handle"): w.get("title") for w in state.get("workers", [])
+               if w.get("runtime") == "herdr" and w.get("handle")}
     # A v2 state keeps the project name only in the manager's title `P-NNNN <name>` (the note holds the name).
-    purpose.update({manager_handle(p): re.sub(r"^P-\d+\s+", "", p["manager"].get("title") or "")
+    purpose.update({prefix + manager_handle(p): re.sub(r"^P-\d+\s+", "", p["manager"].get("title") or "")
                     for p in _projects(state) if (p.get("manager") or {}).get("runtime") == "herdr"})
     out = []
     for space in spaces:
@@ -5699,13 +5902,13 @@ def tab_renames(state, spaces):
     return out
 
 
-def rename_tabs(state, runner):
+def rename_tabs(state, runner, prefix=""):
     """Rename the Herdr tabs of `tab_renames`. Without a Herdr window (`herdr-app ls` fails) there is nothing to do."""
     try:
         spaces = _hc_json(runner, ["herdr-app", "ls"]).get("spaces", [])
     except (StateError, OSError, ValueError):
         return []
-    renames = tab_renames(state, spaces)
+    renames = tab_renames(state, spaces, prefix)
     for tab_id, name in renames:
         argv = ["herdr-app", "do", "tab.rename", json.dumps({"id": tab_id, "name": name}, ensure_ascii=False)]
         proc = runner(argv)
@@ -5719,14 +5922,16 @@ def watch_tick(state_path, notify, runner, memo):
     nothing of the supervisor. Returns the messages sent."""
     state = _read_json(state_path)
     _require_v2(state, state_path)
+    prefix = dir_name_prefix(os.path.dirname(os.path.abspath(state_path)))
+    notify = notify or prefix + "sv"
     vault, texts, uids = _vault_index(state_path)
     scan = notes_scan(state, texts, uids, vault)
-    terminals = _hc_json(runner, ["hc", "ls", "--all", "--json"]).get("terminals", [])
+    terminals = own_terminals(_hc_json(runner, ["hc", "ls", "--all", "--json"]).get("terminals", []), prefix)
     target = _hc_json(runner, ["hc", "get", notify, "--json"]).get("address")
     messages = watch_messages(scan, terminals, target, memo)
     for text in messages:
         _hc_json(runner, ["hc", "send", notify, text])
-    rename_tabs(state, runner)
+    rename_tabs(state, runner, prefix)
     return messages
 
 
@@ -5785,6 +5990,7 @@ def chat_entries(state_path):
 def cmd_chat_send(args, runner=None):
     """sv-chat: store the user's words as a chat request and tell sv. The file, not the signal, is the request."""
     text = _chat_text(args)
+    notify = args.notify or dir_name_prefix(os.path.dirname(os.path.abspath(args.state))) + "sv"
     context = Path(args.context_file).read_text(encoding="utf-8") if args.context_file else None
     folder = _chat_dir(args.state)
     folder.mkdir(parents=True, exist_ok=True)
@@ -5800,7 +6006,7 @@ def cmd_chat_send(args, runner=None):
             break
         except FileExistsError:
             continue
-    proc = (runner or _run_hc)(["hc", "send", args.notify, f"chat: {chat_id}"])
+    proc = (runner or _run_hc)(["hc", "send", notify, f"chat: {chat_id}"])
     print(json.dumps({"id": chat_id, "notified": proc.returncode == 0}, ensure_ascii=False))
     return 0
 
@@ -5845,7 +6051,7 @@ def cmd_note_show(args):
     sections = parse_sections(body)
     uas = parse_user_actions(sections.get(UA_SECTION, ""))
     items, problems = parse_artifacts(sections.get(ART_SECTION, ""))
-    print(json.dumps({"uid": args.uid, "path": rel, "props": props, "frontmatter_errors": errors, "sections": sections,
+    print(json.dumps({"uid": args.uid, "path": rel, "abs_path": os.path.join(vault, rel), "props": props, "frontmatter_errors": errors, "sections": sections,
                       "request": _request_text(sections.get("概要")), "lang": note_lang(_request_text(sections.get("概要"))),
                       "user_actions": [_ua_summary(u) for u in uas],
                       "requests": [_ua_summary(u) for u in uas if u["kind"] == "req" and ua_open(u)],
@@ -5941,7 +6147,8 @@ def attach_image(src, folder):
 
 def cmd_attach(args):
     sup = os.path.dirname(os.path.abspath(args.state))
-    vault, _, uids = _vault_index(args.state)
+    _, _, uids = _vault_index(args.state)
+    vault = vault_locations(sup)[0]
     if args.uid not in uids or re.search(r"[/\\]", args.uid) or args.uid in (".", ".."):
         raise StateError(f"no note with uid {args.uid!r} in {vault}")
     text = Path(sup, "CLAUDE.md").read_text(encoding="utf-8") if Path(sup, "CLAUDE.md").exists() else ""
@@ -6146,6 +6353,11 @@ def build_parser():
     p.add_argument("--role", choices=("manager", "chat"), help="manager: the guard of a project directory; chat: of <dir>/chat")
     p.set_defaults(func=cmd_guard)
 
+    p = sub.add_parser("locations", help="print one Herdr key of the ## Locations of <dir>/CLAUDE.md (empty when absent; exit 1 when invalid)")
+    p.add_argument("--dir", required=True)
+    p.add_argument("--key", required=True, choices=HERDR_NAME_KEYS)
+    p.set_defaults(func=cmd_locations)
+
     p = sub.add_parser("validate-follow-ups", help="check the ## Follow-ups section of CLAUDE.md (exit 1 with error lines when invalid)")
     p.add_argument("--claude-md", required=True)
     p.set_defaults(func=cmd_validate_follow_ups)
@@ -6204,7 +6416,7 @@ def build_parser():
 
     p = sub.add_parser("watch-vault", help="loop: tell the supervisor terminal about note changes and blocked / finished sessions, and name the Herdr tabs of kept sessions")
     p.add_argument("--state", required=True)
-    p.add_argument("--notify", default="sv", help="the supervisor terminal (default: sv)")
+    p.add_argument("--notify", help="the supervisor terminal (default: <name_prefix>sv)")
     p.add_argument("--interval", type=float, default=10, help="seconds between ticks (default: 10)")
     p.add_argument("--once", action="store_true", help="run one tick and exit")
     p.set_defaults(func=cmd_watch_vault)
@@ -6218,7 +6430,7 @@ def build_parser():
     p.add_argument("--state", required=True)
     chat_text(p)
     p.add_argument("--context-file", help="the chat session's own notes on the request (no user authority)")
-    p.add_argument("--notify", default="sv", help="the supervisor terminal (default: sv)")
+    p.add_argument("--notify", help="the supervisor terminal (default: <name_prefix>sv)")
     p.set_defaults(func=cmd_chat_send)
 
     p = sub.add_parser("chat-inbox", help="list the chat requests sv has not answered yet (JSON, writes nothing)")

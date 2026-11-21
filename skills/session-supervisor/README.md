@@ -35,11 +35,11 @@ It creates, among others:
 | Path | Purpose |
 | :--- | :--- |
 | `<dir>/state.json` | Runtime state, written only through `state_tool.py commit`. |
-| `<dir>/CLAUDE.md` | `## Locations` (`clone_root`, `work_root`, `worktree_root`, `vault`, `attachments`, ...) and `## Herdr` (`max_workers`, `worker_path`). |
+| `<dir>/CLAUDE.md` | `## Locations` (`clone_root`, `work_root`, `worktree_root`, `vault`, `root`, `reference`, `attachments`, `name_prefix`, `herdr_space`, ...) and `## Herdr` (`max_workers`, `worker_path`). |
 | `<dir>/.claude/settings.json` | The SessionStart hook (re-injects a digest after compaction) and the PreToolUse guard. |
 | `<dir>/sv.sh` | Starts, restarts, and stops the supervisor's sessions. |
 | `<dir>/chat/` | The directory of `sv-chat`, the conversational front end. |
-| `<vault>/Supervisor.md` | The kanban dashboard note. |
+| `<vault>/Supervisor.md` | The kanban dashboard note (`<vault>/<root>/Supervisor.md` when `root` sets the notes folder in a shared vault). |
 
 Before the first worker in a git repository, open that repository once with `claude` and answer the trust dialog. The supervisor never answers it.
 
@@ -67,6 +67,8 @@ The sessions it starts:
 *   **`sv-chat`**: where you talk in ordinary conversation. It hands your words verbatim to `sv` and shows its answer. Write long instructions here or in notes, not in `sv`, whose input box is shared with `hc` signals.
 *   **`w-NNNN`** (workers) and **`p-NNNN`** (project managers): started by `sv`.
 
+To run a second supervisor in the same Herdr, set it up in another directory and give it a `name_prefix` in `## Locations` (for example `work-`): all of its terminal names then carry it (`work-sv`, `work-w-0001`, ...), and each supervisor sees and messages only its own terminals. With `herdr_space`, `sv.sh` gives `sv`, `sv-chat`, and the project managers their panes in that Herdr space; a terminal that already has a pane stays where it is until `sv.sh restart` or `sv.sh chat` starts it again.
+
 ---
 
 ## 4. Core Workflow
@@ -86,7 +88,7 @@ graph TD
 "
 
 1. **Delegate**: set a task note (tagged `supervised`) to `status: backlog`, `assignee: agent`, or ask `sv-chat`. The note's `## 概要` is the request.
-2. **Dispatch**: `sv` picks the target directory (cloning a repository or creating a work directory when needed) and starts one worker per directory.
+2. **Dispatch**: `sv` picks the target directory (cloning a repository or creating a work directory when needed) and starts one worker per directory. Write the task's done criteria under `## 完了条件` of the note: `launch-plan` refuses to start a worker whose brief leaves out any of its lines.
 3. **Answer**: a worker's questions appear as user actions under `## アクション` of the note. The agents resolve what they can themselves and ask you only for your decisions and for what no session may do (a trust dialog, a tool approval, a sign-in). Answer there, or directly in the worker's terminal. Write further requests to the agent as `### @agent` headings. Check `- [ ] 完了にする` under an action to tell `sv` it is done; `sv` moves it to 完了 right away, even while you hold the note.
 4. **Verify**: when a worker reports `done`, `sv` checks its commit or result files through an observer subagent and records them under `## 成果物` and `## 完了報告`. A result that fails the check goes back to the worker to fix; it reaches you only when the worker cannot fix it.
 5. **Close**: the worker stays open for follow-ups. Once you confirm the task complete in the note (or cancel it), `sv` archives its workers.

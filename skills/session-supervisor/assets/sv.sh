@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# Start, restart, or stop the sessions of this supervisor directory: sv, sv-watch, and sv-chat.
+# Start, restart, or stop the sessions of this supervisor directory: sv, sv-watch, and sv-chat (each named with the
+# name_prefix of ## Locations in CLAUDE.md, and given a pane in its herdr_space when set).
 # Placed by `state_tool.py setup`, which overwrites a changed copy. Run it from a Herdr terminal other than sv.
 set -eu
 dir=$(cd "$(dirname "$0")" && pwd)
+# An invalid ## Locations stops here, before anything starts under a wrong name.
+p=$(python3 "$dir/.supervisor/state_tool.py" locations --dir "$dir" --key name_prefix)
+space=$(python3 "$dir/.supervisor/state_tool.py" locations --dir "$dir" --key herdr_space)
+shown= first_tab= target=
 
 usage() {
   cat >&2 <<'EOF'
@@ -29,58 +34,141 @@ end() {
 keep() {
   id=$(hc get "$1" --json | python3 -c 'import json, sys; print(json.load(sys.stdin)["address"])')
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    out=$(herdr-app do terminal.keep --terminal "$id" 2>&1) && return 0
+    if out=$(herdr-app do terminal.keep --terminal "$id" 2>&1); then
+      [ -z "$space" ] || wait_pane "$1"
+      return 0
+    fi
     sleep 0.5
   done
   echo "warning: herdr-app do terminal.keep --terminal $id failed: $out" >&2
   echo "warning: give $1 a pane in Herdr (run the command above by hand)" >&2
 }
 
+# terminal.keep answers before the pane exists ("pending"). With herdr_space, wait up to about 5 seconds for it: until
+# then, leave_space's closing the first tab could end the space (and the pane with it) and showing another space could
+# put the pane there.
+wait_pane() {
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    hc get "$1" --json | python3 -c 'import json, sys; sys.exit("herdr.tab" not in json.load(sys.stdin).get("labels", {}))' &&
+      return 0
+    sleep 0.5
+  done
+  echo "warning: $1 has no pane in Herdr yet" >&2
+}
+
 # Project managers run under sv, so their panes go with it; give each live one (p-NNNN, or m-p-NNNN from before 0.66.0) a pane again.
 keep_managers() {
   for t in $(hc ls --json | python3 -c 'import json, re, sys
 for t in json.load(sys.stdin)["terminals"]:
-    if re.fullmatch(r"(m-)?p-[0-9]{4}", t.get("name", "")): print(t["name"])'); do
+    if re.fullmatch(re.escape(sys.argv[1]) + r"(m-)?p-[0-9]{4}", t.get("name", "")): print(t["name"])' "$p"); do
     keep "$t"
   done
 }
 
+# The JSON ids of the Herdr spaces named $space, one per line.
+space_ids() {
+  herdr-app ls | python3 -c 'import json, sys
+for s in json.load(sys.stdin).get("spaces", []):
+    if s.get("name") == sys.argv[1]: print(json.dumps(s["id"]))' "$space"
+}
+
+# The JSON id of the space Herdr shows (empty when none).
+shown_space() {
+  herdr-app ls | python3 -c 'import json, sys
+for s in json.load(sys.stdin).get("spaces", []):
+    if s.get("active"): print(json.dumps(s["id"]))'
+}
+
+# With herdr_space, select that space (creating it when missing) so that keep gives the panes there. A failure only warns.
+use_space() {
+  [ -n "$space" ] || return 0
+  if ! shown=$(shown_space) || ! ids=$(space_ids); then
+    shown=
+    echo "warning: herdr-app ls failed; the panes go to the current space, not $space" >&2
+    return 0
+  fi
+  created=
+  if [ -z "$ids" ]; then
+    new=$(python3 -c 'import json, sys; print(json.dumps({"name": sys.argv[1], "focus": False}))' "$space")
+    if ! out=$(herdr-app do space.new "$new" 2>&1) || ! ids=$(space_ids) || [ -z "$ids" ]; then
+      shown=
+      echo "warning: could not create the Herdr space $space: ${out:-}; the panes go to the current space" >&2
+      return 0
+    fi
+    created=$ids
+    first_tab=$(printf '%s' "$out" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["tab"]))' 2>/dev/null) ||
+      first_tab=
+  fi
+  set -- $ids
+  if [ $# -gt 1 ]; then
+    echo "warning: $# Herdr spaces are named $space; using the first ($1)" >&2
+  fi
+  target=$1
+  if ! out=$(herdr-app do space.select "{\"id\": $1}" 2>&1); then
+    shown= first_tab=
+    echo "warning: herdr-app do space.select failed: $out; the panes go to the current space" >&2
+    # Close only a space this run created, never one the user had.
+    for id in $created; do
+      herdr-app do space.close "{\"id\": $id, \"confirmed\": true}" >/dev/null 2>&1 || true
+    done
+  fi
+}
+
+# After the panes are given: close the shell tab that space.new opens in a space this run created (keeping it from
+# being the space's only tab is why this waits), and show again the space Herdr showed before use_space.
+leave_space() {
+  if [ -n "$first_tab" ]; then
+    herdr-app do tab.close "{\"id\": $first_tab, \"confirmed\": true}" >/dev/null 2>&1 ||
+      echo "warning: could not close the first tab of the new Herdr space $space" >&2
+  fi
+  if [ -n "$shown" ] && [ "$shown" != "$target" ]; then
+    herdr-app do space.select "{\"id\": $shown}" >/dev/null 2>&1 ||
+      echo "warning: could not show the Herdr space shown before" >&2
+  fi
+}
+
 start_sv() {
-  hc run --bg --no-parent --name sv --cwd "$dir" env PATH="$PATH" claude --model opus --permission-mode auto \
+  hc run --bg --no-parent --name "${p}sv" --cwd "$dir" env PATH="$PATH" claude --model opus --permission-mode auto \
     "session-supervisor skill で監督を再開してください"
-  hc run --bg --name sv-watch --parent sv --label sv=watch --outlive-parent --cwd "$dir" \
-    python3 .supervisor/state_tool.py watch-vault --state state.json --notify sv --interval 10
-  keep sv
+  hc run --bg --name "${p}sv-watch" --parent "${p}sv" --label sv=watch --outlive-parent --cwd "$dir" \
+    python3 .supervisor/state_tool.py watch-vault --state state.json --notify "${p}sv" --interval 10
+  keep "${p}sv"
 }
 
 start_chat() {
-  hc run --bg --no-parent --name sv-chat --cwd "$dir/chat" env PATH="$PATH" claude --model opus --permission-mode auto
-  keep sv-chat
+  hc run --bg --no-parent --name "${p}sv-chat" --cwd "$dir/chat" env PATH="$PATH" claude --model opus --permission-mode auto
+  keep "${p}sv-chat"
 }
 
 [ $# -eq 1 ] || usage
 case "$1" in
   start)
-    if hc get sv >/dev/null 2>&1; then
-      echo "error: sv exists; use restart" >&2
+    if hc get "${p}sv" >/dev/null 2>&1; then
+      echo "error: ${p}sv exists; use restart" >&2
       exit 1
     fi
-    end sv-watch
+    end "${p}sv-watch"
+    use_space
     start_sv
-    hc get sv-chat >/dev/null 2>&1 || start_chat
+    hc get "${p}sv-chat" >/dev/null 2>&1 || start_chat
     keep_managers
+    leave_space
     ;;
   restart)
-    end sv-watch sv
+    end "${p}sv-watch" "${p}sv"
+    use_space
     start_sv
     keep_managers
+    leave_space
     ;;
   stop)
-    end sv-watch sv sv-chat
+    end "${p}sv-watch" "${p}sv" "${p}sv-chat"
     ;;
   chat)
-    end sv-chat
+    end "${p}sv-chat"
+    use_space
     start_chat
+    leave_space
     ;;
   *) usage ;;
 esac
