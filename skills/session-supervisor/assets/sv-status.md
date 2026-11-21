@@ -80,8 +80,10 @@ if (!tags.includes("supervised")) {
       });
       // Origin "set" (Obsidian's own for programmatic edits) skips Live Preview's properties filter, which drops a
       // frontmatter change while the cursor is in the frontmatter or at the start of the line right below it.
-      // Obsidian never saves a "set" change on its own (it takes it for the file being loaded), so save here.
+      // Obsidian takes a "set" change for the file being loaded: it neither refreshes the properties view nor saves.
+      // Do both here, the refresh first (save() records the text as seen, which would make the refresh a no-op).
       editor.transaction({ changes }, "set");
+      app.workspace.activeEditor.onInternalDataChange();
       await app.workspace.activeEditor.save();
     }
   }
