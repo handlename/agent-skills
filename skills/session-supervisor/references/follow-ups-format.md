@@ -40,7 +40,7 @@ With this rule, a verified PR `https://github.com/org/repo-a/pull/42` gets the u
 - Every error is reported as `CLAUDE.md:<line>: <message>`, all at once.
 - While there is any error, no rule applies: no follow-up is created, and verification, archiving, and push decisions continue as usual.
 
-Validate after every edit (the Capability check also runs this once per session):
+Validate after every edit (the Capability check, [capability-check.md](capability-check.md) step 7, also runs this once per session):
 
 ```bash
 python3 "<dir>/.supervisor/state_tool.py" validate-follow-ups --claude-md "<dir>/CLAUDE.md"

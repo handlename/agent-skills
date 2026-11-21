@@ -4809,7 +4809,7 @@ def cmd_setup(args):
         ("SessionStart", "startup|resume|clear|compact", f"python3 {shlex.quote(str(script))} digest --state {shlex.quote(str(state_path))}"),
         ("PreToolUse", GUARD_MATCHER, guard_hook_command(script, target)),
     )
-    # A model the user already chose is kept; the Capability check reports a non-opus supervisor.
+    # A model the user already chose is kept; the Capability check (references/capability-check.md) reports a non-opus supervisor.
     report.append((_install_hooks(settings_path, settings, wanted, {"model": SUPERVISOR_MODEL}), settings_path))
 
     if state_path.exists():
@@ -4934,7 +4934,7 @@ def _stamp_of(text):
 
 
 def _setup_vault(supervisor_dir):
-    """Create the dashboard note when it is missing; never overwrite it unless it is an unedited earlier version. Templates are built with the user (section 3),
+    """Create the dashboard note when it is missing; never overwrite it unless it is an unedited earlier version. Templates are built with the user (references/setup.md, Vault interview),
     except the Templater scripts sv-status.md and sv-project.md, which are placed in the template folder, and the CSS
     snippet sv-kanban.css in .obsidian/snippets (created, exists or updated)."""
     vault, dashboard, templates = vault_locations(supervisor_dir)
@@ -6078,7 +6078,7 @@ def cmd_new_note(args):
 
 
 def template_errors(text, kind):
-    """What a task / project note template lacks for notes made from it to be picked up (section 3)."""
+    """What a task / project note template lacks for notes made from it to be picked up (references/setup.md, Vault interview)."""
     props, body, fm_errors = parse_frontmatter(text)
     errors = [f"frontmatter: {e}" for e in fm_errors]
     tags = props.get("tags") if isinstance(props.get("tags"), list) else [props.get("tags")]

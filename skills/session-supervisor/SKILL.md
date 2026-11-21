@@ -7,7 +7,7 @@ description: Run a single supervisor session (Claude Code in a Herdr terminal na
 
 ## Overview
 
-One supervisor session, Claude Code running in the Herdr terminal `sv` in a dedicated non-git directory (the supervisor directory, default `~/supervisor`), is the user's point of contact for tasks; the user answers a worker's questions in the task note (the supervisor relays them) or in that worker's terminal (6.3 step 4). Workers and project managers are Claude Code sessions in `hc` terminals that the supervisor starts as its children. This file names terminals without the `name_prefix` of `## Locations`: with one, every `hc` terminal of this supervisor is named `<name_prefix><name>`, and `hc` commands take the `terminal` value that `observe-hc` and `digest` print (section 3, Terminal names and spaces). For each task the user gives it, the supervisor:
+One supervisor session, Claude Code running in the Herdr terminal `sv` in a dedicated non-git directory (the supervisor directory, default `~/supervisor`), is the user's point of contact for tasks; the user answers a worker's questions in the task note (the supervisor relays them) or in that worker's terminal (6.3 step 4). Workers and project managers are Claude Code sessions in `hc` terminals that the supervisor starts as its children. This file names terminals without the `name_prefix` of `## Locations`: with one, every `hc` terminal of this supervisor is named `<name_prefix><name>`, and `hc` commands take the `terminal` value that `observe-hc` and `digest` print ([references/setup.md](references/setup.md), Terminal names and spaces). For each task the user gives it, the supervisor:
 
 1. splits the task by directory and starts one worker session per directory (git: inside a worktree under `worktree_root`; non-git: at most one running worker per directory tree), in any turn, as soon as the rules allow it,
 2. detects when a worker's turn ends (the worker's `hc send <name_prefix>sv` report signal, `hc`'s notes about blocked and exited children, the `sv-watch` forwarder, and a slow `/loop` fallback),
@@ -32,15 +32,19 @@ Reference files:
 - [references/manager-prompt.md](references/manager-prompt.md): the project manager brief, the messages exchanged with the manager and with project workers, and the `project-report` block
 - [references/observer-brief.md](references/observer-brief.md): the observer subagent brief and the facts it writes per purpose
 - [assets/chat-CLAUDE.md](assets/chat-CLAUDE.md): the brief of the free-form session `sv-chat` (6.14), which `setup` copies to `<dir>/chat/CLAUDE.md`
-- [assets/sv.sh](assets/sv.sh): the user's script that starts, restarts, and stops `sv`, `sv-watch`, and `sv-chat` and gives them and the project managers a pane (section 3), which `setup` copies to `<dir>/sv.sh`
+- [assets/sv.sh](assets/sv.sh): the user's script that starts, restarts, and stops `sv`, `sv-watch`, and `sv-chat` and gives them and the project managers a pane ([references/setup.md](references/setup.md), Starting the supervisor), which `setup` copies to `<dir>/sv.sh`
 - [references/follow-ups-format.md](references/follow-ups-format.md): the `## Follow-ups` rules in `<dir>/CLAUDE.md` that turn verified PRs into follow-up user actions
+- [references/capability-check.md](references/capability-check.md): the Capability check run at every session start and recovery (section 2), and the observed facts about `hc` and Claude Code (F1-F11, S1-S9, C1-C4)
+- [references/setup.md](references/setup.md): `setup`, the `## Locations` and `## Herdr` keys, terminal names with a `name_prefix`, the guard, the files `setup` places (dashboard, templates, CSS snippet), note tags, the Vault interview, and starting the supervisor with `sv.sh` (section 3)
+- [references/note-format.md](references/note-format.md): examples and layout of what `commit --notes` writes: a formatted `## 概要`, `## アクション` (user and agent actions, threads, the done callout), and `## サブタスク` (sections 1 and 5)
+- [references/maintenance.md](references/maintenance.md): uninstalling (section 9), migrating to schema 2 and moving from the desktop app (section 10), old blocker wording (section 5), and bringing dashboards and kanbans from earlier versions up to date (6.5)
 
 In the commands below, `<skill-dir>` is the directory containing this SKILL.md and `<dir>` is the supervisor directory.
 
 ## When to Use
 
 - The user asks to set up or run a supervisor (first run included).
-- The session is Claude Code in the Herdr terminal named `sv` (`<name_prefix>sv` with a `name_prefix`, section 3) (`hc`, herdr-core, is installed), in a supervisor directory prepared by `setup`.
+- The session is Claude Code in the Herdr terminal named `sv` (`<name_prefix>sv` with a `name_prefix`, [references/setup.md](references/setup.md)) (`hc`, herdr-core, is installed), in a supervisor directory prepared by `setup`.
 - The user wants work in several repositories or directories delegated to worker sessions and tracked to completion.
 - The SessionStart hook injected a supervisor digest (after startup, resume, `/clear`, or compaction).
 
@@ -58,40 +62,22 @@ In the commands below, `<skill-dir>` is the directory containing this SKILL.md a
 
 Decide which case applies before anything else:
 
-- **This session's `cwd` has `state.json` and `.supervisor/`**: it is the supervisor. When the digest has a `reference:` line that is not `missing`, read that file first (section 7). Continue with the Capability check (section 2).
-- **Otherwise**: ask the user for the supervisor directory (default `~/supervisor`). If `<dir>/state.json` does not exist, run Setup (section 3) and then the Vault interview (section 3). Then tell the user to start the supervisor in Herdr as section 3 "Starting the supervisor" shows, and stop. This session never acts as the supervisor: the SessionStart hook does not fire here, `hc` signals of workers started from here would not reach `sv`, and a supervisor in a worker's non-git directory breaks the one-worker-per-directory rule.
+- **This session's `cwd` has `state.json` and `.supervisor/`**: it is the supervisor. When the digest has a `reference:` line that is not `missing`, read that file first (section 7). Continue with the Capability check (section 2, [references/capability-check.md](references/capability-check.md)).
+- **Otherwise**: ask the user for the supervisor directory (default `~/supervisor`). If `<dir>/state.json` does not exist, run Setup and then the Vault interview ([references/setup.md](references/setup.md)). Then tell the user to start the supervisor in Herdr as "Starting the supervisor" in [references/setup.md](references/setup.md) shows, and stop. This session never acts as the supervisor: the SessionStart hook does not fire here, `hc` signals of workers started from here would not reach `sv`, and a supervisor in a worker's non-git directory breaks the one-worker-per-directory rule.
 - **The `cwd` is `<dir>/chat`** (its parent has `state.json` and `.supervisor/`): this session is `sv-chat` (6.14). Follow `<dir>/chat/CLAUDE.md` and none of the procedures below.
-- **The `cwd` is the supervisor directory but this session is not in the `hc` terminal `<name_prefix>sv`** (`$HC_TERMINAL_ID` is empty, or `hc get <name_prefix>sv --json` returns another address): tell the user to start the supervisor as section 3 shows and stop.
+- **The `cwd` is the supervisor directory but this session is not in the `hc` terminal `<name_prefix>sv`** (`$HC_TERMINAL_ID` is empty, or `hc get <name_prefix>sv --json` returns another address): tell the user to start the supervisor as "Starting the supervisor" in [references/setup.md](references/setup.md) shows and stop.
 
 ### 1. Core rules
 
 - The supervisor may only: operate sessions with the commands of section 2 (start through `launch-plan`, list, get, read the latest message, send, archive); change state through the state-change set (section 4); talk to the user; and read files under `<dir>` (state, digest, observation results, the last-message file, `.claude/settings.json`).
-- The supervisor must not: edit or write outside `<dir>` (the only exceptions are the `reference` file of `## Locations` (below), `state_tool.py prepare-dir`, which clones repositories into `clone_root`, creates work directories under `work_root` (6.1), and creates project directories with their `.claude/settings.json` guard hook under `work_root` (6.10), and `state_tool.py prepare-worktree` / `remove-worktree`, which add and remove worker worktrees under `worktree_root` (6.2, 6.3 step 6)); run any mutating git / jj / gh command (committing, pushing, merging, rebasing, resetting, tagging, creating or removing worktrees, creating / merging / editing / commenting on PRs and issues, non-GET API calls, and jj changes); read repository files or run git / gh observation itself; answer questions about code by reading it. Changes go to a worker; observation and investigation go to an observer subagent (6.0).
+- The supervisor must not: edit or write outside `<dir>` (the only exceptions are the `reference` file of `## Locations` ([references/setup.md](references/setup.md), Locations), `state_tool.py prepare-dir`, which clones repositories into `clone_root`, creates work directories under `work_root` (6.1), and creates project directories with their `.claude/settings.json` guard hook under `work_root` (6.10), and `state_tool.py prepare-worktree` / `remove-worktree`, which add and remove worker worktrees under `worktree_root` (6.2, 6.3 step 6)); run any mutating git / jj / gh command (committing, pushing, merging, rebasing, resetting, tagging, creating or removing worktrees, creating / merging / editing / commenting on PRs and issues, non-GET API calls, and jj changes); read repository files or run git / gh observation itself; answer questions about code by reading it. Changes go to a worker; observation and investigation go to an observer subagent (6.0).
 - The PreToolUse guard installed by `setup` enforces the edit and mutating-command part for the supervisor and its subagents alike. A block (`[session-supervisor guard] blocked: ...`) means "delegate": never work around it with scripts, other interpreters, or shell tricks. `prepare-dir`, `prepare-worktree`, and `remove-worktree` are the permitted exceptions, not a way around the guard: use them only as 6.1, 6.2, 6.3 step 6, and 6.10 describe. Start a session only with `launch-plan --run`; never type `hc run` yourself, and never use `hc keys`, `hc exec`, or `hc attach` (the guard blocks them). The guard is a guardrail against mistakes, not a security boundary; the rules above apply to what it misses.
 - `state.json` has a single writer: this supervisor. Every state change, without exception, goes through the state-change set (section 4). Never edit `state.json` directly and never write `task.status` (it is derived).
 - The vault notes have the same single writer: `commit --notes` writes their props and the supervisor-owned sections `## 完了報告`, `## アクション`, `## 成果物`, and `## ログ`, and `## 完了条件` only with the user's own done criteria (6.15), and never the user's sections. The guard blocks every Edit / Write under the notes folder (`<vault>/<root>`, the whole vault without `root`); never write a note any other way. Notes outside `root` are never read or delegated. Never set a note's `status` or `assignee`: `commit` derives them.
 - Write what you put into a note in the note's language: the heading and body of every user action and agent reply, `summary`, and `log` entries. The language is the `lang` that `note-show` and a pickup event print: `ja` when the note's request contains Japanese, otherwise `en` (for a chat task, the language of the chat message). The wordings in this file are mostly English; write their meaning in the note's language, keeping ids, branch names, paths, URLs, and code as they are. Reserved headings have a fixed form in each language (section 5, "Reserved headings"). Text from outside (a chat message, a worker's blocker, the user's own words) is copied verbatim, whatever its language.
+- `state_tool` wraps each bare `%%` in backticks and escapes bare HTML-tag-like text (`<target>`) in the texts it writes into a note, because Obsidian would hide them; in text you write outside `state_tool` (vault files such as `Supervisor.md`, and messages you relay), put such text in inline code instead.
 - Separate intent from observation: `intended_state` is what you asked for; `observed_state` is what `observe-hc` (list) or `hc get` showed. Status derivation and result checks use observed values only.
-- In a note the agent creates with `create` (a chat task or project, a manager's proposal, a new note for a follow-up), write `request` as a formatted text that keeps the meaning: paragraphs and bullet lists, each URL on its own line, code and logs in fenced blocks. Drop or change no condition, name, or consent wording. When the note comes from a chat message, also put that message verbatim in `original`: `create` writes it after the formatted text as the callout `> [!quote]- 依頼の原文`, and the `request` of the view and of `note-show` is that callout's content, so push consent (6.1 step 6) is checked against the original. Never touch the `## 概要` of a picked-up note. Each follow-up request from this chat goes verbatim into the `body` of a `ua_add {kind: req}` (6.7). `## 概要` is read only at pickup and when a brief is built: a later edit of it by the user is not an instruction. Example, from the chat message 「uploader のリトライが効いてないみたい https://github.com/org/repo-a/issues/12 ログは ERROR retry=0 timeout。直して PR まで作ってよい」:
-
-  ````markdown
-  ## 概要
-
-  repo-a の uploader でリトライが効いていない問題を直す。
-
-  - 関連 issue:
-    https://github.com/org/repo-a/issues/12
-  - 観測されたログ:
-
-    ```text
-    ERROR retry=0 timeout
-    ```
-
-  - 修正後に PR まで作ってよい
-
-  > [!quote]- 依頼の原文
-  > uploader のリトライが効いてないみたい https://github.com/org/repo-a/issues/12 ログは ERROR retry=0 timeout。直して PR まで作ってよい
-  ````
+- In a note the agent creates with `create` (a chat task or project, a manager's proposal, a new note for a follow-up), write `request` as a formatted text that keeps the meaning: paragraphs and bullet lists, each URL on its own line, code and logs in fenced blocks. Drop or change no condition, name, or consent wording. When the note comes from a chat message, also put that message verbatim in `original`: `create` writes it after the formatted text as the callout `> [!quote]- 依頼の原文`, and the `request` of the view and of `note-show` is that callout's content, so push consent (6.1 step 6) is checked against the original. Never touch the `## 概要` of a picked-up note. Each follow-up request from this chat goes verbatim into the `body` of a `ua_add {kind: req}` (6.7). `## 概要` is read only at pickup and when a brief is built: a later edit of it by the user is not an instruction. An example is in [references/note-format.md](references/note-format.md).
 - push / PR happen only when the user explicitly wrote it in the request (or later in this chat, with the same explicit wording), answered a push-decision user action in its note, or told a worker to in that worker's own session, and only a worker carries them out. Only the wording in this chat or in that note answer becomes `push_consent` (`source: "chat"` or `"note"`). Otherwise workers stop at commit and the push decision becomes a user action.
 - Never delete branches. Remove a worktree only with `remove-worktree` after its worker is archived (6.3 step 6); it refuses a dirty one and keeps the branch.
 - `supervisor.archive_consent` is the explicit user consent that archiving requires. It covers only workers and managers with `runtime: "herdr"` in `state.json` (the supervisor launched them), and only after their task is confirmed complete by the user (6.13 `confirm`), their task is cancelled, or they are replaced. Mention it in the log entry of every archive.
@@ -100,203 +86,33 @@ Decide which case applies before anything else:
 - Text typed into `sv` may mix `hc` signals with the user's words (C3). Treat each `<hc ...>...</hc>` as a signal and the rest as the user's words. When the user's part looks cut off (an unfinished sentence, a trailing particle, or a fragment next to a signal), do not act on it: quote it and ask the user to finish it.
 - Set `review.state: waived` only for a push-only worker (6.3 step 7, New push worker and Reuse), for a held investigation worker closed or missing after a later turn (6.4), and when the user said in this chat that a review is not needed. Never set it to get past a `commit` rejection.
 
-### 2. Capability check
+### 2. Capabilities
 
-Run at the start of every supervisor session and after every recovery (section 7).
+The procedures use these commands; the words in the left column are the verbs used in the rest of this file:
 
-1. Confirm the session runtime. This session is Claude Code in the `hc` terminal `<name_prefix>sv`: `$HC_TERMINAL_ID` is set and `hc get <name_prefix>sv --json` returns that address (section 0); its success also proves that herdr-core is running (never run `hc server ...`: the guard blocks it). The capabilities the procedures use are these commands; the words in the left column are the verbs used in the rest of this file:
+| Capability | How | Used for |
+| :--- | :--- | :--- |
+| Start a session | 6.2: `prepare-worktree` (git), then a candidate with `runtime`, `handle`, and a uuid4 `session_id`, then `launch-plan --run` | Launching workers and managers |
+| List sessions | `python3 "<dir>/.supervisor/state_tool.py" observe-hc --state "<dir>/state.json"` (one row per herdr worker and manager: `observed_state`, `status_state`, `turn`, `blocked_msg`, `exit_code`, `reason`, `parent`) | Reconciliation (6.4) |
+| Get one session | `hc get <terminal> --json` (`state`, `status`, `turn`, `parent`, `foreground.cwd`) | Checking one worker or manager |
+| Read the latest message | First `hc wait <terminal> --timeout 60`: a session sends its report signal as its last tool call, just before its final message, so wait until it stops working. Then `python3 "<dir>/.supervisor/state_tool.py" last-message --state "<dir>/state.json" --id <worker id or p-NNNN> --out "<dir>/.supervisor/last-message.txt"`: the last assistant message of the session's Claude transcript (found by `session_id` and `cwd`), and its `message_ref` (the entry's uuid). When the transcript cannot be read, `hc read --lines 200 <terminal>` with `message_ref` `hc:<handle>:<turn>` | Reading the report block (6.3, 6.11) |
+| Send a message | `hc send <terminal> "<text>"` | Continue nudges, report resubmission requests, follow-up and push messages, relaying answers (report blockers included, 6.3 step 4) |
+| Archive a session | `hc kill <terminal>`, then `hc rm <terminal>`, then for a git worker `remove-worktree --path <worktree_path>` (6.3 step 6) | Finishing workers and managers |
+| Recurring self-paced turns | `/loop`, about every 30 minutes, as a fallback for missed signals | Periodic reconciliation (6.4) |
+| Run a subagent with a brief and a `model` | `Agent` | Observation and investigation (6.0) |
+| Watch notes and forwarded session changes | The `sv-watch` terminal (section 3) | Waking `sv` on note changes and on notes `hc` sent to an earlier `sv` |
+| Read and answer chat requests | `chat-inbox` and `chat-reply` (6.14) | The user's requests from `sv-chat` |
 
-   | Capability | How | Used for |
-   | :--- | :--- | :--- |
-   | Start a session | 6.2: `prepare-worktree` (git), then a candidate with `runtime`, `handle`, and a uuid4 `session_id`, then `launch-plan --run` | Launching workers and managers |
-   | List sessions | `python3 "<dir>/.supervisor/state_tool.py" observe-hc --state "<dir>/state.json"` (one row per herdr worker and manager: `observed_state`, `status_state`, `turn`, `blocked_msg`, `exit_code`, `reason`, `parent`) | Reconciliation (6.4) |
-   | Get one session | `hc get <terminal> --json` (`state`, `status`, `turn`, `parent`, `foreground.cwd`) | Checking one worker or manager |
-   | Read the latest message | First `hc wait <terminal> --timeout 60`: a session sends its report signal as its last tool call, just before its final message, so wait until it stops working. Then `python3 "<dir>/.supervisor/state_tool.py" last-message --state "<dir>/state.json" --id <worker id or p-NNNN> --out "<dir>/.supervisor/last-message.txt"`: the last assistant message of the session's Claude transcript (found by `session_id` and `cwd`), and its `message_ref` (the entry's uuid). When the transcript cannot be read, `hc read --lines 200 <terminal>` with `message_ref` `hc:<handle>:<turn>` | Reading the report block (6.3, 6.11) |
-   | Send a message | `hc send <terminal> "<text>"` | Continue nudges, report resubmission requests, follow-up and push messages, relaying answers (report blockers included, 6.3 step 4) |
-   | Archive a session | `hc kill <terminal>`, then `hc rm <terminal>`, then for a git worker `remove-worktree --path <worktree_path>` (6.3 step 6) | Finishing workers and managers |
-   | Recurring self-paced turns | `/loop`, about every 30 minutes, as a fallback for missed signals | Periodic reconciliation (6.4) |
-   | Run a subagent with a brief and a `model` | `Agent` | Observation and investigation (6.0) |
-   | Watch notes and forwarded session changes | The `sv-watch` terminal (section 3) | Waking `sv` on note changes and on notes `hc` sent to an earlier `sv` |
-   | Read and answer chat requests | `chat-inbox` and `chat-reply` (6.14) | The user's requests from `sv-chat` |
+`<terminal>` is the session's `terminal` in `observe-hc` and `digest` (`<name_prefix><handle>`, equal to `handle` without a `name_prefix`); the ids passed to `state_tool.py` (`--id`, `--worker`, `--project`) and `message_ref` stay unprefixed.
 
-   `<terminal>` is the session's `terminal` in `observe-hc` and `digest` (`<name_prefix><handle>`, equal to `handle` without a `name_prefix`); the ids passed to `state_tool.py` (`--id`, `--worker`, `--project`) and `message_ref` stay unprefixed.
+There is no rename (a session's name is set once at start), no push notification, and no delete. `hc` never refuses a start because of the kind of turn: the rules of this file decide when to start.
 
-   There is no rename (a session's name is set once at start), no push notification, and no delete. `hc` never refuses a start because of the kind of turn: the rules of this file decide when to start.
-
-2. Check the permission mode. Run `sv` in auto mode (section 3); workers and managers start in auto mode too (`launch-plan`).
-3. If `supervisor.archive_consent` is null, ask the user once: "May I archive workers and managers started by this supervisor without asking, once you confirm their task complete or cancel it? Archiving ends the session and removes a clean worktree; branches stay." Record the verbatim answer as `archive_consent`. Without consent, every archive becomes the user action "Please archive w-xxxx" (the user runs `hc kill <terminal>` themselves, with the worker's `terminal`).
-4. Check `sv-watch`: `hc get <name_prefix>sv-watch --json` must show a live terminal. If it is missing or finished, start it again as section 3 shows.
-5. Compare the installed copy with the bundled copy:
-
-   ```bash
-   python3 "<dir>/.supervisor/state_tool.py" version
-   python3 "<skill-dir>/scripts/state_tool.py" version
-   ```
-
-   If the two outputs differ, re-run setup (section 3), then restart `sv-watch` so it runs the new copy. Also read `<dir>/.claude/settings.json`: if no PreToolUse entry has a command that contains both `state_tool.py` and ` guard --dir`, ask the user once whether they removed it on purpose; re-run setup only if they did not, and otherwise leave it removed for this supervisor directory. Ask the user to restart `sv` (`<dir>/sv.sh restart`, or to review hooks in `/hooks`) only when setup printed `created:` or `updated:` for `settings.json`, because hooks and the `model` setting are loaded at session start; a run that printed only `exists:` needs no restart. Likewise ask the user to restart `sv-chat` (if it runs; `<dir>/sv.sh chat`) when setup printed `created:` or `updated:` for a file under `<dir>/chat`.
-
-   For each project without `close`, read `<project dir>/.claude/settings.json`: if no PreToolUse entry has a command that contains `state_tool.py`, ` guard --dir`, and `--role manager`, re-run `prepare-dir --project <name of the project dir>` (6.10; idempotent, it prints `updated:`). A running manager loads hooks only at its start, so the restored guard applies from its next replacement.
-6. Check your own model from your environment information. If it does not name opus, tell the user once per supervisor session: "This supervisor is not running on opus; restart `sv` with `<dir>/sv.sh restart`", and continue.
-7. Check the follow-up rules. This runs after step 5 so that a stale installed copy has already been replaced by one that knows the subcommand. It only reads `<dir>/CLAUDE.md` and runs no `gh`:
-
-   ```bash
-   python3 "<dir>/.supervisor/state_tool.py" validate-follow-ups --claude-md "<dir>/CLAUDE.md"
-   ```
-
-   `ok: N rules` means the rules are usable (`ok: 0 rules` when there is no `## Follow-ups`). On exit 1, tell the user the `error: CLAUDE.md:<line>: ...` lines once and continue: with an invalid section no follow-up is created, and everything else works as usual.
-
-Facts the procedures rely on (observed with hc 0.1.19 and Claude Code 2.1.322):
-
-- **Starting** (F1, F2, S8): `hc run --bg ... claude ... "<prompt>"` starts Claude Code in its `--cwd` and delivers the prompt. It works in any turn, including turns started by a signal or `/loop`. A variadic option directly before the prompt swallows it, which is why `launch-plan` writes `--allowedTools=...` as one argument and puts the prompt last.
-- **State** (F3, S7): `hc get` reports `status.state` (`working`, `idle`, `done`, `blocked`) and `turn`; a blocked session also has `status.kind` (`permission`) and `status.msg` (the command waiting for approval). `hc events` streams the same changes.
-- **Sending** (F4, C2): `hc send` types the text and presses enter. Text sent during a turn is queued and handled in that same turn; nothing is lost and no extra turn starts.
-- **Ending** (F5, S5): `hc kill` ends the program (`reason: killed`); `hc rm` removes the finished terminal. Neither touches the worktree or the branch. When `sv` itself exits, its terminal finishes; children started with `--outlive-parent` keep running.
-- **Trust** (F6, F7, C1): Claude Code asks whether to trust a git repository the first time it runs there, and records the answer for the repository, not the worktree: worktrees of a trusted repository start without the dialog. Non-git directories start without the dialog. A worker in an untrusted repository waits at the dialog and its prompt is delivered only after the user answers.
-- **Signals to the parent** (S1–S4, S9): a child that ends its turn without reporting sends nothing. A child's `hc send <name_prefix>sv "<text>"` arrives as `<hc from="tN <name_prefix>w-NNNN"><text></hc>` and starts a turn of `sv`. `hc` itself types `<hc>tN <name_prefix>w-NNNN is blocked (permission). See: hc read tN</hc>` when a child waits for approval and `<hc>tN <name_prefix>w-NNNN exited (exit N). Read: hc read tN</hc>` when it ends (an archive by `sv` included). One signal starts one turn; no duplicates were seen. These notes go to the parent terminal only, and Herdr shows a child under its parent's pane (`sub_agents` in `herdr-app ls`).
-- **Project workers under their manager**: `launch-plan` starts a worker of a project task with `--parent <manager address> --no-notify` when the manager's terminal `p-NNNN` is live, so Herdr shows it under the manager. `--no-notify` keeps `hc`'s blocked / exit notes out of the manager's input box; `sv-watch` forwards those changes to `sv` instead (its parent is not `sv`), within its 10-second interval. Its `hc send <name_prefix>sv` and everything matched by name (`observe-hc`, `hc get`, `hc send`, archive) work as for any worker. With `--outlive-parent` it keeps running when the manager ends; after the manager's terminal is removed (6.12) it keeps running under no pane, like the children of an earlier `sv`. A worker started while the manager is not live starts under `sv` as before.
-- **Re-creating `sv`** (S6): a child's `hc send <name_prefix>sv` reaches a new terminal with the same name, but `hc`'s own blocked / exit notes go to the original parent terminal and are lost. `sv-watch` forwards those changes as `worker: <name> <blocked|finished> (hc read <address>)`.
-- **Typing collision** (C3): `hc send` appends its text to whatever is typed in the input box and submits both. The user's unfinished text in `sv` can be sent early, joined to a signal.
-- **Core restarts** (C4): `hc server restart` and `hc update` keep programs running. `hc server stop` and a crash of the core end them: their workers become `missing` (6.4).
-- **Environment** (F11): `hc` starts `claude` without an interactive shell, so PATH entries that only an interactive shell adds (for example mise shims, needed by hooks that run `node`) are missing. `worker_path` in `## Herdr` (section 3) fixes this for workers and managers.
+Run the Capability check in [references/capability-check.md](references/capability-check.md) at the start of every supervisor session and after every recovery (section 7): the runtime, the permission mode, `archive_consent`, `sv-watch`, the installed script and the guards, the model, and the follow-up rules. That file also lists the observed facts about `hc` and Claude Code (F1-F11, S1-S9, C1-C4) that the procedures rely on; C3 is the typing collision: `hc send` appends its text to whatever is typed in the input box of `sv` and submits both.
 
 ### 3. Setup
 
-Run from the Entry (section 0) for a new directory, and again whenever the version check differs. The directory must not be inside a git repository.
-
-```bash
-python3 "<skill-dir>/scripts/state_tool.py" setup --dir "$HOME/supervisor"
-```
-
-`setup` is idempotent. It creates the directory (aborts inside a git repository), copies `state_tool.py` to `<dir>/.supervisor/`, adds a SessionStart hook (matcher `startup|resume|clear|compact`) and a PreToolUse guard to `<dir>/.claude/settings.json` unless already present (aborts on invalid JSON or a malformed `hooks.SessionStart` / `hooks.PreToolUse`, before writing `state.json`; existing entries are kept), sets `"model": "opus"` there when the file has no `model` key (an existing value is kept; the Capability check reports a supervisor that is not on opus), creates `state.json` and `CLAUDE.md` if missing, and prints what it created, kept, or updated. The created `CLAUDE.md` contains a commented-out `## Follow-ups` example; the user enables follow-ups by writing that section ([references/follow-ups-format.md](references/follow-ups-format.md)).
-
-`CLAUDE.md` also gets a `## Locations` section, the places where `prepare-dir` (6.1) and `prepare-worktree` (6.2) may write:
-
-- `clone_root` (default `~/src`): repositories are cloned to `<clone_root>/<host>/<owner>/<repo>`.
-- `work_root` (default `<parent of dir>/<name of dir>-work`): non-git work directories `<work_root>/T-NNNN-<slug>` for new or investigation-only requests, and project directories `<work_root>/P-NNNN-<slug>` (6.10).
-- `worktree_root` (default `~/.claude-worktrees`): git worktrees of workers, `<worktree_root>/<repo name>/<slug>` (6.2). Outside the repositories, so a repository that does not ignore `.claude/` shows no untracked worktree.
-- `vault` (optional, default `<dir>/vault`): the Obsidian vault of the notes, for example the user's main vault. It must not be nested with the three roots above. Every command that reads or writes notes (`notes-scan`, `commit`, `note-show`, `new-note`, `digest`, `watch-vault`) uses it, under `root` when set.
-- `root` (optional, relative to the vault; no `..`, leading `/`, or `~`, and not ending in `.md`): the folder of this supervisor's notes in a vault shared with other notes or other supervisors (one supervisor directory, one `root`). Notes are created at `<vault>/<root>/YYYY/MM/<uid>.md`, and the commands above scan and number uids only under it; notes elsewhere in the vault are never picked up, even tagged `supervised`. Without it the whole vault is the notes folder. The folder must exist (`setup` creates it); when it is missing, `notes-scan` and `commit` fail and the digest shows `<uid> (<note path>)`. It must not be `templates` or lie inside it. `retag-notes` refuses a `root`.
-- `dashboard` (optional, default `Supervisor.md`, or `<root>/Supervisor.md` with `root`) and `templates` (optional, default `_templates`): the kanban note and the note-template folder, relative to the vault (no `..`; `dashboard` ends in `.md`). Notes in `templates` and the dashboard are never read as task notes.
-- `attachments` (optional, default `_attachments/supervisor`): the folder, relative to the vault (no `..`), of the images embedded in notes; `attach` copies each into `<attachments>/<note uid>/` (section 4, Figures). `templates` and `attachments` are shared by every `root` of the vault.
-- `reference` (optional, an absolute path or starting with `~`): the one reference file of this root, outside `<dir>` and outside `<vault>/<root>` (otherwise the note commands and `setup` fail with a Locations error, and the guard allows no reference). The user creates the file and its folder in Obsidian first. The supervisor reads it at session start (section 7) and may append what it learns about working in this root with Edit / Write, the only file outside `<dir>` it edits; it never gives the path to workers or managers.
-- `name_prefix` (optional, not a path): the prefix of every Herdr terminal name of this supervisor, for running several supervisors in one Herdr (Terminal names and spaces, below). 2 to 24 characters of `a-z`, `0-9`, `-`, and `_`, starting with a letter or digit, ending in `-` or `_`, and not ending in `m-` (it would blur the old manager names `m-p-NNNN`), for example `work-`. Without it the names are as before (`sv`, `w-NNNN`, ...).
-- `herdr_space` (optional, not a path, one non-empty line): the Herdr space in which `sv.sh` gives `sv`, `sv-chat`, and the live project managers their panes (Starting the supervisor, below). Without it the panes go to the space Herdr shows.
-
-`setup` never adds `vault`, `root`, `reference`, `dashboard`, `templates`, `attachments`, `name_prefix`, or `herdr_space`; the Vault interview (below) writes the first six, and the user adds the last two for a second supervisor (Terminal names and spaces, below).
-
-Values are absolute paths or start with `~`. `setup` writes the section when it creates `CLAUDE.md`; on an existing file it adds only the missing keys (appending the section when absent), never changes a value, and prints `updated:`. A key that is still missing falls back to the same default, so `prepare-dir` behaves as after a re-run of `setup`. A value that is not such a path, or an unknown key, makes `setup` and `prepare-dir` print `error: CLAUDE.md:<line>: ...` and exit 1 without writing anything; fix the line and run it again. The roots must not be nested in each other or lie inside `<dir>`.
-
-`CLAUDE.md` also gets a `## Herdr` section, read by `launch-plan`:
-
-- `max_workers` (default 8): the most herdr workers intended `running` and not observed `archived` or `missing` at once; kept workers (6.3 step 6) do not count. `launch-plan` refuses a worker beyond it (6.2). Managers do not count.
-- `worker_path` (optional): the PATH that workers and managers start with (`env PATH=<worker_path> claude ...`). `setup` writes it only when `~/.local/share/mise/shims` exists and is not on its own PATH: the shims followed by setup's PATH. Without it, sessions inherit the core's environment (F11).
-
-`setup` adds missing `## Herdr` keys the same way it adds `## Locations` keys.
-
-**Terminal names and spaces**: with a `name_prefix` (for example `work-`), every `hc` terminal of this supervisor carries it: `work-sv`, `work-sv-watch`, `work-sv-chat`, workers `work-w-NNNN`, and managers `work-p-NNNN` (`work-m-p-NNNN` for a manager started before 0.66.0). Only the Herdr names carry it. The ids and `handle`s in `state.json`, the report texts (`report: w-NNNN`, `report: p-NNNN`), the ids passed to `state_tool.py`, and the `worker: w-NNNN ...` messages of `sv-watch` stay unprefixed.
-
-- `observe-hc` (each row), `digest` (at the end of each herdr worker entry, `terminal work-w-0001`, and of each manager line, `| terminal work-p-0001`), and `roster` (its last column) print the `terminal` of each herdr session, `<name_prefix><handle>` (equal to `handle` without a `name_prefix`). Pass that value to `hc get`, `wait`, `read`, `send`, `kill`, `rm`, and `attach`; signals arrive with it (`<hc from="tN work-w-0001">`), and the id is the name without the prefix. `launch-plan` names the terminal, lets the worker run `hc send <name_prefix>sv` (`--allowedTools`), and looks up the manager of a project worker by its prefixed name; `chat-send` and `watch-vault` send to `<name_prefix>sv` unless `--notify` names another.
-- `observe-hc`, `manager-reconcile`, and `watch-vault` see only this supervisor's terminals: a terminal named like a managed one but without this prefix (another supervisor's) is ignored, and other terminals (for example a manager's own children) keep their names. Every command that reads the prefix fails on an invalid `## Locations`, except `digest`, which prints a warning and leaves the `terminal` values out when it can still read the state (a schema-2 state with an invalid `## Locations` cannot be joined with its notes, so `digest` falls back to its "state not readable" output).
-- The worker and manager briefs take `{supervisor_terminal}` (`<name_prefix>sv`) and the `terminal` of the worker and of the manager (`{worker.terminal}`, `{manager.terminal}`) (6.2 step 4, 6.10 step 3).
-- The guard of `sv` blocks `hc send`, `kill`, and `rm` to another supervisor's terminals (below).
-- With a `herdr_space`, `sv.sh` gives a pane in that space only to a terminal it starts or keeps now (Starting the supervisor, below).
-
-To run a second supervisor in the same Herdr: run `setup` for a new supervisor directory (for example `~/supervisor-work`), and in its `CLAUDE.md` `## Locations` write `vault` (the same vault is fine), its own `root`, a `name_prefix` that no other supervisor of this Herdr uses, and optionally `herdr_space`; then run `<dir>/sv.sh start` from a terminal that is neither supervisor. At most one supervisor of a Herdr may go without a `name_prefix`; an existing supervisor keeps its names when it gets none.
-
-The guard (matcher `Edit|MultiEdit|Write|NotebookEdit|Bash`) runs `state_tool.py guard --dir <dir>` before each such tool call of the supervisor and its subagents:
-
-- Edits and writes are allowed under `<dir>`, in Claude's auto-memory directories (`projects/*/memory/` under `$CLAUDE_CONFIG_DIR` or `~/.claude`), and in temp directories, and for `sv` itself (not `--role manager` or `chat`) the `reference` file, compared after resolving symlinks and only as that exact file (not its folder or siblings). Everything else is blocked, and so are the protected paths inside `<dir>`: `.claude/`, `state.json`, `.supervisor/state_tool.py`, and `sv.sh` (only `setup` and `commit` write them).
-- Edits and writes under the notes folder `<vault>/<root>` (the whole vault without `root`) are blocked (`vault notes are written only by state_tool commit`), and so are protected paths and Claude's configuration even when `reference` names them. Other files of a vault inside `<dir>` are writable like the rest of `<dir>`; a vault outside `<dir>` is blocked outside the root as `outside the supervisor directory`, except the `reference` file. These path rules see the Edit / Write tools only, not writes by Bash redirection (the guard checks Bash for git / jj / gh / `hc` commands); write the `reference` file with Edit / Write. `state_tool.py attach` (section 4, Figures) is the one other writer: it only copies image files into `<vault>/<attachments>/<uid>/` of an existing note.
-- Bash commands are blocked when they run a mutating git / jj / gh command (the deny-list described in section 1), including inside `sh -c` and command substitution. Read-only forms pass.
-- `hc` commands: `hc keys`, `exec`, `attach`, `server`, `update`, `machine`, `file`, `put`, and `connect` are blocked anywhere in a command (inside `sh -c` and Python argument lists too); `hc run` is blocked without a `--label sv=...` (only the `launch-plan` argv has one); `hc kill` / `hc rm` are blocked unless the target is `<name_prefix>w-NNNN`, `<name_prefix>p-NNNN`, `<name_prefix>m-p-NNNN`, or `<name_prefix>sv-watch` (an address `tN` is blocked too); `hc send --force` is blocked. For `sv` itself (not `--role manager` or `chat`), `hc send` is blocked unless the target is one of this supervisor's terminals (`<name_prefix>` followed by `sv`, `sv-watch`, `sv-chat`, `w-NNNN`, `p-NNNN`, or `m-p-NNNN`) or an address `tN`, also without a `name_prefix`; and when `<dir>/CLAUDE.md` cannot be read or its `## Locations` does not parse, `hc send`, `kill`, and `rm` are all blocked until it is fixed. `hc send` (to such a target), `ls`, `get`, `read`, `events`, `wait`, and `interrupt` pass.
-- The guard reads the Bash text, not what it means: a blocked command written in a heredoc, a `-c` string, or a double-quoted argument is blocked too, because the guard cannot tell whether it is data or code. Write files with the Write tool, pass long text through files (`--prompt-file`, `--text-file`, `--candidate`), and put `hc send` text in single quotes: single-quoted `hc send` text is literal data, so the guard skips it.
-- A block exits 2 with a message starting `[session-supervisor guard] blocked:` that names the matched command. Any other failure of the guard (missing or stale script, malformed input) lets the call through, which is why the Capability check looks for the guard entry.
-- Worker sessions run in repository worktrees or their own directories and never load `<dir>/.claude/settings.json`, so the guard does not affect them. Each worker may run only `hc send <name_prefix>sv ...` without approval (`--allowedTools`); the worker brief forbids starting agents.
-- A project directory gets the same guard with `--role manager` (`guard --dir <project dir> --role manager`): the project manager may edit nothing outside its directory and run no mutating git / jj / gh command, and a block tells it to answer through send or return a plan in its `project-report`. It does not see MCP tools (Notion), which the manager brief forbids; `hc run` and every other `hc` command except `send`, `get`, `ls`, and `read` are forbidden by the brief.
-- `<dir>/chat` gets the same guard with `--role chat` (`guard --dir <dir>/chat --role chat`): `sv-chat` may edit only inside `<dir>/chat` (not its `.claude/`), so `state.json`, `.supervisor/`, and the vault are blocked; of `hc` it may run only `ls`, `get`, `read`, `events`, and `wait`; of `state_tool.py` only `chat-send`, `chat-wait`, `digest`, `note-show`, and `version`; mutating git / jj / gh commands are blocked as for `sv`. A block tells it to hand the request to `sv` with `chat-send`. `chat-send` writes only `<dir>/.supervisor/chat/C-NNNN.json` and runs `hc send <name_prefix>sv "chat: C-NNNN"`.
-- `state_tool.py follow-ups` writes only the candidate under `<dir>` (it refuses `state.json` and any path outside a supervisor directory itself, because the guard does not see writes made from Python). The `pr-state` observer (6.4, and its branch mode in 6.3 step 7 and 6.7) runs only read-only `gh` commands (`gh auth status`, `gh pr view`), and the `locate` observer (6.1) only `ls`, `gh repo view`, and `gh config get`; the guard lets them through.
-- `state_tool.py prepare-worktree` and `remove-worktree` write only under `worktree_root`: `prepare-worktree` runs `git worktree add -b <branch> <path> <base>`, then `mise trust` on the mise config files at the worktree root only (its record lives in mise's state directory), and prints `{status: created|exists, path, repo, branch, base, head, mise_trusted, mise_untrusted}`; `remove-worktree` refuses a dirty worktree or one outside `worktree_root` and runs `git worktree remove` without `--force`, keeping the branch.
-- `state_tool.py prepare-dir` writes outside `<dir>` only inside `## Locations`: `--clone` clones into `clone_root`, `--work` creates a directory under `work_root`, `--project` creates a project directory under `work_root` and adds the manager guard (below) to its `.claude/settings.json`, keeping existing entries, and `--show` only prints the expanded roots. It refuses a root inside `<dir>`, a `work_root` inside a git repository, nested roots, and any destination outside its root (after resolving symlinks). The guard does not see writes made from Python, so these limits live in the script.
-- Manual recovery: if the guard misbehaves, the user removes its PreToolUse entry from `<dir>/.claude/settings.json` by hand and starts a new session. The Capability check then asks before restoring it, so a deliberate removal sticks.
-
-`setup` also prepares `<dir>/chat`, the directory of `sv-chat` (6.14): `chat/.claude/settings.json` with the chat guard (below) and `"model": "opus"` (kept when present), and `chat/CLAUDE.md`, the session's brief, copied from `assets/chat-CLAUDE.md` (`created`, `exists`, or `updated`: a differing file is overwritten so that it matches the chat subcommands; the user's own additions go in `chat/CLAUDE.local.md`).
-
-`setup` also places `<dir>/sv.sh`, the user's script that starts, restarts, and stops the supervisor's sessions ("Starting the supervisor" below), copied from `assets/sv.sh` and made executable (`created`, `exists`, or `updated`: a differing file is overwritten like `chat/CLAUDE.md`, so a variant of the user's own goes under another name).
-
-`setup` also creates the dashboard note `<vault>/<dashboard>` when it is missing: three Bases kanbans of the notes tagged `supervised` (outside `templates`, and with `root` only notes in it: each base adds the filter `file.inFolder("<root>")`) grouped by `status`. With `root`, `setup` also creates `<vault>/<root>`. Task notes with `assignee: user` go under `## ユーザーの番` and those with `assignee: agent` under `## エージェントの番`, each card showing `summary`, `priority`, `task_id`, and `project_id` and each column sorted by priority (below). Project notes (tagged `project`), which stay in progress / agent until the project closes, go under `## プロジェクト` instead, each card showing `summary`, `project_id`, and `assignee`. `setup` never overwrites a dashboard the user edited; it replaces one only when it is exactly what an earlier `setup` generated (reported as `updated`). Dragging a card between kanban columns changes the note's `status`, which 6.13 handles like any other change. Each project note also has its own kanbans: `state_tool` writes a `## タスク` section after `## 概要` into the project notes it creates, two Bases blocks filtered by `'parent == this'` that show the project's task notes split by `assignee` like the dashboard, `### ユーザーの番` (`assignee: user`) first and `### エージェントの番` (`assignee: agent`) second, each card showing `summary`, `priority`, `task_id`, and `subtasks` and each column sorted by priority, and project notes made from the user's template get it from the template (Vault interview step 4). The user gives a task a priority with the note's `priority` prop, `A`, `B`, or `C`, in Obsidian's properties (`state_tool` never writes it, templates need not have it, and `notes-scan` ignores it): the task kanbans rank a column's cards `A`, `B`, `C` by the formula `priority_rank` (a note without `priority`, or with another value, ranks as `B`), and cards of one rank by `file.mtime` descending (the last changed note first), so an `A` task stays at the top while nothing changes in it, and `C` moves a task below the ones without a priority. The supervisor never sets `priority`; when the user asks for it in chat, tell them to set the prop in the note. Besides it, `setup` writes only the two Templater scripts `sv-status.md` and `sv-project.md` (Vault interview step 5) and, when the vault has `.obsidian/` (Obsidian has opened it; `setup` never creates it), the CSS snippet `.obsidian/snippets/sv-kanban.css` from `assets/sv-kanban.css` (`created`, `exists`, or `updated`, overwritten like `sv-status.md`); note templates come from the Vault interview. These three files are shared by every machine that syncs the vault (for example through Obsidian Sync, with a supervisor per `root` on each machine), so `setup` writes the plugin version (`version` of `.claude-plugin/plugin.json`) into each copy, `// session-supervisor-version: X.Y.Z` on the line after `<%*` of a script and `/* session-supervisor-version: X.Y.Z */` at the top of the snippet, and never overwrites a copy that a newer version wrote: it reports `newer: <path> (<theirs> > <ours>; update the plugin on this machine)` and leaves the file. When `setup` reports one, tell the user that this machine's plugin is older than the one that wrote the file and that updating it here fixes the warning. A copy of the same or an older version, or one without a version, is overwritten when it differs, as before. A skill installed without the plugin (no `.claude-plugin/plugin.json`) writes no version and always overwrites a differing copy. `setup` only reads those: each note in `templates` tagged `supervised` that `check-template` rejects (its notes would differ from the ones `state_tool` creates, for example after `state_tool` changed its note format) is reported as `outdated: <path> (<errors>)`. When `setup` reports one, tell the user and, once they agree, bring the template in step as in Vault interview step 4 (it is the user's file, so ask before rewriting it). A Bases kanban shows each card property on one line and gives every card the same height; the snippet lets the title and `summary` wrap onto up to 3 lines each and makes every card tall enough for both, so a card with shorter text has space at its bottom. The user changes the counts in a snippet of their own (`body { --sv-kanban-title-lines: 2; --sv-kanban-summary-lines: 3; }`), because `setup` overwrites `sv-kanban.css`. The user turns it on once in Obsidian's Settings > Appearance > CSS snippets; the supervisor never changes Obsidian settings. Without it the cards cut both at one line. A kanban in a note also grows to the height of its longest column, so a column of many `done` cards pushes the next kanban far down. Bases has no per-column item limit (a view's `limit` counts the cards of every column, so a column such as `backlog` can lose all of its cards), so the snippet caps the height of each kanban in a note at `--sv-kanban-max-height` (default `80vh`) instead: each column then scrolls on its own and still shows every card. The user changes it in their own snippet like the line counts (`body { --sv-kanban-max-height: 1200px; }`), and `none` turns the cap off. The same snippet styles the thread of an action (section 5): the supervisor's `[!sv-agent]` messages in grey; without it they show as plain callouts. It also hides the supervisor's metadata in Live Preview, the HTML comments (`<!-- sv ... -->`, `<!-- sv-art ... -->`) and block ids (`^sv-log-N`, `^sv-art-N`), except on the line the cursor is on, so the user reads the notes without them and can still edit them; Reading view hides both without the snippet. Live Preview cannot tell an HTML comment from the text between two `%%` (an Obsidian comment, which runs to the end of the note when it is not closed), so the snippet hides that text too; `state_tool` therefore wraps each bare `%%` in the texts it writes into a note (the request, logs, actions, the completion report, and the like) in backticks, leaving code spans and code blocks alone. For the same reason it escapes the `<` and `>` of each bare HTML-tag-like text in those texts with backslashes (`<target>` becomes `\<target\>`), because Obsidian renders it as HTML, which hides it or breaks the layout; autolinks such as `<https://...>` and HTML comments stay as they are. Texts the supervisor writes outside `state_tool` (vault files such as `Supervisor.md`, and messages it relays) put such text in inline code instead.
-
-Tags: a task note has `supervised`, a project note `supervised`, `project`, and `task` (vaults whose daily notes list `task` notes then show projects, not their tasks). `notes-scan` picks up only notes tagged `supervised`, so the user's own task notes are never delegated by accident; a note already managed is followed by its `uid` whatever its tags. To delegate an existing note, the user adds `supervised` and sets it to `backlog` / `agent`. Notes written before session-supervisor 0.42.0 have the tags `task` / `project`: with sv and sv-watch stopped, the user runs `retag-notes --state "<dir>/state.json" --dry-run`, then without `--dry-run`. It changes only the tags line of the task and project notes, and runs only on `<dir>/vault` (not with `root`).
-
-#### Vault interview
-
-Run by the Entry session (section 0) after the first setup, and again when the user asks to change the vault. It asks the user, writes only `<dir>/CLAUDE.md`, the drafts under `<dir>/.supervisor/`, and, after approval, the two templates; it never edits other vault files (a template plugin's own list of templates is the user's to update).
-
-1. Ask which Obsidian vault holds the notes, where the dashboard note goes, which folder holds note templates, and in which folder the images embedded in notes are saved (section 4, Figures; for example the vault's own attachment folder). Record the answers that differ from the defaults as `vault`, `dashboard`, `templates`, and `attachments` in `## Locations`. When the vault also holds other notes (the user's main vault, or another supervisor's root), ask for the folder of this supervisor's notes and record it as `root`; `templates` must lie outside it. Then ask where the reference file of this root goes (for example `~/memo/memo/_dotfiles/agents/references/supervisor/<name>.md`; outside `<dir>` and outside the root), ask the user to create the file and its folder in Obsidian first, and record it as `reference`.
-2. Ask what a note gets when it is done and when it is cancelled (or read the vault's own templates that mark a note done or cancelled, if the user points to them), and record it as `## Note props`:
-
-   ```markdown
-   ## Note props
-   - done: para=Archive, completed_at={now}, archived_at={now}
-   - archived: para=Archive, archived_at={now}
-   - now_format: YYYY-MM-DDTHH:mm:ss
-   ```
-
-   Keys are `para`, `aliases`, `archived_at`, `start_date`, `due_date`, `pending_until`, and `completed_at`; a value is fixed text, `{now}` (the time in `now_format`, written only when the property is empty), or empty (null). A missing line keeps its default: `done: completed_at={now}`, `archived: archived_at={now}`, `now_format: YYYY-MM-DD HH:mm:ss`. When a note leaves done / archived (a follow-up), `commit` resets every property named here: `para` to `Project`, `aliases` to `[]`, the others to null. An invalid line makes `commit` print `error: CLAUDE.md:<line>: ...` and write nothing.
-3. Run `setup` again; it creates the dashboard note.
-4. Ask which existing note template to follow and read it. Write two drafts in its format to `<dir>/.supervisor/supervised-task.md` and `<dir>/.supervisor/supervised-project.md`. Each needs the tags above (a task template must not have `task` or `project`), `status: backlog`, `assignee: user`, a `## 概要` section, and an empty `summary` prop (`summary: null`); also include `## サブタスク`, `## アクション`, `## 成果物`, and `## ログ`. Keep the order of `state_tool`'s own notes: `## 概要`, `## タスク` (project), `## 完了条件` (task), `## 知見` (project), `## サブタスク`, `## 完了報告` (task), `## アクション`, `## 関連ノート`, `## 関連資料`, `## 成果物`, `## ログ` (task > subtask > action); `check-template` rejects these sections out of that order. Notes made from the template should look like the ones `state_tool` creates (from sv-chat or a manager's proposal), so take the props and sections from such a note, add nothing else under the sections the supervisor writes, and leave out the props `state_tool` adds later (`subtasks`, `task_id`, `project_id`, `parent`). A task draft should have `## 完了条件` (empty; the user may write the task's done criteria there, 6.15) and `## 完了報告` (the completion report, section 4); a note without one of them gets it on its first `done_when_set` or report, so `check-template` requires neither, and a project draft needs neither. The project draft also needs the kanban of the project's own tasks as `## タスク` right after `## 概要`: copy that section verbatim from a project note `state_tool` creates (`check-template --kind project` compares it byte for byte; two Bases blocks under `### ユーザーの番` and `### エージェントの番` filtered by `'parent == this'` and by `assignee`, so they list the task notes whose `parent` links the note, grouped by `status`, sorted by `formula.priority_rank` ascending and then by `file.mtime` descending, and showing `summary`, `priority`, `task_id`, and `subtasks`). Put `## 知見` (project knowledge, 6.10) right after `## タスク` in the project draft; a project note without it gets the section on its first knowledge entry, so `check-template` does not require it. Check each draft:
-
-   ```bash
-   python3 "<dir>/.supervisor/state_tool.py" check-template --kind task --file "<dir>/.supervisor/supervised-task.md"
-   python3 "<dir>/.supervisor/state_tool.py" check-template --kind project --file "<dir>/.supervisor/supervised-project.md"
-   ```
-
-   The task draft also gets the project picker: put `<% tp.file.include("[[sv-project]]") -%>` on its own line right after the frontmatter (it writes the `parent` line itself and outputs nothing), so that creating a task note asks for its project.
-
-   `ok:` means usable; on exit 1 fix what the `error:` lines name. Show both drafts to the user and, once they approve, write them into `<vault>/<templates>/` (ask before replacing a file that exists).
-5. Tell the user about the status shortcut. `setup` copies `assets/sv-status.md` to `<vault>/<templates>/sv-status.md` (`created`, `exists`, or `updated`: a differing file is overwritten so that it always matches `notes-scan`, so a variant of the user's own goes under another name). It is a Templater template for one hotkey: in the editor of a note tagged `supervised`, it offers only the moves that fit the note's `status`, `assignee`, and kind (agent に渡す, 自分に引き取る, 保留, 完了確認, 取り消す, 完了にする(残りの作業は取り消し) for a task with work or questions still open, and for a project 完了を差し戻す, plus 完了 to close a project in progress or pending / user that the manager has not proposed as done), and rewrites only the `status` and `assignee` lines; 6.13 handles the result like any other change. The user installs the Templater plugin, sets its template folder to `templates`, registers `sv-status.md` as a template hotkey, and assigns the key in Obsidian's Hotkeys; the supervisor never installs or configures plugins. Inserting it with the core Templates plugin does not run it. In a shared vault whose Templater applies folder templates or runs on file creation, ask the user to assign an empty template to the `root` folder, so that Templater neither moves nor rewrites the notes `commit` creates there.
-
-   Tell the user about the project picker too. `setup` copies `assets/sv-project.md` to `<vault>/<templates>/sv-project.md` the same way. It first asks the note's title (prefilled with the current `title`, or the file name unless it is `Untitled`) and writes it as the `title` property; cancelling keeps the title. It then lists the open projects of the note's root (notes tagged `supervised` and `project` with a `project_id`, not done or archived, whose root is the note's root) and `(プロジェクトなし)`, and writes the chosen project as the note's `parent` line (`parent: "[[<path>|<title>]]"`) or removes that line; then it renames the note to its `uid` (`<uid>.md` in the same folder, kept as it is when that name is taken). Cancelling the project picker changes nothing. It runs when a task note is created from a template that includes it (step 4; an existing task template gets the same line), or as a hotkey on a task note not yet picked up; a picked-up task keeps its project. `notes-scan` resolves `parent` at pickup (6.1 step 0). `sv-project.md` is shared by every supervisor of the vault, so it takes a note's root from its path, not from `## Locations`: the note's folder without a trailing `/YYYY/MM` (the vault itself for a note at the top). A note in `<root>/YYYY/MM/` and one directly in `<root>` share the root, but a note in another subfolder of the root counts as a root of its own and lists none of the root's projects. It needs Templater with `tp.hooks` for the include. Ask the user to turn on Templater's "Jump to note content after creating note" setting: without it, Templater starts renaming a note it has just created, and when the title is not editable in the note (for example another plugin such as Front Matter Title replaces it), Obsidian opens a `Note title` file name prompt that is not needed because the note is named after its `uid`; that prompt still holds the old name and would undo the rename.
-
-Optional jj tracking is a manual step, never done by `setup`, and only for a vault inside `<dir>` (a vault elsewhere keeps its own history, for example through Obsidian Git; then jj records only `state.json`): when `<dir>` is a jj repository with the user's own `.claude/hooks/commit-state.sh`, propose widening it to the vault (`jj --no-pager diff --name-only state.json vault` and `jj commit -m "Update supervisor state to rev $rev" state.json vault`) and adding `/vault/.obsidian/workspace*.json` to `<dir>/.gitignore`. These files are the user's; change them only after the user approves, and keep the hook's existing handling of a signing failure.
-
-#### Starting the supervisor
-
-Tell the user to open a terminal in Herdr (any terminal but `<name_prefix>sv`) and run:
-
-```bash
-"<dir>/sv.sh" start
-```
-
-`sv.sh` takes one subcommand and prints `hc ls` at the end. It first reads `name_prefix` and `herdr_space` with `state_tool.py locations`; when `## Locations` does not parse, it prints the `error:` lines and starts nothing. Every name below carries the `name_prefix`:
-
-| Subcommand | What it does |
-| :--- | :--- |
-| `start` | Starts `sv`, `sv-watch`, and `sv-chat`, then gives each live project manager a pane. It refuses when `sv` exists (use `restart`); `sv-chat` starts only when it does not exist. |
-| `restart` | Ends and removes `sv-watch` and `sv` (`hc kill`, `hc rm`), then starts them again and gives each live project manager a pane. `sv-chat` is left as it is. |
-| `stop` | Ends and removes `sv-watch`, `sv`, and `sv-chat`. Workers and managers keep running (`--outlive-parent`); the next `sv` takes them over (section 7). |
-| `chat` | Ends and removes `sv-chat`, then starts it again (for example after `setup` updated `chat/CLAUDE.md`). |
-
-It runs these commands from `<dir>`, and after starting `sv` or `sv-chat` gives that terminal a pane with `herdr-app do terminal.keep --terminal <address>`. `start` and `restart` do the same for every live terminal named `<name_prefix>p-NNNN` (or `<name_prefix>m-p-NNNN`, a manager started before 0.66.0) in `hc ls`, so another supervisor's managers are left alone: managers run under `sv`, so ending `sv` takes their panes away from the Herdr window. The window may not know a terminal started a moment ago, so it retries for about 5 seconds; then it prints `herdr-app`'s answer as a warning (not an error, for example when there is no Herdr window) and the user runs that command by hand:
-
-```bash
-hc run --bg --no-parent --name "<name_prefix>sv" --cwd "<dir>" env PATH="$PATH" claude --model opus --permission-mode auto "session-supervisor skill で監督を再開してください"
-hc run --bg --name "<name_prefix>sv-watch" --parent "<name_prefix>sv" --label sv=watch --outlive-parent --cwd "<dir>" python3 .supervisor/state_tool.py watch-vault --state state.json --notify "<name_prefix>sv" --interval 10
-hc run --bg --no-parent --name "<name_prefix>sv-chat" --cwd "<dir>/chat" env PATH="$PATH" claude --model opus --permission-mode auto
-```
-
-Without a `name_prefix`, drop `<name_prefix>` from these commands.
-
-With a `herdr_space`, `start`, `restart`, and `chat` select that space before giving panes (`herdr-app do space.select`), creating it first when no space has that name (`space.new`, without focusing it); with several spaces of that name they use the first and print a warning. A failure is a warning, and the panes go to the space Herdr shows; a space that `sv.sh` created in that run is closed again when selecting it fails. With a `herdr_space`, `sv.sh` waits up to about 5 seconds for each pane to appear (`terminal.keep` answers before it exists; a pane that does not appear is a warning). After giving the panes, it closes the first tab of a space it created in that run (the shell that Herdr opens with a new space; a failure is a warning) and shows again the space Herdr showed before. `terminal.keep` only gives a pane to a terminal that has none, and Herdr cannot move a tab to another space, so a terminal that already has a pane stays where it is: run `sv.sh restart` (for `sv` and the managers) and `sv.sh chat` (for `sv-chat`) once after setting `herdr_space`, and a manager's pane moves only when `restart` finds it without one. `sv-watch` runs under `sv` and never gets a pane.
-
-`sv.sh` is the user's: `sv` never runs it (it would end `sv` itself), and restarts `sv-watch` by itself only as the Capability check says.
-
-- `sv` is the supervisor; the user talks to it by focusing its tab in Herdr (or `hc attach <name_prefix>sv`). Its name must be `<name_prefix>sv`: workers report to that name.
-- `sv-watch` runs `notes-scan` every 10 seconds and sends `notes: <uid> ...` to `sv` when the set of note events changes, so a note set to `backlog` / `agent` is picked up within seconds. It also forwards a worker or manager becoming blocked or finished when that session's parent is not the current `sv` (after `sv` was re-created, and for a project worker, which runs under its manager, section 2). And when the Herdr window is open, it renames the tab of a worker or manager the user gave a pane (`terminal.keep`, which names the tab after the terminal) to `w-NNNN <task title>` / `p-NNNN <project name>`, so the agents list shows what the session is for (with a `name_prefix`, the tab names and terminal names carry it); a tab the user named otherwise is left alone, and the terminal names stay `w-NNNN` / `p-NNNN`. It writes nothing of the supervisor.
-- Trust: before the first worker in a git repository, the user opens that repository once with `claude` (in Herdr or a shell) and answers the trust dialog. Worktrees of a trusted repository need nothing more; non-git work directories never ask. The supervisor never answers the dialog itself (6.2 step 5).
-- `sv-chat` (optional, 6.14) is where the user talks: focus its tab in Herdr and ask for tasks to be added, changed, paused, cancelled, or answered in ordinary conversation. It hands each request to `sv` and shows `sv`'s answer. The user starts and ends it (`sv.sh start`, `chat`, `stop`); `sv` never does. Its name must be `<name_prefix>sv-chat`, its `cwd` `<dir>/chat`.
-- Typing: the user writes long instructions in `sv-chat` or in notes (`## 概要`, `#### やりとり`, `### @agent`), not in `sv`, because `hc` signals are typed into the same input box and can submit a half-written message (C3).
-- The dashboard is the kanban note `<vault>/<dashboard>` (open the vault in Obsidian). Herdr shows `sv`, `sv-watch`, and each worker (`w-NNNN`) and manager (`p-NNNN`) as its own terminal. A session without a pane shows as its terminal name under its parent; give it a pane to see its purpose in the tab name (`sv-watch` above).
-- Each worker's report and each forwarded change starts a turn of `sv`, which uses some usage; the `/loop` fallback runs about every 30 minutes while workers run.
+Read [references/setup.md](references/setup.md) when you set up a supervisor directory (Entry, section 0, or a differing version in the Capability check), run the Vault interview, or tell the user how to start the supervisor (`sv.sh`, "Starting the supervisor"), and when you need the details of `## Locations` and `## Herdr` in `<dir>/CLAUDE.md`, the terminal names with a `name_prefix`, the exact rules of the guard, the files `setup` places (`chat/`, `sv.sh`, the dashboard, the Templater scripts, the CSS snippet), or the note tags.
+`sv.sh` is the user's script: `sv` never runs it (it would end `sv` itself).
 
 ### 4. The state-change set
 
@@ -384,68 +200,12 @@ The note's `## アクション` holds user actions (things the user must do: `@u
 
 A user action is the last resort. Add one only for what the user alone can give: a decision or consent that is the user's (a push, an archive without `archive_consent`, a choice between readings of a request), or an action beyond the permissions of every session (a trust dialog or a tool approval, which no session answers, 6.2 step 5 and 6.4). Whatever the supervisor, a worker, an observer, or the project manager can resolve goes to them first: an unparsed report is asked for again (6.3 step 2), a stalled worker is nudged (6.3 step 3), a failed verification goes back to the worker (6.3 step 5), a target directory is resolved without asking (6.1 step 1), and a worker's or the manager's question is asked only when their own rules leave it to the user ([references/worker-prompt.md](references/worker-prompt.md), [references/manager-prompt.md](references/manager-prompt.md)).
 
-```markdown
-## アクション
+The layout of `## アクション` (open items, threads, the done callout, and what the user may write) and an example are in [references/note-format.md](references/note-format.md). What the supervisor relies on:
 
-### [UA-0240] @user Decide whether to push branch `claude/fix-typo` of `repo-a` (and whether to open a PR)
-
-<!-- sv ask answer since=2026-11-11T22:40:00+09:00 -->
-
-> [!sv-agent] 2026-11-11 22:40
-> Fixed 3 typos in README.md in e9d32372d6.
->
-> [compare](https://github.com/org/repo-a/compare/main...claude/fix-typo)
->
-
-#### やりとり
-
-- [ ] push して PR を作る
-- [ ] push だけする(PR は作らない)
-- [ ] push しない
-
-
-
-### [AA-0242] @agent CHANGELOG にも typo 修正を記載する
-
-<!-- sv req since=2026-11-11T22:50:00+09:00 -->
-
-> README の修正内容を CHANGELOG の Unreleased に 1 行で足してください。
-
-#### やりとり
-
-> [!sv-agent] 2026-11-11 22:52
-> w-0005 に送りました。
->
-
-日付も添えてください。
-
-### @agent docs/ 配下の Markdown も同じ typo がないか見る
-
-The user's own request, not numbered yet, in the user's words.
-
-> [!done]- 完了 (1)
-> - [UA-0238] @user 作業場所を教えてください <!-- sv ask answer since=2026-11-11T22:10:00+09:00 done=2026-11-11T22:15:00+09:00 r901 -->
->     > どのリポジトリ (owner/repo) の README ですか。
->
->     #### やりとり
->
->     github.com/handlename
->
->     > [!sv-agent] 2026-11-11 22:12
->     > どのリポジトリですか。
->     >
->
->     handlename/agent-skills
-```
-
-- **Open item**: `### [UA-NNNN] @user <short title>` or `### [AA-NNNN] @agent <short title>`, a blank line, the metadata line `<!-- sv ... -->` (kind, `since`; never edited by hand), a blank line, and the body. Every heading the supervisor writes has a blank line below it; notes written before 0.65.3 have the metadata line right below the heading, read the same way. The heading is the `description`: one short line, the wording this file gives. Details go in the body.
 - **Body**: `ua_add` always writes the `body` with every line behind `> `, so no line of outside text (a chat message, a worker's blocker) can act as a heading or a separator; put your own summary and links in the same `body`. The body of a user action is the supervisor's first message: a `[!sv-agent]` callout titled with its `since`, like the messages of its thread (0.65.2; older notes have a plain quote, read the same way). The body of an agent action is the user's request and stays a plain quote. A multi-line answer is quoted too.
-- **Thread**: a user action of kind `ask`, `auto=worker_report`, or `auto=pr_closed` ends with `#### やりとり`, the exchange about the item up to the next heading of level 1-3 or the done callout. Other `auto` items have none (`ua_answer` adds it); under an agent action it appears with the first reply. A blank line follows the heading and separates the messages. The supervisor's messages are callouts `> [!sv-agent] <YYYY-MM-DD HH:MM>` with the text quoted and a closing empty `>` line, so that text typed right below one does not join it (Markdown lazy continuation); the user's messages are the plain text (any Markdown) between them. After writing a message of the supervisor into an open item, `ua_answer` leaves three blank lines before the next block: one below the message, one to type in, one to separate. Under an agent action, plain text before its first `[!sv-agent]` is a reply written before 0.65.0 (the agent's). Notes written before 0.65.0 have `#### 回答` instead; it is read the same way, and new items get `#### やりとり`.
 - **Where the user writes**: while a user action waits for the user (open, and no user text after the supervisor's last message), its thread ends with the options of the question as unchecked lines `- [ ] <option>` when it has any (`options` of `ua_add` / `ua_answer`), then a blank line and an empty line to type in. The user checks an option or writes below the last message (or the options). Unchecked lines are not text: `ua_answer` and `ua_ack` remove them. Only a checked line (`- [x] push しない`) counts as the answer. Notes written by 0.65.0-0.65.2 also have a mark `> [!sv-input] この下に書いてください` there; it is no text, and `ua_answer` and `ua_ack` remove it.
 - **Answer**: `note-show` and `notes-scan` print each item's `thread` (`[{from: user|agent, text, at}]`) and its `answer`: the user's text after the supervisor's last message (for a user action with no message of the supervisor, all of the user's text). For an agent action, `answer` is the user's follow-up written after the supervisor's last reply; empty until the supervisor has replied once.
 - **Done mark**: while an item waits for the user, its thread ends with an unchecked `- [ ] 完了にする` line after the options, if there are any (0.85.0). Under an agent action this line follows each reply of the supervisor. It is the user's explicit "this item is done". The user checks it (`- [x] 完了にする`) instead of or besides writing an answer; `note-show` and `notes-scan` then print `done_marked: true` for the item. A mark the supervisor has replied below is history and no longer counts. A marked item is complete whoever the assignee is: in the candidate that sees it, carry out what the rest of the answer says, if anything (for an `ask`, the mark itself is the answer), and ack it. `commit` rejects a candidate that writes the note and leaves a marked item open. When the item cannot be completed as it stands (the answer contradicts the mark, or the work it asked for is not done), reply below it with `ua_answer` saying why instead; the item then stays open.
-- **Done**: `ua_ack` moves the item into the single callout `> [!done]- 完了 (N)` at the end of the section, as `> - [<id>] @<who> <title> <!-- sv ... -->` with its body and `>     #### やりとり` indented below (without unchecked options).
-- **User-written text** (answers, `### @agent` requests): no line may start with `## `, `### `, `#### やりとり`, `#### 回答`, or `> [!sv-agent]`, because such a line splits the item or reads as the supervisor's; the user's own headings use `#####` or lower.
 
 Any open user action keeps its task `needs_user` and the note `in progress` / `user` (a follow-up or `auto=pr_closed` action only while no worker of the task is observed `running`; state-schema.md, Derivation), so a resolved one left behind blocks the task forever. Rule: **ack a user action (`ua_ack`) in the same candidate that records its resolution.** The only exceptions are the automatic "Waiting task T-xxxx can start now ..." action (`auto=start_possible`) and the completion ask (`auto=task_done`), which `commit` adds and acks by itself; never touch them. Cancel and close ack every action of the task or project.
 
@@ -459,16 +219,7 @@ Agent replies: every agent action gets the agent's replies as `[!sv-agent]` mess
 
 Also reply to each follow-up of the thread (above). The replies are the only text the supervisor writes inside an agent action: the user's heading and body are never changed, and a reply is never inferred from the request alone.
 
-Subtasks: the task note's `## サブタスク` holds the user's split of the task (task > subtask > action), one top-level checklist line each; the format and the ops are in [references/state-schema.md](references/state-schema.md) (Subtasks) and section 4.
-
-```markdown
-## サブタスク
-
-- [x] [ST-0290] hook エラーの調査 (w-0145 e1513f0)
-- [ ] [ST-0291] @agent mise trust の自動化 (w-0147)
-- [ ] [ST-0292] @user nature-server で動作確認する
-- [ ] 書いたばかりの行
-```
+Subtasks: the task note's `## サブタスク` holds the user's split of the task (task > subtask > action), one top-level checklist line each; the format and the ops are in [references/state-schema.md](references/state-schema.md) (Subtasks) and section 4; an example is in [references/note-format.md](references/note-format.md).
 
 - **Who writes**: the user writes the lines; a line without `@` is `@agent`. The supervisor never edits a line's text. It adds a line (`st_add`) or changes its `@` (`st_set assignee`) only when the user tells it to (in this chat, or an agent action such as 「考慮漏れを ST として起票して」「ST-0291 は自分でやる」), or when the user accepted its proposal: a proposal (a worker found something missing, or a subtask needs the user) is an `ask answer` user action naming the subtask and the change, and the change is made in the candidate that resolves it with a yes.
 - **Reading**: subtask lines are read at `pickup`, `resume`, and `follow_up` (6.13), like `### @agent`, and also when a worker's `done` report is verified (6.3 step 6, Subtasks), so a line the user adds while the task stays `in progress` / `agent` is picked up at the next report. In that candidate `st_adopt` each unnumbered line (their numbers share the `UA-` / `AA-` counter).
@@ -529,11 +280,7 @@ Reserved headings: the user actions below are recognized by their heading, by th
 
 Two v1 user actions are gone: the read user action of a held investigation worker is the task's `held` list (the note shows `in progress` / `user` until the user sets `done` / `user`, 6.13 `confirm`), and a new task proposal of a project manager is a proposal note (6.11 `proposal_note`).
 
-Old blocker wording: when the user mentions a user action of a task in this chat and it may be a free-text report blocker recorded before 0.27.0, take the task's live workers (`intended_state` not `archived`, `observed_state` neither `archived` nor `missing`) whose `last_report.status` is `needs_input`, `blocked`, or `failed`. Read each one's message `last_report.message_ref` again and run `parse-report` on it. The user action is an old blocker only when its description equals one of those `blockers`; otherwise it belongs to another row (an unparsed summary, a failed verification).
-
-- One matching worker: in one candidate, replace the user action with that worker's guidance (6.3 step 4; a new id). Send nothing. Reply with the user's words quoted and point them to that worker's session.
-- No live worker: remove the user action and tell the user.
-- Two or more matching workers: ask the user which worker the question came from.
+Old blocker wording: when the user mentions a user action of a task in this chat and it may be a free-text report blocker recorded before 0.27.0, follow [references/maintenance.md](references/maintenance.md) (Old blocker wording).
 
 ### 6. Procedures
 
@@ -553,7 +300,7 @@ Every fact from outside `<dir>` reaches the supervisor as a result file written 
 
    Several tasks to run one after another (「順に実行して」): also follow 6.15.
 
-   Project: from this chat, set `project_id` when the user names a P-id or a project name of an open project, and give the `create` op `parent` = that project's uid so the note links it. When the request also asks to create a new project for the task (`sv-chat` proposes one, 6.14), create it with 6.10 in the same candidate (reserve the project's and the task's notes in one `new-note --count 2` call) and link the task to it the same way; when 6.10 must ask for its context document, ask in the reply and create neither until the answer. From a note, take the event's `project_id` (resolved from the note's `parent`, which `sv-project.md` writes, section 3) and nothing else: a note without it is a task outside any project, even when its text mentions one. When you cannot tell, set none (the task behaves as before).
+   Project: from this chat, set `project_id` when the user names a P-id or a project name of an open project, and give the `create` op `parent` = that project's uid so the note links it. When the request also asks to create a new project for the task (`sv-chat` proposes one, 6.14), create it with 6.10 in the same candidate (reserve the project's and the task's notes in one `new-note --count 2` call) and link the task to it the same way; when 6.10 must ask for its context document, ask in the reply and create neither until the answer. From a note, take the event's `project_id` (resolved from the note's `parent`, which `sv-project.md` writes, [references/setup.md](references/setup.md)) and nothing else: a note without it is a task outside any project, even when its text mentions one. When you cannot tell, set none (the task behaves as before).
 
    Two sources of a new task, each a task with a `uid`:
    - **From this chat**: reserve a note with `new-note --kind task --state "<dir>/state.json"` (it prints `{uid, path}` and writes nothing; with `--count N` it prints a list of N distinct uids: reserve every note of one candidate in one call, because two calls in the same second return the same uid), and add the `create` op (`status: in progress`, `assignee: agent`, `request` = the formatted text of section 1, `original` = the message verbatim). Launch in the same turn.
@@ -617,7 +364,7 @@ Start in any turn: the user's chat, a signal, a `sv-watch` message, or a `/loop`
    ```
 
    It prints `{status, path, repo, branch, base, head, mise_trusted, mise_untrusted}`. On exit 1, report its `error:` lines and do not start. It runs `mise trust` on each mise config file at the worktree root (for example a `.mise.local.toml` that a post-checkout hook copied from the main clone), because mise trusts per path and a worker cannot commit when a hook runs a tool through an untrusted config. A non-empty `mise_untrusted` (mise not on PATH, or `mise trust` failed) does not stop the start: mention its `warning:` lines in the task's log.
-3. In one candidate set on the worker: `runtime: "herdr"`, `handle` = its id (`w-NNNN`), `session_id` = a new lowercase uuid4, `model` (6.2.1), `title` (6.2.2), and for git `worktree_path` = `path` and `branch` = `branch` (`cwd` stays the repository root; `launch-plan` starts a git worker in its `worktree_path`, and a worker of a project task under its live manager's terminal, section 2). Set `base_branch`: the `--base` you passed, except that a push-only worker (6.3 step 7) and a replacement worker (6.8) keep the `base_branch` inherited from the worker they continue, so that `commit_count` still counts the original commits; a push worker of the "Archived stub" path of 6.3 step 7 uses the observer's remote default branch. Set `started_by: "sv"` and `intended_state: running`, `observed_state: none`. Run the state-change set.
+3. In one candidate set on the worker: `runtime: "herdr"`, `handle` = its id (`w-NNNN`), `session_id` = a new lowercase uuid4, `model` (6.2.1), `title` (6.2.2), and for git `worktree_path` = `path` and `branch` = `branch` (`cwd` stays the repository root; `launch-plan` starts a git worker in its `worktree_path`, and a worker of a project task under its live manager's terminal, [references/capability-check.md](references/capability-check.md), Facts). Set `base_branch`: the `--base` you passed, except that a push-only worker (6.3 step 7) and a replacement worker (6.8) keep the `base_branch` inherited from the worker they continue, so that `commit_count` still counts the original commits; a push worker of the "Archived stub" path of 6.3 step 7 uses the observer's remote default branch. Set `started_by: "sv"` and `intended_state: running`, `observed_state: none`. Run the state-change set.
 4. Build `prompt` and `background` from [references/worker-prompt.md](references/worker-prompt.md) (`{supervisor_terminal}` is `<name_prefix>sv`, `{worker.terminal}` is `<name_prefix><worker id>`, and `{manager.terminal}` is the manager's `terminal` in `digest`), join them into one prompt file `<dir>/.supervisor/prompt-<id>.md` (the `prompt`, a blank line, then the `background`), and start it. For a worker of a project task, fill the project, proposal, and redo fields as well. A worker of a task with `investigation` gets the `{investigation only: ...}` rules, except a push-only worker. A worker of a task with `derived_from` gets the `{derived from an investigation only: ...}` block. A worker with `interactive` gets the `{interactive only: ...}` parts. For a task whose note has a non-empty `## 完了条件`, read it with `note-show --uid <task uid>` while writing this brief (also for a follow-up, replacement, or push-only worker, and when you adapt an earlier prompt file) and copy its body under "Done when:"; `launch-plan` reads the note itself and refuses a prompt file that lacks any of its non-blank lines.
 
    ```bash
@@ -826,35 +573,13 @@ In every turn, after reconciliation, start every `pending` project manager (6.12
 
 #### 6.5 Dashboard
 
-The dashboard is the kanban note `<vault>/<dashboard>` (`## Locations`, default `<dir>/vault/Supervisor.md`, or `<vault>/<root>/Supervisor.md` with `root`, showing only the notes in `root`) that `setup` creates: one kanban of tasks for the user's turn (`assignee: user`), one of tasks for the agent's turn (`assignee: agent`), and one of projects, each grouped by `status` and showing `summary`; the task kanbans put the tasks with `priority: A` at the top of each column (section 3). `commit` keeps it current by writing the notes, so there is nothing to publish. When the user asks where the dashboard is, give that path and tell them to open the vault in Obsidian. Workers, reports, and verified results are in each note's `## ログ` and `## 成果物`. `setup` brings an unedited dashboard from an earlier version up to date. An edited one keeps its old layout: when the user asks, tell them to add `summary` after `formula.title` in the `order:` line of the task kanbans, to add the filter line `- '!file.hasTag("project")'` under `and:` in both task kanbans, and to copy the `## プロジェクト` section from a dashboard that `setup` creates in an empty directory (`setup --dir <tmp>`). A project note created before session-supervisor 0.57.0, or from a template without it, has no `## タスク` kanban; `commit` never adds one, because the sections below `## 概要` that no note op writes are the user's. When the user asks, tell them to paste the `## タスク` section of a project note `state_tool` creates right after `## 概要` of the note, and of their project template. A `## タスク` kanban written before 0.73.0 lists the cards of a column in no set order; to sort it by the last change, add these lines under `order:` of its view (the user's section, so `commit` never adds them):
-
-```yaml
-    sort:
-      - property: file.mtime
-        direction: DESC
-```
-
-A `## タスク` kanban written before 0.79.0 shows all of the project's tasks on one kanban; to split it by `assignee` like the dashboard, replace the section with the `## タスク` section of a project note `state_tool` creates, in the note and in the project template (the user's section, so `commit` never rewrites it; until then `setup` reports the template as `outdated`). Task kanbans written before 0.82.0 (the `## タスク` sections, and an edited dashboard) ignore `priority`; to sort them by it, replace the `## タスク` section the same way, and in each task kanban of an edited dashboard add the `priority_rank` line under `formulas:`, replace its `sort:` lines (or add them under `order:`) with the ones below, and add `priority` after `summary` in its `order:` line:
-
-```yaml
-formulas:
-  title: link(file.name, title)
-  priority_rank: 'if(priority == "A", 1, if(priority == "C", 3, 2))'
-```
-
-```yaml
-    sort:
-      - property: formula.priority_rank
-        direction: ASC
-      - property: file.mtime
-        direction: DESC
-```
+The dashboard is the kanban note `<vault>/<dashboard>` (`## Locations`, default `<dir>/vault/Supervisor.md`, or `<vault>/<root>/Supervisor.md` with `root`, showing only the notes in `root`) that `setup` creates: one kanban of tasks for the user's turn (`assignee: user`), one of tasks for the agent's turn (`assignee: agent`), and one of projects, each grouped by `status` and showing `summary`; the task kanbans put the tasks with `priority: A` at the top of each column ([references/setup.md](references/setup.md)). The supervisor never sets `priority`; when the user asks for it in chat, tell them to set the prop in the note. `commit` keeps it current by writing the notes, so there is nothing to publish. When the user asks where the dashboard is, give that path and tell them to open the vault in Obsidian. Workers, reports, and verified results are in each note's `## ログ` and `## 成果物`. When the user asks to bring an edited dashboard, a project note's `## タスク` kanban, or a project template from an earlier version up to date, follow [references/maintenance.md](references/maintenance.md) (Dashboard and kanbans from earlier versions).
 
 #### 6.6 Cancel
 
 When the user says a task should stop (e.g. "stop", "cancel", "やめて", "不要"), or sets its note to `archived` (6.13), which always cancels, also a task with no running worker (decision (g)). From a note, `reason` is 「Obsidian で archived」; remove `confirmed` if set.
 
-1. `archive_consent` is required for any worker that is neither observed archived nor `missing`. If it is null, ask for it first (Capability check step 3); if the user declines, ask them to end the task's workers themselves (`hc kill <terminal>`) and cancel after reconciliation observes them finished (no consent is needed then).
+1. `archive_consent` is required for any worker that is neither observed archived nor `missing`. If it is null, ask for it first ([references/capability-check.md](references/capability-check.md) step 3); if the user declines, ask them to end the task's workers themselves (`hc kill <terminal>`) and cancel after reconciliation observes them finished (no consent is needed then).
 2. In one candidate: set `task.cancel` to `{at, reason}` with the user's words as `reason`, empty `kept` and `held`, set `intended_state: archived` on **every worker that was started** (it has an `observed_state` other than `none`) (whatever its current intended state, `missing` workers included), and remove the task's user actions. Leave never-started workers as they are; `commit` drops them. A started worker left at `pending` would not hold the task, so it would be archived at once with its terminal still alive. Run the state-change set; no artifacts or push decision are needed for a cancelled task.
 3. Send each running worker "The user cancelled this task. Stop now; do not commit, push, or open pull requests.", then archive each worker that is neither observed archived nor `missing` (a `missing` session cannot be archived; with `intended_state: archived` it already counts as finished) with the branching of 6.3 step 6; `remove-worktree` keeps a worktree with uncommitted changes. Log the user's cancel and the recorded `archive_consent`.
 4. Once no worker of the task is running or awaiting an observed archive (a `missing` worker intended archived does not count), `commit` moves the task to `archived` with `cancelled: true` and the reason. Tell the user which branches, and any worktrees kept for uncommitted changes, remain in which repositories.
@@ -1031,7 +756,7 @@ Only the user confirms that a task is complete. A task whose work is finished wa
 
 #### 6.14 Chat requests
 
-`sv-chat` is the free-form session in `<dir>/chat` (section 3). The user converses with it; it reads `digest`, `note-show`, the notes, and `hc` (read-only), and when the user asks for something to be done it stores the user's words with `chat-send` as `<dir>/.supervisor/chat/C-NNNN.json` and sends `chat: C-NNNN` to `sv`. It writes nothing else: the state and the notes stay with `sv`. Before it sends a new task, it proposes a project to the user from the `projects:` of `digest` (link an open project, create a new one with the task, or none), and the user's choice reaches `sv` in the user's own words in `text` (6.1 step 0). Its brief is `<dir>/chat/CLAUDE.md` (from `assets/chat-CLAUDE.md`).
+`sv-chat` is the free-form session in `<dir>/chat` ([references/setup.md](references/setup.md)). The user converses with it; it reads `digest`, `note-show`, the notes, and `hc` (read-only), and when the user asks for something to be done it stores the user's words with `chat-send` as `<dir>/.supervisor/chat/C-NNNN.json` and sends `chat: C-NNNN` to `sv`. It writes nothing else: the state and the notes stay with `sv`. Before it sends a new task, it proposes a project to the user from the `projects:` of `digest` (link an open project, create a new one with the task, or none), and the user's choice reaches `sv` in the user's own words in `text` (6.1 step 0). Its brief is `<dir>/chat/CLAUDE.md` (from `assets/chat-CLAUDE.md`).
 
 1. On a `<hc from="... <name_prefix>sv-chat">chat: C-NNNN</hc>` signal, and in every reconciliation (6.4) and recovery (section 7), list the requests not answered yet, oldest first:
 
@@ -1080,7 +805,7 @@ python3 "<dir>/.supervisor/state_tool.py" digest --state "<dir>/state.json"
 
 Then:
 
-1. Run the Capability check. A re-created supervisor runs in a new `hc` terminal that must again be named `sv` (section 3): workers report to that name, and `sv-watch` forwards the `hc` notes that still go to the old `sv` terminal.
+1. Run the Capability check ([references/capability-check.md](references/capability-check.md)). A re-created supervisor runs in a new `hc` terminal that must again be named `sv` ([references/setup.md](references/setup.md), Starting the supervisor): workers report to that name, and `sv-watch` forwards the `hc` notes that still go to the old `sv` terminal.
 2. Run reconciliation, project managers included (the digest has a `projects:` section). Workers and managers with `runtime: "herdr"` are taken over as they are, whatever terminal started them. Workers and managers without `runtime` were started in the desktop app by an earlier version: tell the user once to finish or archive them in the app. Reconciliation leaves them untouched until the user says they are done (6.4).
 3. If any worker or manager is `running`, `idle`, or `needs_input`, restart periodic reconciliation.
 4. Launch every startable `pending` worker and manager (6.4, last paragraph).
@@ -1107,29 +832,12 @@ Then:
 
 ### 9. Uninstall
 
-1. Confirm no worker or manager is `running`, `idle`, or `needs_input` (reconcile first), stop periodic reconciliation, and end `sv-watch` (`hc kill <name_prefix>sv-watch`, `hc rm <name_prefix>sv-watch`). Ask the user to end `sv-chat` themselves, or `sv` and `sv-chat` together with `<dir>/sv.sh stop` once this turn is over.
-2. Ask the user to delete the supervisor directory themselves. The agent never deletes it.
-3. Leftover worktrees (kept for uncommitted changes, or from desktop-app workers of earlier versions) can be listed and removed by the user:
-
-   ```bash
-   git -C "<repo>" worktree list
-   git -C "<repo>" worktree remove "<worktree>"
-   ```
-
-   Branches stay in each repository.
+When the user asks to remove the supervisor, follow [references/maintenance.md](references/maintenance.md) (Uninstall).
 
 ### 10. Migration to notes (schema 2)
 
-A `state.json` at `schema_version: 1` keeps working with the v1 commit until it is migrated. Migrate only when the user asks, with no worker running:
+When the user asks to migrate a `state.json` at `schema_version: 1` (or to roll back), or to move a supervisor from the desktop app to Herdr, follow [references/maintenance.md](references/maintenance.md) (Migration to notes).
 
-```bash
-python3 "<dir>/.supervisor/state_tool.py" migrate-v2 --state "<dir>/state.json" --dry-run
-python3 "<dir>/.supervisor/state_tool.py" migrate-v2 --state "<dir>/state.json"
-```
-
-The dry run lists the notes it would write. The real run writes one note per task, project, and stub (a revived task and its stub share one; project proposal user actions become backlog/user proposal notes; read user actions become `held`), then `state.json`. Rerun it after an interruption; it refuses a note that exists with other content. Rollback: write the v1 form with `export-v1 --state "<dir>/state.json" --out "<dir>/state.v1.json"`, check it (it prints `tasks_without_workers`: the previous version rejects a task without workers, so cancel those tasks or let their workers start first, and export again), and replace `state.json` with it from a supervisor on the previous skill version (`setup` from that version reinstalls its script). Held workers come back as read user actions; follow-ups stay quoted in the notes.
-
-Moving a supervisor from the desktop app to Herdr needs no state migration: run `setup` again, start `sv` and `sv-watch` in Herdr (`<dir>/sv.sh start`, section 3), and leave the remaining desktop-app workers and managers to the user (6.4, section 7).
 
 ## Verification
 
