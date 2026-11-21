@@ -80,7 +80,9 @@ if (!tags.includes("supervised")) {
       });
       // Origin "set" (Obsidian's own for programmatic edits) skips Live Preview's properties filter, which drops a
       // frontmatter change while the cursor is in the frontmatter or at the start of the line right below it.
+      // Obsidian never saves a "set" change on its own (it takes it for the file being loaded), so save here.
       editor.transaction({ changes }, "set");
+      await app.workspace.activeEditor.save();
     }
   }
 }
