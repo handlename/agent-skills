@@ -23,34 +23,51 @@ A personal collection of custom AI Agent Skills compatible with `gh skill instal
 
 ## Plugins
 
-This repository is also a [Claude Code plugin marketplace](https://code.claude.com/docs/en/plugin-marketplaces).
+This repository is also a [Claude Code plugin marketplace](https://code.claude.com/docs/en/plugin-marketplaces). Every skill is a plugin of its own, named `handlename-<skill-name>`, so you install only the skills you want.
 
-Add the marketplace once, then install the bundled plugin:
+Add the marketplace once, then install the plugins you need:
 
 ```bash
 claude plugin marketplace add handlename/agent-skills
-claude plugin install handlename@handlename
+claude plugin install handlename-commit-it@handlename
+claude plugin install handlename-create-pr@handlename
 ```
 
-All skills listed under [Available Skills](#available-skills) are bundled into a single `handlename` plugin. The repository root itself is the plugin (`.claude-plugin/marketplace.json` points at `source: "."`), so the plugin reads the same `skills/<name>/` directories that `gh skill install` fetches. Both paths share one physical source with no symlinks and no duplicated files.
+A local clone works as the marketplace too: `claude plugin marketplace add /path/to/agent-skills`. Plugins from a local marketplace load in place, so edits take effect at the next session start or `/reload-plugins`.
 
-| Component | Type | Description |
-| :--- | :--- | :--- |
-| `commit-it` | skill | Commit changes following the Conventional Commits specification, verifying test passage first. Supports both git and Jujutsu (jj) repositories. |
-| `create-pr` | skill | Create a Pull Request from the current branch to a base branch, using GitHub CLI to generate a suitable title and description from the commit history. |
-| `draw-mermaid` | skill | Draw a mermaid diagram from a natural-language intent and return a syntax-validated mermaid source, checked with `mermaid.parse()` against a vendored, version-pinned mermaid.js via playwright-cli. Designed to be called from other skills through a subagent. |
-| `github-attachment-upload` | skill | Attach a local file to an existing GitHub issue/PR via the GitHub CLI (`gh --attach`, gh 2.99.0+), returning the `user-attachments` URL and embed location. File-type agnostic; the target issue/PR is supplied by the caller (comment or body-edit mode), and no throwaway issue is created. Designed to be called from other skills through a subagent. |
-| `github-resource-access` | skill | Rules for accessing GitHub resources with the `gh` CLI: reads are free, writes require an explicit instruction. |
-| `go1.27-changes` | skill | Reference for Go 1.27's developer-facing changes (language, standard library, `go` command) with gotchas foregrounded, for writing or reviewing Go code without falling back on pre-1.27 training-data assumptions. |
-| `hwwwn` | skill | Passive reference for what information belongs where and how to phrase code comments: HWWWN routes How to code, What to test code, Why to the commit log, and Why not to code comments (after t_wada), then gives concrete comment rules — minimal, line breaks only at sentence boundaries, and no comment that restates what the code shows. Language/project conventions take precedence. |
-| `maint-glossary` | skill | Create and maintain a glossary of domain terms from a requirements document, spec, or codebase — extracting, categorizing, and defining terms for a fresh glossary, and diffing the source to add/revise/deprecate entries when maintaining an existing one. |
-| `mermaid-to-svg` | skill | Turn a mermaid diagram into a hand-drawn free-layout SVG image file and return its path. Pure and offline (no mermaid-cli, no browser, no upload). Designed to be called from other skills through a subagent, then paired with `github-attachment-upload`. |
-| `multirepo` | skill | Investigate or edit multiple already-cloned local git repositories in parallel via one `multirepo-worker` sub-agent per repo. The main session only orchestrates; worktrees are created for edits, and commits/PRs are left to other skills. |
-| `persona-mimic-trainer` | skill | Train and iteratively refine a custom sub-agent that mimics a specific person's decision-making criteria, cognitive biases, and communication style for mock wall-hitting (pre-communication verification). |
-| `plan-to-issue` | skill | Turn a finalized implementation plan or design into a GitHub tracking issue (overview + PR-granularity checklist plus a self-contained plan issue artifact), or post it as a plan artifact on an existing related issue. |
-| `runbook-execution-support` | skill | Support a human operator through a runbook in a GitHub issue comment: step presentation, pre-checks, verification, Slack progress posts, and checklist updates. |
-| `session-supervisor` | skill | Run a supervisor session in a Herdr terminal that starts (`hc run`), tracks, and verifies worker sessions (git worktree, or one per non-git directory), keeps a verified worker for follow-ups until the user confirms its task complete or cancels it and then archives it, keeps a compaction-proof `state.json`, delegates edits and pushes to workers and observation to subagents, and keeps one Obsidian note per task, where the user answers workers' questions, with a kanban dashboard note. |
-| `setup-tagpr` | skill | Set up tagpr for automated release management: creates and updates release pull requests for unreleased items, tags them on merge, and creates GitHub Releases. Supports goreleaser (Go) and TypeScript/Node.js projects. |
+A plugin skill is invoked with its plugin name as a prefix, e.g. `/handlename-commit-it:commit-it`. Plugins whose skill invokes other skills declare them as dependencies, and installing the plugin installs them as well (see "Also installs" below).
+
+Every plugin entry in `.claude-plugin/marketplace.json` points at the repository root (`source: "."`) and lists only its own `skills/<skill-name>/` directory, so the plugins read the same directories that `gh skill install` fetches. Both paths share one physical source with no symlinks and no duplicated files.
+
+| Plugin | Install | Also installs | Description |
+| :--- | :--- | :--- | :--- |
+| `handlename-commit-it` | `/plugin install handlename-commit-it@handlename` |  | Commit changes following the Conventional Commits specification, verifying test passage first. Supports both git and Jujutsu (jj) repositories. |
+| `handlename-create-pr` | `/plugin install handlename-create-pr@handlename` | `handlename-draw-mermaid`, `handlename-mermaid-to-svg`, `handlename-github-attachment-upload` | Create a Pull Request from the current branch to a base branch, using GitHub CLI to generate a suitable title and description from the commit history. |
+| `handlename-draw-mermaid` | `/plugin install handlename-draw-mermaid@handlename` |  | Draw a mermaid diagram from a natural-language intent and return a syntax-validated mermaid source, checked with `mermaid.parse()` against a vendored, version-pinned mermaid.js via playwright-cli. Designed to be called from other skills through a subagent. |
+| `handlename-github-attachment-upload` | `/plugin install handlename-github-attachment-upload@handlename` |  | Attach a local file to an existing GitHub issue/PR via the GitHub CLI (`gh --attach`, gh 2.99.0+), returning the `user-attachments` URL and embed location. File-type agnostic; the target issue/PR is supplied by the caller (comment or body-edit mode), and no throwaway issue is created. Designed to be called from other skills through a subagent. |
+| `handlename-github-resource-access` | `/plugin install handlename-github-resource-access@handlename` |  | Rules for accessing GitHub resources with the `gh` CLI: reads are free, writes require an explicit instruction. |
+| `handlename-go1.27-changes` | `/plugin install handlename-go1.27-changes@handlename` |  | Reference for Go 1.27's developer-facing changes (language, standard library, `go` command) with gotchas foregrounded, for writing or reviewing Go code without falling back on pre-1.27 training-data assumptions. |
+| `handlename-hwwwn` | `/plugin install handlename-hwwwn@handlename` |  | Passive reference for what information belongs where and how to phrase code comments: HWWWN routes How to code, What to test code, Why to the commit log, and Why not to code comments (after t_wada), then gives concrete comment rules — minimal, line breaks only at sentence boundaries, and no comment that restates what the code shows. Language/project conventions take precedence. |
+| `handlename-maint-glossary` | `/plugin install handlename-maint-glossary@handlename` |  | Create and maintain a glossary of domain terms from a requirements document, spec, or codebase — extracting, categorizing, and defining terms for a fresh glossary, and diffing the source to add/revise/deprecate entries when maintaining an existing one. |
+| `handlename-mermaid-to-svg` | `/plugin install handlename-mermaid-to-svg@handlename` |  | Turn a mermaid diagram into a hand-drawn free-layout SVG image file and return its path. Pure and offline (no mermaid-cli, no browser, no upload). Designed to be called from other skills through a subagent, then paired with `github-attachment-upload`. |
+| `handlename-multirepo` | `/plugin install handlename-multirepo@handlename` |  | Investigate or edit multiple already-cloned local git repositories in parallel via one `multirepo-worker` sub-agent per repo. The main session only orchestrates; worktrees are created for edits, and commits/PRs are left to other skills. |
+| `handlename-persona-mimic-trainer` | `/plugin install handlename-persona-mimic-trainer@handlename` |  | Train and iteratively refine a custom sub-agent that mimics a specific person's decision-making criteria, cognitive biases, and communication style for mock wall-hitting (pre-communication verification). |
+| `handlename-plan-to-issue` | `/plugin install handlename-plan-to-issue@handlename` | `handlename-draw-mermaid`, `handlename-mermaid-to-svg`, `handlename-github-attachment-upload`, `handlename-github-resource-access` | Turn a finalized implementation plan or design into a GitHub tracking issue (overview + PR-granularity checklist plus a self-contained plan issue artifact), or post it as a plan artifact on an existing related issue. |
+| `handlename-runbook-execution-support` | `/plugin install handlename-runbook-execution-support@handlename` |  | Support a human operator through a runbook in a GitHub issue comment: step presentation, pre-checks, verification, Slack progress posts, and checklist updates. |
+| `handlename-session-supervisor` | `/plugin install handlename-session-supervisor@handlename` |  | Run a supervisor session in a Herdr terminal that starts (`hc run`), tracks, and verifies worker sessions (git worktree, or one per non-git directory), keeps a verified worker for follow-ups until the user confirms its task complete or cancels it and then archives it, keeps a compaction-proof `state.json`, delegates edits and pushes to workers and observation to subagents, and keeps one Obsidian note per task, where the user answers workers' questions, with a kanban dashboard note. |
+| `handlename-setup-tagpr` | `/plugin install handlename-setup-tagpr@handlename` |  | Set up tagpr for automated release management: creates and updates release pull requests for unreleased items, tags them on merge, and creates GitHub Releases. Supports goreleaser (Go) and TypeScript/Node.js projects. |
+
+### Migrating from the `handlename` bundle plugin
+
+Up to version 0.x, all skills were bundled into a single `handlename` plugin. It no longer exists. Uninstall it and install the plugins you want:
+
+```bash
+claude plugin uninstall handlename@handlename
+claude plugin marketplace update handlename
+claude plugin install handlename-commit-it@handlename
+```
+
+Skill names change from `handlename:<skill-name>` to `handlename-<skill-name>:<skill-name>`.
 
 ## Installation
 

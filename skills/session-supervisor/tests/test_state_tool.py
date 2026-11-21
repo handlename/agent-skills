@@ -5705,8 +5705,9 @@ class SetupVaultTest(unittest.TestCase):
 
     def test_vault_copies_carry_the_plugin_version_and_a_newer_one_is_kept(self):
         version = st.plugin_version()
-        self.assertEqual(version, tuple(int(n) for n in json.loads(
-            (SKILL.parent.parent / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"].split(".")))
+        entry = next(p for p in json.loads((SKILL.parent.parent / ".claude-plugin" / "marketplace.json").read_text(
+            encoding="utf-8"))["plugins"] if p["name"] == "handlename-session-supervisor")
+        self.assertEqual(version, tuple(int(n) for n in entry["version"].split(".")))
         asset = (SKILL / "assets" / "sv-status.md").read_text(encoding="utf-8")
         stamped = st._stamped("sv-status.md", asset, version)
         self.assertTrue(stamped.startswith("<%*\n// session-supervisor-version: "))

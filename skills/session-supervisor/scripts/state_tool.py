@@ -4907,12 +4907,13 @@ VERSION_MARK_RE = re.compile(re.escape(VERSION_MARK) + r"(\d+)\.(\d+)\.(\d+)")
 
 
 def plugin_version():
-    """(major, minor, patch) of the plugin this skill belongs to (.claude-plugin/plugin.json), or None when the skill was
-    installed without it."""
+    """(major, minor, patch) of the plugin this skill belongs to (its entry in .claude-plugin/marketplace.json), or None
+    when the skill was installed without it."""
     try:
-        version = json.loads((HERE.parents[2] / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
+        plugins = json.loads((HERE.parents[2] / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))["plugins"]
+        version = next(p["version"] for p in plugins if f"./skills/{HERE.parent.name}" in p.get("skills", ()))
         return tuple(int(n) for n in version.split("."))
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError, StopIteration):
         return None
 
 
